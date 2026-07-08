@@ -290,7 +290,10 @@ async fn messages_with_parts_scoped_to_session() {
     assert_eq!(with_parts[0].parts.len(), 1);
     assert_eq!(with_parts[0].parts[0].id, "prt_001");
     assert_eq!(with_parts[1].info.id, "msg_002");
-    assert!(with_parts[1].parts.is_empty(), "part-less message hydrates empty");
+    assert!(
+        with_parts[1].parts.is_empty(),
+        "part-less message hydrates empty"
+    );
 }
 
 #[tokio::test]

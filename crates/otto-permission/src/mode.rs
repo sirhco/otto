@@ -1,7 +1,7 @@
 //! The per-session permission mode and its serde/cycle helpers.
 
-use serde::{Deserialize, Serialize};
 use crate::ruleset::{Action, Rule, Ruleset};
+use serde::{Deserialize, Serialize};
 
 /// How aggressively tool calls are auto-approved for a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -55,9 +55,18 @@ mod tests {
 
     #[test]
     fn cycles_in_order_and_wraps() {
-        assert_eq!(PermissionMode::ApproveEach.cycle(), PermissionMode::AcceptEdits);
-        assert_eq!(PermissionMode::AcceptEdits.cycle(), PermissionMode::FullAuto);
-        assert_eq!(PermissionMode::FullAuto.cycle(), PermissionMode::ApproveEach);
+        assert_eq!(
+            PermissionMode::ApproveEach.cycle(),
+            PermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            PermissionMode::AcceptEdits.cycle(),
+            PermissionMode::FullAuto
+        );
+        assert_eq!(
+            PermissionMode::FullAuto.cycle(),
+            PermissionMode::ApproveEach
+        );
     }
 
     #[test]
@@ -87,7 +96,11 @@ mod tests {
 }
 
 fn rule(permission: &str, pattern: &str, action: Action) -> Rule {
-    Rule { permission: permission.into(), pattern: pattern.into(), action }
+    Rule {
+        permission: permission.into(),
+        pattern: pattern.into(),
+        action,
+    }
 }
 
 /// The baseline ruleset a mode installs as the lowest-precedence layer.
@@ -111,14 +124,27 @@ pub fn mode_overlay(mode: PermissionMode) -> Ruleset {
 #[must_use]
 pub fn danger_ruleset() -> Ruleset {
     let bash = [
-        "*rm -rf*", "*rm -fr*",
-        "*git push*--force*", "*git push*-f*",
-        "*mkfs*", "*dd *of=/dev*", "*> /dev/sd*",
-        "*chmod *777*", "*chmod -R *777*",
-        "*curl*|*sh*", "*wget*|*sh*",
+        "*rm -rf*",
+        "*rm -fr*",
+        "*git push*--force*",
+        "*git push*-f*",
+        "*mkfs*",
+        "*dd *of=/dev*",
+        "*> /dev/sd*",
+        "*chmod *777*",
+        "*chmod -R *777*",
+        "*curl*|*sh*",
+        "*wget*|*sh*",
         "*sudo *",
     ];
-    let files = ["*.env", "**/.env", "*id_rsa*", "**/.ssh/*", "*credentials*", "*.pem"];
+    let files = [
+        "*.env",
+        "**/.env",
+        "*id_rsa*",
+        "**/.ssh/*",
+        "*credentials*",
+        "*.pem",
+    ];
     let mut rules = Vec::new();
     for p in bash {
         rules.push(rule("bash", p, Action::Ask));
@@ -144,16 +170,25 @@ mod overlay_tests {
         let danger = danger_ruleset();
         let layers: [&Ruleset; 2] = [&overlay, &danger];
         // normal command: overlay allow, no danger match → Allow
-        assert_eq!(evaluate(&layers, "bash", "cargo test").action, Action::Allow);
+        assert_eq!(
+            evaluate(&layers, "bash", "cargo test").action,
+            Action::Allow
+        );
         // dangerous command: danger (last) wins → Ask
-        assert_eq!(evaluate(&layers, "bash", "rm -rf build/").action, Action::Ask);
+        assert_eq!(
+            evaluate(&layers, "bash", "rm -rf build/").action,
+            Action::Ask
+        );
     }
 
     #[test]
     fn accept_edits_allows_edits_asks_bash() {
         let overlay = mode_overlay(PermissionMode::AcceptEdits);
         let layers: [&Ruleset; 1] = [&overlay];
-        assert_eq!(evaluate(&layers, "edit", "src/main.rs").action, Action::Allow);
+        assert_eq!(
+            evaluate(&layers, "edit", "src/main.rs").action,
+            Action::Allow
+        );
         assert_eq!(evaluate(&layers, "write", "a.txt").action, Action::Allow);
         assert_eq!(evaluate(&layers, "bash", "ls").action, Action::Ask);
     }
@@ -174,8 +209,14 @@ mod overlay_tests {
         let approved = Ruleset::new();
         let danger = danger_ruleset();
         let layers: [&Ruleset; 4] = [&overlay, &config, &approved, &danger];
-        assert_eq!(evaluate(&layers, "bash", "git push origin").action, Action::Deny);
+        assert_eq!(
+            evaluate(&layers, "bash", "git push origin").action,
+            Action::Deny
+        );
         // non-denied normal command still auto-allows
-        assert_eq!(evaluate(&layers, "bash", "cargo build").action, Action::Allow);
+        assert_eq!(
+            evaluate(&layers, "bash", "cargo build").action,
+            Action::Allow
+        );
     }
 }

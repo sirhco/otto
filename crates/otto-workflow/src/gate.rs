@@ -3,7 +3,7 @@
 //! both stop the step with a `WfError::Gate` — there is no interactive prompt
 //! to satisfy an `Ask`.
 
-use otto_permission::{evaluate, Action, Ruleset};
+use otto_permission::{Action, Ruleset, evaluate};
 
 use crate::error::WfError;
 

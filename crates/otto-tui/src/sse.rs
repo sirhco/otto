@@ -26,7 +26,10 @@ pub enum ServerEvent {
     /// `session_id` is decoded but not currently used to filter (mirrors
     /// `PermissionAsked`'s MVP: the `/event` bus is global and single-session
     /// use is the common case).
-    PermissionModeChanged { session_id: String, mode: String },
+    PermissionModeChanged {
+        session_id: String,
+        mode: String,
+    },
     Workflow(WorkflowMsg),
     Subagent(SubagentMsg),
     Other,

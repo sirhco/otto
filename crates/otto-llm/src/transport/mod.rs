@@ -272,11 +272,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn watchdog_passes_frames_through_unchanged() {
-        let frames = futures::stream::iter(vec![
-            Ok::<String, LLMError>("a".into()),
-            Ok("b".into()),
-        ])
-        .boxed();
+        let frames =
+            futures::stream::iter(vec![Ok::<String, LLMError>("a".into()), Ok("b".into())]).boxed();
         let wrapped = with_frame_watchdog(frames, std::time::Duration::from_secs(5));
         let items: Vec<String> = wrapped.map(|r| r.expect("ok frame")).collect().await;
         assert_eq!(items, vec!["a".to_string(), "b".to_string()]);

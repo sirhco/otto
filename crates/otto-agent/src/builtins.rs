@@ -12,8 +12,8 @@
 //!
 //! Prompt text is embedded from `assets/` via `include_str!`.
 
-use otto_permission::{merge, Ruleset};
-use serde_json::{json, Value};
+use otto_permission::{Ruleset, merge};
+use serde_json::{Value, json};
 
 use crate::agent::{AgentInfo, AgentMode};
 
@@ -256,7 +256,7 @@ pub fn builtins() -> Vec<AgentInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use otto_permission::{evaluate, Action, Ruleset};
+    use otto_permission::{Action, Ruleset, evaluate};
 
     fn eval(rs: &Ruleset, permission: &str, pattern: &str) -> Action {
         evaluate(&[rs], permission, pattern).action

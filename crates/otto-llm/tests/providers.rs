@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
+use otto_llm::Secret;
 use otto_llm::auth::AuthDef;
 use otto_llm::providers::{Anthropic, Azure, Google, OpenAI, OpenAICompatible, Provider};
 use otto_llm::transport::HttpTransport;
-use otto_llm::Secret;
 
 fn transport() -> Arc<HttpTransport> {
     Arc::new(HttpTransport::new())
@@ -154,9 +154,11 @@ fn xai_profile_uses_x_ai_base_url_and_bearer_auth() {
         endpoint.url(),
         "https://api.x.ai/v1/chat/completions".to_string()
     );
-    assert!(endpoint
-        .url()
-        .starts_with("https://api.x.ai/v1/chat/completions"));
+    assert!(
+        endpoint
+            .url()
+            .starts_with("https://api.x.ai/v1/chat/completions")
+    );
 
     let mut headers = std::collections::BTreeMap::new();
     provider.auth().apply(&mut headers).expect("apply auth");

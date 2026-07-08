@@ -58,7 +58,7 @@ pub fn derive_subagent_permission(parent: &Ruleset, subagent: &AgentInfo) -> Rul
 mod tests {
     use super::*;
     use crate::builtins::general;
-    use otto_permission::{evaluate, Action};
+    use otto_permission::{Action, evaluate};
     use serde_json::json;
 
     fn contains(rs: &Ruleset, permission: &str, action: Action) -> bool {
@@ -135,9 +135,11 @@ mod tests {
         // parent allow dropped
         assert!(!derived.rules().iter().any(|r| r.permission == "edit"));
         // external_directory inherited regardless of action
-        assert!(derived
-            .rules()
-            .iter()
-            .any(|r| r.permission == "external_directory" && r.pattern == "/etc/*"));
+        assert!(
+            derived
+                .rules()
+                .iter()
+                .any(|r| r.permission == "external_directory" && r.pattern == "/etc/*")
+        );
     }
 }

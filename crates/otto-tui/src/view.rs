@@ -1,14 +1,14 @@
 //! Pure rendering: `view(&App, &mut Frame)`.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::state::{
-    file_matches, palette_matches, App, FilePickerState, LineCache, Overlay, PaletteState,
-    SearchState, TextInputState, TodoStatus, TranscriptItem, COMMANDS,
+    App, COMMANDS, FilePickerState, LineCache, Overlay, PaletteState, SearchState, TextInputState,
+    TodoStatus, TranscriptItem, file_matches, palette_matches,
 };
 
 /// Floor below which the layout is squeezed unusably tight — render a plain
@@ -392,7 +392,9 @@ fn render_item(item: &TranscriptItem, t: &crate::theme::Theme) -> Vec<Line<'stat
             input,
             output,
             expanded,
-        } => crate::render::tool::render_tool(name, status, title, input, output, *expanded, false, t),
+        } => crate::render::tool::render_tool(
+            name, status, title, input, output, *expanded, false, t,
+        ),
     }
 }
 
@@ -433,11 +435,7 @@ fn item_fingerprint(item: &TranscriptItem) -> u64 {
 /// and wrap count via `Arc`, so a streaming delta re-renders only the open
 /// item instead of re-parsing the whole transcript — O(open item) per delta,
 /// not O(history).
-fn rebuild_line_cache(
-    app: &App,
-    width: u16,
-    prev: Option<&LineCache>,
-) -> LineCache {
+fn rebuild_line_cache(app: &App, width: u16, prev: Option<&LineCache>) -> LineCache {
     // A width change invalidates the per-item wrap counts, so only reuse
     // entries built at the same width.
     let prev_items: &[crate::state::ItemCacheEntry] = match prev {
@@ -1111,7 +1109,7 @@ mod tests {
     use super::*;
     use crate::sse::PermissionAsked;
     use crate::state::{App, Overlay, TodoItem, TodoStatus, ToolStatus, TranscriptItem};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn render(app: &App) -> String {
         // Wide enough that a long right-aligned header status (e.g. the
@@ -1258,12 +1256,10 @@ mod tests {
             .push(TranscriptItem::Assistant("streaming".into()));
         app.bump_render_for_test();
         let _ = render(&app); // fills the cache
-        let stable_before = std::sync::Arc::clone(
-            &app.line_cache.borrow().as_ref().unwrap().items[0].lines,
-        );
-        let open_before = std::sync::Arc::clone(
-            &app.line_cache.borrow().as_ref().unwrap().items[1].lines,
-        );
+        let stable_before =
+            std::sync::Arc::clone(&app.line_cache.borrow().as_ref().unwrap().items[0].lines);
+        let open_before =
+            std::sync::Arc::clone(&app.line_cache.borrow().as_ref().unwrap().items[1].lines);
 
         // A delta lands on the open (second) item only.
         if let Some(TranscriptItem::Assistant(s)) = app.transcript.get_mut(1) {
@@ -1418,7 +1414,12 @@ mod tests {
             // Locate the "mode:" label on the header row by cell (byte offsets
             // don't map to cells — the meta contains multibyte `·` separators).
             let start = (0..syms.len()).find(|&i| {
-                syms[i..].iter().take(5).map(String::as_str).collect::<String>() == "mode:"
+                syms[i..]
+                    .iter()
+                    .take(5)
+                    .map(String::as_str)
+                    .collect::<String>()
+                    == "mode:"
             })?;
             buf[(start as u16, 0)].style().fg
         }
@@ -2032,18 +2033,24 @@ mod tests {
         // The two matched fragments carry the current-match token
         // (`selection`, REVERSED); the gap keeps the base (unstyled) style.
         use ratatui::style::Modifier;
-        assert!(lines[0].spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
-        assert!(!lines[0].spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
-        assert!(lines[0].spans[2]
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(
+            lines[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            !lines[0].spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            lines[0].spans[2]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 
     #[test]
@@ -2055,10 +2062,12 @@ mod tests {
         // Original casing preserved in the split fragment, matched regardless.
         assert_eq!(parts, vec!["Foo"]);
         use ratatui::style::Modifier;
-        assert!(lines[0].spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
+        assert!(
+            lines[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 
     #[test]
@@ -2183,7 +2192,7 @@ mod tests {
         wide.session_id = Some("字".into()); // 1 char, 2 columns
         wide.status = "ready".into();
         let text = render(&wide); // 100x20
-                                  // The status dot must be present (not clipped) on the header row.
+        // The status dot must be present (not clipped) on the header row.
         let header_row: String = text.chars().take(100).collect();
         assert!(header_row.contains('●'), "dot present: {header_row:?}");
     }
@@ -2210,7 +2219,7 @@ mod tests {
     #[test]
     fn palette_overlay_shows_key_hints() {
         use crate::state::PaletteState;
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let theme = crate::theme::Theme::dark();
         let ps = PaletteState {
             query: String::new(),
@@ -2231,7 +2240,7 @@ mod tests {
 
     #[test]
     fn header_shows_flash_when_idle() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let mut app = crate::state::App::new();
         app.status = "ready".into();
         app.flash("copied");
@@ -2252,7 +2261,7 @@ mod tests {
 
     #[test]
     fn header_busy_suppresses_flash() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let mut app = crate::state::App::new();
         app.status = "…thinking".into(); // is_busy() == true
         app.flash("copied");
@@ -2271,7 +2280,7 @@ mod tests {
 
     #[test]
     fn input_sets_cursor_when_focused() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let mut app = crate::state::App::new();
         app.input.insert('h');
         app.input.insert('i');
@@ -2285,7 +2294,7 @@ mod tests {
 
     #[test]
     fn input_cursor_clamps_to_content_row_after_newline() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let mut app = crate::state::App::new();
         app.input.insert('a');
         app.input.newline(); // editor row = 1, but the box has one content row
@@ -2301,7 +2310,7 @@ mod tests {
 
     #[test]
     fn input_box_grows_for_two_lines() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let mut app = App::new();
         app.input.insert('a');
         app.input.newline();
@@ -2367,7 +2376,7 @@ mod tests {
 
     #[test]
     fn activity_line_shows_running_tool() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let mut app = crate::state::App::new();
         app.status = "…thinking".into(); // busy
         app.transcript.push(crate::state::TranscriptItem::Tool {
@@ -2397,7 +2406,7 @@ mod tests {
 
     #[test]
     fn activity_line_falls_back_to_playful_word() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let mut app = crate::state::App::new();
         app.status = "…thinking".into(); // busy, no running tool
         let mut term = Terminal::new(TestBackend::new(40, 1)).unwrap();
@@ -2423,7 +2432,7 @@ mod tests {
 
     #[test]
     fn activity_line_word_rotates_over_time() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let render_at = |ticks: u32| -> String {
             let mut app = crate::state::App::new();
             app.status = "…thinking".into();
@@ -2464,7 +2473,7 @@ mod tests {
     #[test]
     fn selected_tool_row_gets_accent_bar_in_transcript() {
         use ratatui::style::Color;
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let mut app = crate::state::App::new();
         app.transcript.push(crate::state::TranscriptItem::Tool {
             name: "read".into(),

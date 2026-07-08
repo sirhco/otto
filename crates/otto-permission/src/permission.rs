@@ -136,7 +136,11 @@ impl Permission {
     #[must_use]
     pub fn mode(&self, session_id: &str) -> PermissionMode {
         let inner = self.inner.lock().expect("permission mutex poisoned");
-        inner.modes.get(session_id).copied().unwrap_or(self.default_mode)
+        inner
+            .modes
+            .get(session_id)
+            .copied()
+            .unwrap_or(self.default_mode)
     }
 
     /// Set the mode for `session_id` (live; affects subsequent `ask` calls).
@@ -172,7 +176,11 @@ impl Permission {
             let mut inner = self.inner.lock().expect("permission mutex poisoned");
             let session_approved =
                 Ruleset(inner.approved.get(&session_id).cloned().unwrap_or_default());
-            let mode = inner.modes.get(&session_id).copied().unwrap_or(self.default_mode);
+            let mode = inner
+                .modes
+                .get(&session_id)
+                .copied()
+                .unwrap_or(self.default_mode);
             let overlay = mode_overlay(mode);
             let danger = danger_ruleset();
 
@@ -352,7 +360,9 @@ mod tests {
             metadata: serde_json::json!({}),
         };
         // Auto-allowed: returns Ok without any reply being sent.
-        perm.ask("ses_1", req).await.expect("full-auto allows normal command");
+        perm.ask("ses_1", req)
+            .await
+            .expect("full-auto allows normal command");
     }
 
     #[tokio::test]
@@ -369,7 +379,10 @@ mod tests {
         let perm2 = std::sync::Arc::new(perm);
         let p = perm2.clone();
         let h = tokio::spawn(async move { p.ask("ses_1", req).await });
-        let asked = rx.recv().await.expect("danger op should emit an Asked event");
+        let asked = rx
+            .recv()
+            .await
+            .expect("danger op should emit an Asked event");
         perm2.reply(&asked.request_id, Reply::Once);
         h.await.unwrap().expect("approved once");
     }

@@ -166,7 +166,10 @@ fn now_ms() -> i64 {
 /// consumer. Events are forwarded to `tx` only after they are queued for the
 /// consumer, so the tap can never run ahead of what the processor will see.
 pub fn tap_events(
-    mut stream: futures::stream::BoxStream<'static, Result<otto_events::LLMEvent, otto_llm::LLMError>>,
+    mut stream: futures::stream::BoxStream<
+        'static,
+        Result<otto_events::LLMEvent, otto_llm::LLMError>,
+    >,
     tx: tokio::sync::mpsc::UnboundedSender<otto_events::LLMEvent>,
 ) -> futures::stream::BoxStream<'static, Result<otto_events::LLMEvent, otto_llm::LLMError>> {
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();

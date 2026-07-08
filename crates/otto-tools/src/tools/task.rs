@@ -195,9 +195,7 @@ mod tests {
                 tx.send(otto_events::LLMEvent::ToolResult {
                     id: "child_call".into(),
                     name: "read".into(),
-                    result: otto_events::ToolResultValue::Text {
-                        value: json!("ok"),
-                    },
+                    result: otto_events::ToolResultValue::Text { value: json!("ok") },
                     output: None,
                     provider_executed: None,
                     provider_metadata: None,

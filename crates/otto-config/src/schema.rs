@@ -406,7 +406,8 @@ mod tests {
     #[test]
     fn parses_tersemode_enabled_and_level() {
         let cfg: Config =
-            serde_json::from_str(r#"{ "tersemode": { "enabled": true, "level": "ultra" } }"#).unwrap();
+            serde_json::from_str(r#"{ "tersemode": { "enabled": true, "level": "ultra" } }"#)
+                .unwrap();
         let c = cfg.tersemode.unwrap();
         assert!(c.enabled);
         assert_eq!(c.level, TersemodeLevel::Ultra);

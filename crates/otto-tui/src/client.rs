@@ -81,9 +81,7 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 /// [`otto_llm::transport::parse_idle_secs`] so a hung local server or a hung
 /// upstream provider are both bounded the same way.
 fn idle_timeout_secs() -> u64 {
-    otto_llm::transport::parse_idle_secs(
-        std::env::var(otto_llm::transport::IDLE_TIMEOUT_ENV).ok(),
-    )
+    otto_llm::transport::parse_idle_secs(std::env::var(otto_llm::transport::IDLE_TIMEOUT_ENV).ok())
 }
 
 impl Client {

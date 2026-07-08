@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use otto_config::{discover, load_with, merge, parse, Config, EnvOverrides, LogLevel, Share};
+use otto_config::{Config, EnvOverrides, LogLevel, Share, discover, load_with, merge, parse};
 use serde_json::json;
 use tempfile::tempdir;
 

@@ -50,9 +50,9 @@ pub use request::{
     HttpOptions, LLMRequest, MessagesPolicy, MessagesPolicyNamed, ProviderOptions,
 };
 pub use response::LLMResponse;
-pub use route::{run_stream, Endpoint, GenericRoute, Route};
+pub use route::{Endpoint, GenericRoute, Route, run_stream};
 pub use transport::bedrock::BedrockTransport;
-pub use transport::{sse, HttpTransport, PreparedHttp, Transport};
+pub use transport::{HttpTransport, PreparedHttp, Transport, sse};
 
 /// The shared lifecycle state machine ([`protocols::utils::lifecycle`]).
 pub use protocols::utils::lifecycle;

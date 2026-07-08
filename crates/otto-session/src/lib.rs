@@ -18,12 +18,12 @@ pub mod subagent;
 pub mod system;
 mod warm;
 
-pub use compaction::{select, CompactionError, SelectResult};
-pub use convert::{to_model_messages, ConvertOptions};
+pub use compaction::{CompactionError, SelectResult, select};
+pub use convert::{ConvertOptions, to_model_messages};
 pub use overflow::is_overflow;
 pub use processor::{ProcessOutcome, Processor, ProcessorError};
 pub use retry::{retryable, with_retry};
-pub use run::{run_loop, tap_events, RunConfig, RunError};
+pub use run::{RunConfig, RunError, run_loop, tap_events};
 pub use run_state::RunnerRegistry;
 pub use runtime::augment_with_tools;
 pub use subagent::{RouteFor, SessionSubagentSpawner};

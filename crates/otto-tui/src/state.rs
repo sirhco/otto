@@ -348,10 +348,7 @@ pub struct App {
 /// `(input, output)` token counts from a [`otto_events::Usage`], zeroing
 /// absent fields — the shape accumulated into `App::session_tokens`.
 fn usage_in_out(u: &otto_events::Usage) -> (u64, u64) {
-    (
-        u.input_tokens.unwrap_or(0),
-        u.output_tokens.unwrap_or(0),
-    )
+    (u.input_tokens.unwrap_or(0), u.output_tokens.unwrap_or(0))
 }
 
 /// Human token count: `812` below 1k, `12.3k` above.

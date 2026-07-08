@@ -51,7 +51,7 @@ use std::collections::{HashMap, HashSet};
 
 use otto_events::{FinishReason, Json, LLMEvent, ProviderFailureClassification, Usage};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::LLMError;
 use crate::message::{ContentPart, Role, ToolChoice, ToolDefinition};
@@ -1460,10 +1460,12 @@ mod tests {
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
-        assert!(content[1]["text"]
-            .as_str()
-            .unwrap()
-            .contains("session refreshed"));
+        assert!(
+            content[1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("session refreshed")
+        );
     }
 
     #[test]
@@ -1729,9 +1731,11 @@ mod tests {
     fn exception_events_map_to_provider_error() {
         let throttled = run(&[r#"{"throttlingException":{"message":"slow down"}}"#]);
         match throttled.as_slice() {
-            [LLMEvent::ProviderError {
-                message, retryable, ..
-            }] => {
+            [
+                LLMEvent::ProviderError {
+                    message, retryable, ..
+                },
+            ] => {
                 assert_eq!(message, "slow down");
                 assert_eq!(*retryable, Some(true));
             }
@@ -1741,11 +1745,13 @@ mod tests {
         let validation =
             run(&[r#"{"validationException":{"message":"prompt is too long: 250000 tokens"}}"#]);
         match validation.as_slice() {
-            [LLMEvent::ProviderError {
-                classification,
-                retryable,
-                ..
-            }] => {
+            [
+                LLMEvent::ProviderError {
+                    classification,
+                    retryable,
+                    ..
+                },
+            ] => {
                 assert_eq!(
                     *classification,
                     Some(ProviderFailureClassification::ContextOverflow)
