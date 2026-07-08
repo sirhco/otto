@@ -419,6 +419,18 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         });
         return;
     }
+    if let Msg::InterruptTurn(session) = &msg {
+        let session = session.clone();
+        let client = client.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.cancel_run(&session).await {
+                let _ = tx.send(Msg::Error(format!("interrupt failed: {e}")));
+            }
+            // The abort settles the run; the stream closes and busy clears.
+        });
+        return;
+    }
     app.update(msg);
 }
 
