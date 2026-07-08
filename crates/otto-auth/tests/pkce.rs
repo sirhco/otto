@@ -1,9 +1,9 @@
 //! PKCE: verifier length/charset; challenge == base64url(sha256(verifier));
 //! deterministic given a fixed verifier.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use otto_auth::{challenge_for, Pkce};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use otto_auth::{Pkce, challenge_for};
 use sha2::{Digest, Sha256};
 
 fn is_base64url(s: &str) -> bool {

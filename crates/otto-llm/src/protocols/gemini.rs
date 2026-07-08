@@ -16,7 +16,7 @@
 
 use otto_events::{FinishReason, Json, LLMEvent, Usage};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::LLMError;
 use crate::message::{ContentPart, Role, ToolChoice, ToolDefinition};
@@ -1096,10 +1096,12 @@ mod tests {
         assert_eq!(body["contents"].as_array().unwrap().len(), 1);
         let parts = body["contents"][0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
-        assert!(parts[1]["text"]
-            .as_str()
-            .unwrap()
-            .contains("session refreshed"));
+        assert!(
+            parts[1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("session refreshed")
+        );
     }
 
     #[test]

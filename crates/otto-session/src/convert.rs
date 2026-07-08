@@ -11,7 +11,7 @@ use otto_events::ToolResultValue;
 use otto_llm::message::{ContentPart, Message};
 use otto_llm::model::{ModelId, ProviderId};
 use otto_storage::model::{InfoBody, Part, PartKind, ToolState, WithParts};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Options controlling the conversion (`message-v2.ts:134`).
 #[derive(Debug, Clone, Default)]

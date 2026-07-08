@@ -571,7 +571,11 @@ mod tests {
         assert_eq!(event_reconnect_delay(2), Duration::from_secs(2));
         assert_eq!(event_reconnect_delay(3), Duration::from_secs(4));
         assert_eq!(event_reconnect_delay(5), Duration::from_secs(15), "capped");
-        assert_eq!(event_reconnect_delay(50), Duration::from_secs(15), "still capped");
+        assert_eq!(
+            event_reconnect_delay(50),
+            Duration::from_secs(15),
+            "still capped"
+        );
     }
 
     #[test]

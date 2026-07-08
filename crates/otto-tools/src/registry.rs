@@ -345,10 +345,10 @@ mod tests {
             mut args: Value,
             _ctx: &ToolContext,
         ) -> crate::hook::HookOutcome {
-            if tool_id == "bash" {
-                if let Some(cmd) = args["command"].as_str() {
-                    args["command"] = Value::String(format!("wrapped {cmd}"));
-                }
+            if tool_id == "bash"
+                && let Some(cmd) = args["command"].as_str()
+            {
+                args["command"] = Value::String(format!("wrapped {cmd}"));
             }
             crate::hook::HookOutcome::Continue(args)
         }
@@ -374,7 +374,11 @@ mod tests {
         r.register(Arc::new(EchoCommand));
         r.register_hook(Arc::new(PrefixHook));
         let res = r
-            .execute("bash", serde_json::json!({ "command": "git status" }), &ctx())
+            .execute(
+                "bash",
+                serde_json::json!({ "command": "git status" }),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert_eq!(res.output, "wrapped git status");
@@ -386,7 +390,11 @@ mod tests {
         r.register(Arc::new(EchoCommand));
         r.register_hook(Arc::new(DenyHook));
         let err = r
-            .execute("bash", serde_json::json!({ "command": "git status" }), &ctx())
+            .execute(
+                "bash",
+                serde_json::json!({ "command": "git status" }),
+                &ctx(),
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("blocked by policy"));

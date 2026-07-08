@@ -134,9 +134,15 @@ mod tests {
     #[tokio::test]
     async fn leaves_compound_command_raw() {
         let hook = RtkHook::with_active(true);
-        assert_eq!(run(&hook, "bash", "git status && npm test").await, "git status && npm test");
+        assert_eq!(
+            run(&hook, "bash", "git status && npm test").await,
+            "git status && npm test"
+        );
         assert_eq!(run(&hook, "bash", "cat a | grep b").await, "cat a | grep b");
-        assert_eq!(run(&hook, "bash", "echo hi > out.txt").await, "echo hi > out.txt");
+        assert_eq!(
+            run(&hook, "bash", "echo hi > out.txt").await,
+            "echo hi > out.txt"
+        );
     }
 
     #[tokio::test]

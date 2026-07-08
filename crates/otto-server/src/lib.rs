@@ -605,14 +605,10 @@ async fn session_prompt(
     let abort = CancellationToken::new();
     let run_generation = state.runs.insert(&id, abort.clone());
 
-    let RunHandle { mut events, join } = state.runtime.run_with_parts(
-        &id,
-        prompt,
-        extra_parts,
-        &agent,
-        &model,
-        abort,
-    );
+    let RunHandle { mut events, join } =
+        state
+            .runtime
+            .run_with_parts(&id, prompt, extra_parts, &agent, &model, abort);
 
     let bus = state.events.clone();
     let runs = state.runs.clone();
@@ -984,9 +980,7 @@ async fn workflow_run(
     let cx = otto_workflow::WfCtx {
         spawner,
         worktree,
-        runner: Arc::new(otto_workflow::AutoRunner::new(
-            rt.directory().to_path_buf(),
-        )),
+        runner: Arc::new(otto_workflow::AutoRunner::new(rt.directory().to_path_buf())),
         store: rt.store().clone(),
         directory: rt.directory().to_path_buf(),
         parent_session_id: session_id.clone(),

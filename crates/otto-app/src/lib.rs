@@ -25,7 +25,7 @@ mod route_factory;
 mod runtime;
 mod title;
 
-pub use route_factory::{default_model, AuthRouteFactory, RouteFactory};
+pub use route_factory::{AuthRouteFactory, RouteFactory, default_model};
 pub use runtime::{RunHandle, Runtime};
 
 /// Result alias for fallible runtime-assembly operations.

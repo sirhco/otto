@@ -1,7 +1,7 @@
 //! Config merge — port of the `for (const [key, value] of Object.entries(...))`
 //! loop that overlays `cfg.agent` onto the built-in defaults (agent.ts:267-294).
 
-use otto_permission::{merge, Ruleset};
+use otto_permission::{Ruleset, merge};
 use serde_json::Value;
 
 use crate::agent::{AgentInfo, AgentMode, ModelRef};
@@ -160,7 +160,7 @@ pub fn list(config_agents: &Value) -> Vec<AgentInfo> {
 mod tests {
     use super::*;
     use otto_llm::model::{ModelId, ProviderId};
-    use otto_permission::{evaluate, Action};
+    use otto_permission::{Action, evaluate};
     use serde_json::json;
 
     #[test]

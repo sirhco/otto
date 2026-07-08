@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use otto_agent::{AgentInfo, ModelRef, resolve_agents};
 use otto_auth::AuthStore;
-use otto_config::{TersemodeLevel, Config};
+use otto_config::{Config, TersemodeLevel};
 use otto_events::LLMEvent;
 use otto_llm::HttpTransport;
 use otto_mcp::{McpClient, McpServerConfig};
@@ -719,12 +719,10 @@ mod provider_override_tests {
 
     #[test]
     fn per_model_limits_map_into_overrides() {
-        let ov = provider_overrides(&cfg(
-            r#"{ "provider": { "ollama": {
+        let ov = provider_overrides(&cfg(r#"{ "provider": { "ollama": {
                 "options": { "baseURL": "http://localhost:11434/v1" },
                 "models": { "gemma4:26b-mlx": { "limits": { "context": 32768, "output": 8192 } } }
-            } } }"#,
-        ));
+            } } }"#));
         let l = &ov["ollama"].model_limits["gemma4:26b-mlx"];
         assert_eq!(l.context, Some(32_768));
         assert_eq!(l.output, Some(8192));
@@ -734,11 +732,9 @@ mod provider_override_tests {
     fn limits_only_entry_survives_without_base_url() {
         // Declaring limits for a KNOWN provider's model needs no baseURL; the
         // entry must not be dropped by the base-URL gate.
-        let ov = provider_overrides(&cfg(
-            r#"{ "provider": { "anthropic": {
+        let ov = provider_overrides(&cfg(r#"{ "provider": { "anthropic": {
                 "models": { "my-fine-tune": { "limits": { "context": 100000 } } }
-            } } }"#,
-        ));
+            } } }"#));
         assert_eq!(
             ov["anthropic"].model_limits["my-fine-tune"].context,
             Some(100_000)

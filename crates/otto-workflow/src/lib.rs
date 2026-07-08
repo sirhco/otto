@@ -17,17 +17,17 @@ mod sdd;
 mod tdd;
 mod verify;
 
-pub use classify::{classify_red, RedKind};
+pub use classify::{RedKind, classify_red};
 pub use ctx::{
-    emit, tap_subagent, ProgressSink, SubagentActivity, SubagentSink, WfCtx, WfProgress, Workflow,
+    ProgressSink, SubagentActivity, SubagentSink, WfCtx, WfProgress, Workflow, emit, tap_subagent,
 };
 pub use error::{GateFail, Step, TaskStatus, WfError};
 pub use gate::gate_destructive;
 pub use judge::judge;
 pub use ledger::{Ledger, TaskRecord};
 pub use plan::{PlanReport, PlanTaskResult, PlanWorkflow};
-pub use regression::{git_changed_files, regression_check, RegressionOutcome};
-pub use runner::{parse_failures, AutoRunner, TestOutcome, TestRunner};
-pub use sdd::{parse_plan_tasks, parse_status, PlanTask, SddReport, SddWorkflow, TaskResult};
+pub use regression::{RegressionOutcome, git_changed_files, regression_check};
+pub use runner::{AutoRunner, TestOutcome, TestRunner, parse_failures};
+pub use sdd::{PlanTask, SddReport, SddWorkflow, TaskResult, parse_plan_tasks, parse_status};
 pub use tdd::{TddPhase, TddReport, TddWorkflow};
-pub use verify::{command_for_claim, CheckResult, Claim, VerificationGate, VerifyReport};
+pub use verify::{CheckResult, Claim, VerificationGate, VerifyReport, command_for_claim};

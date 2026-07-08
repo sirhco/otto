@@ -4,12 +4,12 @@
 use otto_events::ToolResultValue;
 use otto_llm::message::{ContentPart, Message, Role};
 use otto_llm::model::{ModelId, ProviderId};
-use otto_session::{to_model_messages, ConvertOptions};
+use otto_session::{ConvertOptions, to_model_messages};
 use otto_storage::model::{
     Assistant, AssistantError, AssistantPath, AssistantTime, CompletedTime, Info, InfoBody, Part,
     PartKind, StartTime, TokenCache, Tokens, ToolState, User, UserModel, UserTime, WithParts,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // Builders

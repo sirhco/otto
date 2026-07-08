@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use crate::auth::{AuthDef, Secret};
 use crate::model::Model;
-use crate::protocols::anthropic_messages::{AnthropicMessages, ANTHROPIC_VERSION};
+use crate::protocols::anthropic_messages::{ANTHROPIC_VERSION, AnthropicMessages};
 use crate::protocols::copilot_cache::{BodyShape, CopilotCache};
 use crate::protocols::openai_chat::OpenAIChat;
-use crate::protocols::openai_responses::{should_use_responses, OpenAIResponses};
+use crate::protocols::openai_responses::{OpenAIResponses, should_use_responses};
 use crate::registry;
 use crate::route::{Endpoint, GenericRoute, Route};
 use crate::transport::Transport;
