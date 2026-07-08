@@ -220,13 +220,32 @@ fn header(app: &App, frame: &mut Frame, area: Rect) {
     // session/model segments contain multibyte characters.
     let (brand, meta) = left.split_at(" otto".len());
     let pad = width.saturating_sub(UnicodeWidthStr::width(left.as_str()) + right_w);
-    let line = Line::from(vec![
-        Span::styled(brand.to_string(), t.accent),
-        Span::styled(meta.to_string(), t.text_muted),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(right, dot_style),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    let mut spans = vec![Span::styled(brand.to_string(), t.accent)];
+    // Color the `mode:<mode>` segment distinctly (when it survived the width
+    // degradation) so the active permission mode is obvious — dim for the safe
+    // default, escalating to bold red for full-auto.
+    if let Some(idx) = meta.find("mode:") {
+        let (meta_pre, mode_seg) = meta.split_at(idx);
+        spans.push(Span::styled(meta_pre.to_string(), t.text_muted));
+        spans.push(Span::styled(mode_seg.to_string(), mode_style(t, mode)));
+    } else {
+        spans.push(Span::styled(meta.to_string(), t.text_muted));
+    }
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(right, dot_style));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Style for the header's `mode:<mode>` segment. Escalates with how much the
+/// mode auto-approves, so a full-auto session reads at a glance: dim for
+/// approve-each (safe default), yellow for accept-edits, bold red for full-auto.
+fn mode_style(t: &crate::theme::Theme, mode: &str) -> Style {
+    use ratatui::style::Modifier;
+    match mode {
+        "full-auto" => t.status_err.add_modifier(Modifier::BOLD),
+        "accept-edits" => t.status_warn,
+        _ => t.text_muted,
+    }
 }
 
 /// Render the transcript pane. Returns whether newer content exists below
@@ -1267,6 +1286,32 @@ mod tests {
         let mut err = App::new();
         err.status = "error: boom".into();
         assert_eq!(dot_fg(&err), Some(Color::Red));
+    }
+
+    /// The `mode:` segment is colored by mode so full-auto stands out.
+    #[test]
+    fn header_mode_colored_by_mode() {
+        use ratatui::style::Color;
+        fn mode_fg(mode: &str) -> Option<Color> {
+            let mut app = App::new();
+            app.permission_mode = mode.into();
+            let backend = TestBackend::new(120, 20);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| view(&app, f)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            let syms: Vec<String> = (0..buf.area.width)
+                .map(|x| buf[(x, 0)].symbol().to_string())
+                .collect();
+            // Locate the "mode:" label on the header row by cell (byte offsets
+            // don't map to cells — the meta contains multibyte `·` separators).
+            let start = (0..syms.len()).find(|&i| {
+                syms[i..].iter().take(5).map(String::as_str).collect::<String>() == "mode:"
+            })?;
+            buf[(start as u16, 0)].style().fg
+        }
+        // full-auto → red (auto-approve on), accept-edits → yellow.
+        assert_eq!(mode_fg("full-auto"), Some(Color::Red));
+        assert_eq!(mode_fg("accept-edits"), Some(Color::Yellow));
     }
 
     /// At a narrow width the status dot + word survive (meta degrades first).
