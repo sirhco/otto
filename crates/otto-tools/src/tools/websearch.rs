@@ -98,7 +98,7 @@ impl Tool for WebSearchTool {
 
         let Some(provider) = &self.provider else {
             return Err(ToolError::Execution(
-                "no web search provider is configured (set OPENCODE_WEBSEARCH_PROVIDER and the corresponding API key)".to_string(),
+                "no web search provider is configured (set OTTO_WEBSEARCH_PROVIDER and the corresponding API key)".to_string(),
             ));
         };
 

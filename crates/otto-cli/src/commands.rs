@@ -25,8 +25,8 @@ use crate::cli::{AuthCommand, ProvidersCommand};
 /// The server version reported to MCP servers on connect.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Fallback env var for the serve password (opencode compatibility).
-const OPENCODE_PASSWORD_ENV: &str = "OPENCODE_SERVER_PASSWORD";
+/// Fallback env var for the serve password.
+const OTTO_PASSWORD_ENV: &str = "OTTO_SERVER_PASSWORD";
 
 /// The known provider ids surfaced by `otto providers`/`otto auth`, drawn
 /// from the currently installed [`otto_llm::registry`] snapshot.
@@ -44,8 +44,7 @@ fn known_provider_ids() -> BTreeSet<String> {
 ///
 /// Loads the runtime, resolves the bind address (`hostname:port`, `port 0` for
 /// a random port), prints the URL, and hands off to [`otto_server::serve`].
-/// The password falls back from `--password`/`otto_SERVER_PASSWORD` to
-/// `OPENCODE_SERVER_PASSWORD` for opencode compatibility.
+/// The password falls back from `--password` to `OTTO_SERVER_PASSWORD`.
 ///
 /// # Errors
 /// Propagates runtime-load, address-resolution, and server failures.
@@ -64,7 +63,7 @@ pub async fn cmd_serve(
         .next()
         .ok_or_else(|| anyhow::anyhow!("no address resolved for {hostname}:{port}"))?;
 
-    let password = password.or_else(|| std::env::var(OPENCODE_PASSWORD_ENV).ok());
+    let password = password.or_else(|| std::env::var(OTTO_PASSWORD_ENV).ok());
 
     println!("otto server listening on http://{addr}");
     if password.is_some() {

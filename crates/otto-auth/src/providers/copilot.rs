@@ -13,9 +13,9 @@ use serde::Deserialize;
 use crate::credential::Credential;
 use crate::error::{AuthError, Result};
 
-// TODO(confirm): the copilot OAuth client id, ported verbatim from
-// `copilot.ts` (`const CLIENT_ID = "Ov23li8tweQw6odWQebz"`).
-const CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
+// otto's own GitHub OAuth App (device flow enabled), registered separately
+// from opencode's `copilot.ts` client id this flow was ported from.
+const CLIENT_ID: &str = "Ov23liNvyZyqKthwNsRN";
 const GITHUB_BASE: &str = "https://github.com";
 const SCOPE: &str = "read:user";
 

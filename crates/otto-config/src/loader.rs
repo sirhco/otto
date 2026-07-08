@@ -16,32 +16,26 @@ use crate::schema::{Config, DEFAULT_SCHEMA};
 
 /// Config file basenames, low → high precedence within a single directory.
 ///
-/// Mirrors opencode's global order `config.json → opencode.json → opencode.jsonc`
-/// (`config.ts:258-260`, later wins) extended with the `otto.*` aliases.
-const FILE_NAMES: &[&str] = &[
-    "config.json", // legacy
-    "opencode.json",
-    "opencode.jsonc",
-    "otto.json",
-    "otto.jsonc",
-];
+/// Port of opencode's global order `config.json → opencode.json → opencode.jsonc`
+/// (`config.ts:258-260`, later wins), namespaced to otto's own file names.
+const FILE_NAMES: &[&str] = &["config.json", "otto.json", "otto.jsonc"]; // config.json: legacy
 
-/// `.opencode/` directory config files, low → high precedence
-/// (`config.ts:425` — `["opencode.json", "opencode.jsonc"]`).
-const DOT_DIR_NAMES: &[&str] = &["opencode.json", "opencode.jsonc"];
+/// `.otto/` directory config files, low → high precedence
+/// (port of `config.ts:425` — `["opencode.json", "opencode.jsonc"]`).
+const DOT_DIR_NAMES: &[&str] = &["otto.json", "otto.jsonc"];
 
 /// Env-driven overrides, passed explicitly so callers (and tests) never have to
 /// mutate process env. Populate from the environment with [`EnvOverrides::from_env`].
 #[derive(Debug, Clone, Default)]
 pub struct EnvOverrides {
-    /// `OPENCODE_CONFIG` — explicit extra config file merged above global
-    /// (`config.ts:400-403`).
+    /// `OTTO_CONFIG` — explicit extra config file merged above global
+    /// (port of `config.ts:400-403`).
     pub config: Option<PathBuf>,
-    /// `OPENCODE_CONFIG_CONTENT` — raw JSON merged last / highest
-    /// (`config.ts:467-475`).
+    /// `OTTO_CONFIG_CONTENT` — raw JSON merged last / highest
+    /// (port of `config.ts:467-475`).
     pub config_content: Option<String>,
-    /// `OPENCODE_DISABLE_PROJECT_CONFIG` — skip up-tree project configs
-    /// (`config.ts:405`).
+    /// `OTTO_DISABLE_PROJECT_CONFIG` — skip up-tree project configs
+    /// (port of `config.ts:405`).
     pub disable_project_config: bool,
 }
 
@@ -50,9 +44,9 @@ impl EnvOverrides {
     #[must_use]
     pub fn from_env() -> Self {
         Self {
-            config: std::env::var_os("OPENCODE_CONFIG").map(PathBuf::from),
-            config_content: std::env::var("OPENCODE_CONFIG_CONTENT").ok(),
-            disable_project_config: std::env::var_os("OPENCODE_DISABLE_PROJECT_CONFIG").is_some(),
+            config: std::env::var_os("OTTO_CONFIG").map(PathBuf::from),
+            config_content: std::env::var("OTTO_CONFIG_CONTENT").ok(),
+            disable_project_config: std::env::var_os("OTTO_DISABLE_PROJECT_CONFIG").is_some(),
         }
     }
 }
@@ -126,14 +120,14 @@ pub fn merge(base: Config, over: Config) -> Config {
 
 /// Discover project config files by walking **up** from `cwd`.
 ///
-/// Ports `ConfigPaths.files` + the `.opencode` directory sweep
+/// Ports `ConfigPaths.files` + the `.otto` directory sweep
 /// (`paths.ts:10-41`, `config.ts:406-433`). The walk stops at (and includes) the
 /// `worktree` dir when given, otherwise at the first ancestor containing `.git`,
 /// otherwise at the filesystem root.
 ///
-/// Return order is opencode's application order — lowest precedence first:
+/// Return order matches opencode's application order — lowest precedence first:
 /// ancestor dirs before `cwd` (so files closer to `cwd` are merged last and win),
-/// and within that, plain project files before `.opencode/` files. Returns empty
+/// and within that, plain project files before `.otto/` files. Returns empty
 /// when `disable_project` is set (`config.ts:405`).
 #[must_use]
 pub fn discover(cwd: &Path, worktree: Option<&Path>, disable_project: bool) -> Vec<PathBuf> {
@@ -163,10 +157,10 @@ pub fn discover(cwd: &Path, worktree: Option<&Path>, disable_project: bool) -> V
             }
         }
     }
-    // `.opencode/` directory config files, ancestor → cwd.
+    // `.otto/` directory config files, ancestor → cwd.
     for dir in &dirs {
         for name in DOT_DIR_NAMES {
-            let p = dir.join(".opencode").join(name);
+            let p = dir.join(".otto").join(name);
             if p.is_file() {
                 out.push(p);
             }
@@ -194,12 +188,12 @@ fn load_file(path: &Path) -> Result<Option<Config>> {
 /// Load and merge the global config files in `config_dir`.
 ///
 /// Port of `loadGlobal` (`config.ts:246-279`): merge
-/// `config.json → opencode.json → opencode.jsonc` (later wins). If none exist the
+/// `config.json → otto.json → otto.jsonc` (later wins). If none exist the
 /// default is `{ "$schema": DEFAULT_SCHEMA }`; `$schema` is injected either way
 /// (`config.ts:231-235,254`).
 pub fn load_global(config_dir: &Path, _env: &EnvOverrides) -> Result<Config> {
     let mut cfg = Config::default();
-    for name in ["config.json", "opencode.json", "opencode.jsonc"] {
+    for name in FILE_NAMES {
         if let Some(next) = load_file(&config_dir.join(name))? {
             cfg = merge(cfg, next);
         }
@@ -215,9 +209,9 @@ pub fn load_global(config_dir: &Path, _env: &EnvOverrides) -> Result<Config> {
 ///
 /// Precedence (low → high), porting `loadInstanceState` (`config.ts:397-475`):
 /// 1. global config (`load_global`)
-/// 2. `OPENCODE_CONFIG` explicit file (`env.config`)
+/// 2. `OTTO_CONFIG` explicit file (`env.config`)
 /// 3. up-tree project configs (`discover`), unless `disable_project_config`
-/// 4. `OPENCODE_CONFIG_CONTENT` (`env.config_content`) — highest
+/// 4. `OTTO_CONFIG_CONTENT` (`env.config_content`) — highest
 ///
 /// This is the testable seam: pass a tempdir as `config_dir` and a constructed
 /// [`EnvOverrides`] so no process env or real global dir is touched.

@@ -197,9 +197,9 @@ pub const CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// Options controlling [`load`]/[`refresh`]'s fetch-or-embed resolution.
 ///
-/// Env names mirror opencode's `flag.ts` for parity with its
-/// `OPENCODE_MODELS_URL` / `OPENCODE_MODELS_PATH` /
-/// `OPENCODE_DISABLE_MODELS_FETCH` variables.
+/// Env names are otto's own, ported from opencode's `flag.ts`
+/// (`OPENCODE_MODELS_URL` / `OPENCODE_MODELS_PATH` /
+/// `OPENCODE_DISABLE_MODELS_FETCH`).
 #[derive(Clone, Debug)]
 pub struct LoadOptions {
     pub cache_path: PathBuf,
@@ -209,15 +209,15 @@ pub struct LoadOptions {
 
 impl LoadOptions {
     /// Builds options from the environment, falling back to `cache_path`
-    /// unless `OPENCODE_MODELS_PATH` overrides it.
+    /// unless `OTTO_MODELS_PATH` overrides it.
     #[must_use]
     pub fn from_env(cache_path: PathBuf) -> Self {
-        let cache_path = std::env::var("OPENCODE_MODELS_PATH")
+        let cache_path = std::env::var("OTTO_MODELS_PATH")
             .map(PathBuf::from)
             .unwrap_or(cache_path);
         let source_url =
-            std::env::var("OPENCODE_MODELS_URL").unwrap_or_else(|_| "https://models.dev".into());
-        let fetch = std::env::var("OPENCODE_DISABLE_MODELS_FETCH").is_err();
+            std::env::var("OTTO_MODELS_URL").unwrap_or_else(|_| "https://models.dev".into());
+        let fetch = std::env::var("OTTO_DISABLE_MODELS_FETCH").is_err();
         Self {
             cache_path,
             source_url,

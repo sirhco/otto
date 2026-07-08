@@ -18,6 +18,9 @@ jobs:
   check:
     name: fmt · clippy · test
     runs-on: ubuntu-latest
+    # A wedged test (or a lost runner) should fail in minutes, not sit
+    # "in progress" for an hour.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
 

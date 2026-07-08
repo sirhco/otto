@@ -8,7 +8,7 @@
 //!   sub-objects (`agent`/`provider`/`mcp`/`permission`/`experimental`/…) stay as
 //!   [`serde_json::Value`] so this crate stays decoupled.
 //! * [`paths`] — XDG-style global dirs (`global.ts:10-29`), honoring
-//!   `OPENCODE_CONFIG_DIR`.
+//!   `OTTO_CONFIG_DIR`.
 //! * [`loader`] — [`parse`] (JSONC), [`merge`] (deep merge + `instructions`
 //!   concat/dedupe), [`discover`] (up-tree project configs), and
 //!   [`load_with`] / [`load`] (global → project precedence + env overrides).

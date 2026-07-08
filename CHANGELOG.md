@@ -4,6 +4,20 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.2.1] - 2026-07-08
+
+### Fixed
+
+- **bash tool: timeout/abort now kills the whole process tree.** The kill
+  only signalled the `sh` wrapper; when the shell forks the command instead
+  of exec'ing it (dash always does, bash does for compound commands), the
+  real work survived as an orphan — and, holding the stdout/stderr pipe
+  write ends, blocked the tool until it exited. On Linux this meant Esc /
+  timeout on a running shell command did nothing. The child now runs in its
+  own process group and the group is killed; pipes are drained incrementally
+  with a bounded grace period so background/daemon grandchildren can't hold
+  the tool hostage (captured output is kept).
+
 ## [0.2.0] - 2026-07-08
 
 ### Added
