@@ -1,0 +1,17 @@
+[package]
+name = "otto-vcs"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

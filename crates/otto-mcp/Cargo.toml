@@ -1,0 +1,40 @@
+[package]
+name = "otto-mcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otto-tools.workspace = true
+otto-events.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+# Needed to build a reqwest::Client with per-server default headers for the
+# remote (streamable-HTTP / SSE) transports — rmcp's reqwest transports take a
+# client we supply. Same version/features as the workspace + rmcp use.
+reqwest.workspace = true
+# We keep rmcp's default features (`base64`, `macros`, `server`) ON: rmcp 0.9.1's
+# `model` module unconditionally references `schemars`, `base64`, and the
+# server-gated `handler::server::tool::cached_schema_for_type`, so a
+# `default-features = false` client-only build does not compile. On top of the
+# defaults we add the client role + the transports we dial (child-process stdio,
+# streamable-HTTP, SSE) and their reqwest HTTP backends. The retained `server`
+# feature also provides the in-process MCP server used by the tests.
+rmcp = { version = "0.9", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+    "transport-sse-client",
+    "transport-sse-client-reqwest",
+    "reqwest",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

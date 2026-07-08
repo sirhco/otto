@@ -1,0 +1,39 @@
+[package]
+name = "otto-server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otto-app.workspace = true
+otto-events.workspace = true
+otto-session.workspace = true
+otto-storage.workspace = true
+otto-config.workspace = true
+otto-agent.workspace = true
+otto-permission.workspace = true
+otto-vcs.workspace = true
+otto-workflow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+thiserror.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+sqlx.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+otto-llm.workspace = true
+otto-tools.workspace = true
+tokio-util.workspace = true

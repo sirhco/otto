@@ -1,0 +1,57 @@
+OTTO — ASCII ART SET
+=====================================================================
+
+[1] FULL BANNER (startup splash — loop mark + wordmark + tagline)
+
+ ╭───────╮    ██████╗ ████████╗████████╗ ██████╗
+ │       │   ██╔═══██╗╚══██╔══╝╚══██╔══╝██╔═══██╗
+ ╰───┬───╯   ██║   ██║   ██║      ██║   ██║   ██║
+ ╭───┴───╮   ██║   ██║   ██║      ██║   ██║   ██║
+ │       │   ╚██████╔╝   ██║      ██║   ╚██████╔╝
+ ╰───────╯    ╚═════╝    ╚═╝      ╚═╝    ╚═════╝
+              agentic coding harness ▌
+
+
+[2] MID BANNER (wordmark only)
+
+ ██████╗ ████████╗████████╗ ██████╗
+██╔═══██╗╚══██╔══╝╚══██╔══╝██╔═══██╗
+██║   ██║   ██║      ██║   ██║   ██║
+██║   ██║   ██║      ██║   ██║   ██║
+╚██████╔╝   ██║      ██║   ╚██████╔╝
+ ╚═════╝    ╚═╝      ╚═╝    ╚═════╝
+
+
+[3] COMPACT (help screens, version output)
+
+╭─╮
+├─┤  otto · agentic coding harness
+╰─╯
+
+one-liner:   otto ▸ agentic coding harness
+loop status: ⟳ otto · iteration 3 · running tests ▌
+
+
+[4] COLORED BANNER (bash / zsh, truecolor)
+
+#!/usr/bin/env bash
+A=$'\e[38;2;255;180;84m'   # phosphor amber  #FFB454
+D=$'\e[38;2;90;99;112m'    # dim track       #5A6370
+W=$'\e[38;2;245;242;236m'  # off-white       #F5F2EC
+R=$'\e[0m'
+
+printf '%s\n' \
+"${A} ╭───────╮ ${W}   ██████╗ ████████╗████████╗ ██████╗${R}" \
+"${A} │       │ ${W}  ██╔═══██╗╚══██╔══╝╚══██╔══╝██╔═══██╗${R}" \
+"${A} ╰───┬───╯ ${W}  ██║   ██║   ██║      ██║   ██║   ██║${R}" \
+"${A} ╭───┴───╮ ${W}  ██║   ██║   ██║      ██║   ██║   ██║${R}" \
+"${A} │       │ ${W}  ╚██████╔╝   ██║      ██║   ╚██████╔╝${R}" \
+"${A} ╰───────╯ ${W}   ╚═════╝    ╚═╝      ╚═╝    ╚═════╝${R}" \
+"${D}              agentic coding harness ${A}▌${R}"
+
+
+NOTES
+- The 3-line glyph (╭─╮ ├─┤ ╰─╯) is the figure-8 mark reduced to box
+  drawing: two loops sharing a rail. It doubles as a spinner frame.
+- ▌ is the brand cursor — end taglines and prompts with it.
+- Amber #FFB454 ≈ 256-color code 215 if truecolor isn't available.

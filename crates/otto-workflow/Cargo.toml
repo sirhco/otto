@@ -1,0 +1,24 @@
+[package]
+name = "otto-workflow"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otto-events.workspace = true
+otto-session.workspace = true
+otto-storage.workspace = true
+otto-permission.workspace = true
+otto-tools.workspace = true
+otto-vcs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

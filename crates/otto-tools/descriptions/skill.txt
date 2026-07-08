@@ -1,0 +1,7 @@
+Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.
+
+Use this tool to inject the skill's instructions and resources into current conversation. The output may contain detailed workflow guidance as well as references to scripts, files, etc in the same directory as the skill.
+
+The skill name must match one of the skills listed in your system prompt.
+
+Optionally pass `section` with a heading name (a ## or ### section title) to load only that part of the skill instead of its full body — useful when the skill lists its phases/sections and you only need one.

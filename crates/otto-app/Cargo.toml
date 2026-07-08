@@ -1,0 +1,32 @@
+[package]
+name = "otto-app"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otto-id.workspace = true
+otto-events.workspace = true
+otto-llm.workspace = true
+otto-tools.workspace = true
+otto-storage.workspace = true
+otto-session.workspace = true
+otto-permission.workspace = true
+otto-agent.workspace = true
+otto-config.workspace = true
+otto-lsp.workspace = true
+otto-auth.workspace = true
+otto-mcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+async-stream.workspace = true

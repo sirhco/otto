@@ -19,3 +19,12 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+# Subagent-driven-development scratch (ledger, task briefs, review packages)
+.superpowers/
+opencode.json
+docs/superpowers/
+HANDOFF.md
+
+# Claude Code local config / instructions (never commit)
+.claude/
+CLAUDE.md

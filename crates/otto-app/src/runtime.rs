@@ -1,0 +1,615 @@
+//! The [`Runtime`]: the assembled, ready-to-drive session runtime.
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use otto_agent::{AgentInfo, ModelRef, resolve_agents};
+use otto_auth::AuthStore;
+use otto_config::Config;
+use otto_events::LLMEvent;
+use otto_llm::HttpTransport;
+use otto_mcp::{McpClient, McpServerConfig};
+use otto_permission::{Permission, Ruleset, SessionGate};
+use otto_session::run::{
+    DEFAULT_COMPACTION_RESERVED, DEFAULT_MAX_RETRIES, DEFAULT_PRESERVE_RECENT_TOKENS,
+};
+use otto_session::{RouteFor, RunConfig, SessionSubagentSpawner, run_loop};
+use otto_storage::model::{
+    Info, InfoBody, Part, PartKind, User, UserModel, UserTime, new_message_id, new_part_id,
+};
+use otto_storage::{Session, SessionTokens, Store};
+use otto_tools::{PermissionGate, SubagentSpawner, ToolRegistry};
+use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use crate::route_factory::{AuthRouteFactory, ProviderOverride, RouteFactory};
+use crate::{Result, RunError};
+
+/// Reported as the session `version` and the MCP client version.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Build the [`AuthRouteFactory`] provider-override map from
+/// `config.provider.<id>.options`, keeping only entries with a non-empty
+/// `baseURL` — a config entry with no base URL supplies nothing the catch-all
+/// route arm can use, so it's dropped rather than stored as a no-op override.
+fn provider_overrides(config: &Config) -> HashMap<String, ProviderOverride> {
+    config
+        .provider_overrides()
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            entry
+                .options
+                .base_url
+                .filter(|u| !u.trim().is_empty())
+                .map(|base_url| {
+                    (
+                        id,
+                        ProviderOverride {
+                            base_url,
+                            api_key: entry.options.api_key,
+                        },
+                    )
+                })
+        })
+        .collect()
+}
+
+/// The result of [`Runtime::run`]: the streaming events and the join handle for
+/// the final assistant message.
+pub struct RunHandle {
+    /// Live [`LLMEvent`]s tapped from the run as they stream (closes when the
+    /// run finishes). Port of the streaming seam the CLI/server render from.
+    pub events: mpsc::UnboundedReceiver<LLMEvent>,
+    /// The spawned agent loop; resolves to the final [`Info`] or a [`RunError`].
+    pub join: JoinHandle<std::result::Result<Info, RunError>>,
+}
+
+/// The assembled session runtime shared by the CLI and the server.
+///
+/// Built by [`Runtime::load`] (real config/auth/storage/MCP) or
+/// [`Runtime::in_memory`] (headless, for tests), then driven with
+/// [`Runtime::create_session`] + [`Runtime::run`]. The route seam is injectable
+/// via [`Runtime::with_route_factory`] and the toolset via
+/// [`Runtime::with_tools`].
+pub struct Runtime {
+    store: Store,
+    tools: Arc<ToolRegistry>,
+    permission: Arc<Permission>,
+    agents: Vec<AgentInfo>,
+    config: Config,
+    auth: AuthStore,
+    transport: Arc<HttpTransport>,
+    directory: PathBuf,
+    route_factory: Arc<dyn RouteFactory>,
+    project_id: String,
+    version: String,
+    lsp: Arc<otto_lsp::Lsp>,
+}
+
+impl Runtime {
+    /// Boot a runtime rooted at `cwd`: load config, open the persistent store at
+    /// `global_data_dir()/otto.db`, resolve agents, build the permission
+    /// service from `config.permission`, register built-in tools plus the tools
+    /// of any (best-effort) connected `config.mcp` servers, and install the
+    /// default credential-backed [`AuthRouteFactory`].
+    ///
+    /// # Errors
+    /// Returns [`crate::Error`] on config, auth, storage, or filesystem failure.
+    pub async fn load(cwd: impl Into<PathBuf>) -> Result<Runtime> {
+        let directory = cwd.into();
+        let config = otto_config::load(&directory)?;
+
+        let data_dir = otto_config::paths::global_data_dir();
+        std::fs::create_dir_all(&data_dir)?;
+        let store = Store::open(data_dir.join("otto.db")).await?;
+
+        let auth = AuthStore::new()?;
+        let transport = Arc::new(HttpTransport::new());
+
+        // Best-effort models.dev registry refresh: fresh disk cache, else
+        // network fetch, else stale cache, else the embedded snapshot. `load`
+        // never panics and always returns a usable `Registry`, so a network
+        // failure here must never fail runtime boot. Installed before the
+        // `AuthRouteFactory` is built so the first `p.model(...)` lookup sees
+        // live data.
+        let cache = otto_config::paths::global_cache_dir().join("models.json");
+        let opts = otto_llm::models_dev::LoadOptions::from_env(cache);
+        let registry = otto_llm::models_dev::load(&opts).await;
+        otto_llm::registry::install(registry);
+
+        let agents = resolve_agents(&agent_config(&config));
+        let permission = Arc::new(Permission::new(permission_ruleset(&config)));
+
+        // Construct the LSP service and inject it into the diagnostics-aware
+        // tools (edit/write/apply_patch). Retained on the runtime so the server
+        // can surface `/lsp` status.
+        let lsp: Arc<otto_lsp::Lsp> = otto_lsp::Lsp::new(
+            directory.clone(),
+            otto_lsp::config::resolve(config.lsp.as_ref()),
+        );
+        let lsp_handle: Option<Arc<dyn otto_tools::LspHandle>> =
+            Some(lsp.clone() as Arc<dyn otto_tools::LspHandle>);
+        let mut registry = ToolRegistry::with_builtins(lsp_handle);
+        // Best-effort MCP: connect each configured server and register its
+        // namespaced tools. A server that fails to connect is skipped, never
+        // fatal (mirrors opencode tolerating an unreachable MCP server).
+        if let Some(mcp) = &config.mcp {
+            let servers: BTreeMap<String, McpServerConfig> =
+                serde_json::from_value(mcp.clone()).unwrap_or_default();
+            if !servers.is_empty() {
+                let client = McpClient::new(VERSION);
+                for (name, server) in &servers {
+                    let _ = client.connect(name.clone(), server).await;
+                }
+                for tool in client.tools() {
+                    registry.register(tool);
+                }
+            }
+        }
+        let tools = Arc::new(registry);
+
+        let route_factory: Arc<dyn RouteFactory> = Arc::new(AuthRouteFactory::new(
+            auth.all().unwrap_or_default(),
+            transport.clone(),
+            provider_overrides(&config),
+        ));
+
+        let project_id = project_id_for(&directory);
+        Ok(Runtime {
+            store,
+            tools,
+            permission,
+            agents,
+            config,
+            auth,
+            transport,
+            directory,
+            route_factory,
+            project_id,
+            version: VERSION.to_string(),
+            lsp,
+        })
+    }
+
+    /// Assemble a headless runtime over an in-memory store and an empty
+    /// credential store — for tests. Combine with [`Runtime::with_route_factory`]
+    /// (a scripted factory) and [`Runtime::with_tools`] to run with no network.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error`] on storage failure.
+    pub async fn in_memory(config: Config) -> Result<Runtime> {
+        let directory = std::env::temp_dir();
+        let store = Store::open_in_memory().await?;
+        let auth = AuthStore::with_content("{}");
+        let transport = Arc::new(HttpTransport::new());
+
+        // Headless twin: never touch the network. Install the embedded
+        // models.dev snapshot explicitly (rather than relying on
+        // `registry::current`'s lazy default) so tests can assert the
+        // registry is populated deterministically.
+        otto_llm::registry::install(otto_llm::models_dev::Registry::embedded());
+
+        let agents = resolve_agents(&agent_config(&config));
+        let permission = Arc::new(Permission::new(permission_ruleset(&config)));
+        let lsp: Arc<otto_lsp::Lsp> = otto_lsp::Lsp::new(
+            directory.clone(),
+            otto_lsp::LspConfigResolved::enabled_default(),
+        );
+        let lsp_handle: Option<Arc<dyn otto_tools::LspHandle>> =
+            Some(lsp.clone() as Arc<dyn otto_tools::LspHandle>);
+        let tools = Arc::new(ToolRegistry::with_builtins(lsp_handle));
+
+        let route_factory: Arc<dyn RouteFactory> = Arc::new(AuthRouteFactory::new(
+            auth.all().unwrap_or_default(),
+            transport.clone(),
+            provider_overrides(&config),
+        ));
+
+        let project_id = project_id_for(&directory);
+        Ok(Runtime {
+            store,
+            tools,
+            permission,
+            agents,
+            config,
+            auth,
+            transport,
+            directory,
+            route_factory,
+            project_id,
+            version: VERSION.to_string(),
+            lsp,
+        })
+    }
+
+    /// Replace the route factory (dependency injection for tests / custom
+    /// providers). The subagent spawner reuses whatever factory is installed.
+    #[must_use]
+    pub fn with_route_factory(mut self, factory: Arc<dyn RouteFactory>) -> Self {
+        self.route_factory = factory;
+        self
+    }
+
+    /// Replace the tool registry (e.g. to inject a scripted tool in tests).
+    #[must_use]
+    pub fn with_tools(mut self, tools: Arc<ToolRegistry>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Override the working directory (e.g. to root a headless test runtime at
+    /// a specific repository). Does not rebuild directory-derived services
+    /// (LSP, project id); intended for tests and callers that only read
+    /// [`Runtime::directory`] afterwards.
+    #[must_use]
+    pub fn with_directory(mut self, dir: std::path::PathBuf) -> Self {
+        self.directory = dir;
+        self
+    }
+
+    /// The default model: `config.model` if set, else `anthropic/claude-sonnet-4-5`.
+    #[must_use]
+    pub fn default_model(&self) -> ModelRef {
+        crate::default_model(self.config.model.as_deref())
+    }
+
+    /// The default agent: `config.default_agent` if set and present, else
+    /// `build`, else the first resolved agent.
+    #[must_use]
+    pub fn default_agent(&self) -> &AgentInfo {
+        let name = self.config.default_agent.as_deref().unwrap_or("build");
+        self.agents
+            .iter()
+            .find(|a| a.name == name)
+            .or_else(|| self.agents.iter().find(|a| a.name == "build"))
+            .unwrap_or(&self.agents[0])
+    }
+
+    /// The permission service.
+    #[must_use]
+    pub fn permission(&self) -> &Arc<Permission> {
+        &self.permission
+    }
+
+    /// The resolved agent set.
+    #[must_use]
+    pub fn agents(&self) -> &[AgentInfo] {
+        &self.agents
+    }
+
+    /// The persistence store.
+    #[must_use]
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// The tool registry.
+    #[must_use]
+    pub fn tools(&self) -> &Arc<ToolRegistry> {
+        &self.tools
+    }
+
+    /// The LSP service (language-server diagnostics), for the server's status
+    /// route and diagnostics surfacing.
+    #[must_use]
+    pub fn lsp(&self) -> &Arc<otto_lsp::Lsp> {
+        &self.lsp
+    }
+
+    /// The loaded config.
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// The credential store.
+    #[must_use]
+    pub fn auth(&self) -> &AuthStore {
+        &self.auth
+    }
+
+    /// The shared HTTP transport.
+    #[must_use]
+    pub fn transport(&self) -> &Arc<HttpTransport> {
+        &self.transport
+    }
+
+    /// The working directory relative tool paths resolve against.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// Create a new session for `agent`, optionally as a child of `parent`, and
+    /// return its id.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error`] on storage failure.
+    pub async fn create_session(
+        &self,
+        title: impl Into<String>,
+        agent: &AgentInfo,
+        parent: Option<String>,
+    ) -> Result<String> {
+        let id = otto_id::ascending(otto_id::Prefix::Session);
+        let now = now_ms();
+        self.store
+            .create_session(&Session {
+                id: id.clone(),
+                project_id: self.project_id.clone(),
+                parent_id: parent,
+                directory: self.directory.display().to_string(),
+                title: title.into(),
+                version: self.version.clone(),
+                cost: 0.0,
+                tokens: SessionTokens::default(),
+                metadata: Some(json!({ "agent": agent.name, "permission": agent.permission })),
+                time_created: now,
+                time_updated: now,
+            })
+            .await?;
+        Ok(id)
+    }
+
+    /// Persist `prompt` as a user message on `session_id`, then spawn the agent
+    /// loop for `agent` on `model_ref`. Returns a [`RunHandle`] whose `events`
+    /// stream the turn live and whose `join` yields the final assistant message.
+    ///
+    /// The run is built with a [`SessionGate`] over this runtime's
+    /// [`Permission`], the current toolset, a [`SessionSubagentSpawner`] reusing
+    /// the same route factory, the configured compaction knobs, and the live
+    /// event tap wired to `events`.
+    ///
+    /// Delegates to [`Runtime::run_with_parts`] with no extra parts.
+    #[must_use]
+    pub fn run(
+        &self,
+        session_id: impl Into<String>,
+        prompt: impl Into<String>,
+        agent: &AgentInfo,
+        model_ref: &ModelRef,
+        abort: CancellationToken,
+    ) -> RunHandle {
+        self.run_with_parts(session_id, prompt, Vec::new(), agent, model_ref, abort)
+    }
+
+    /// Build a subagent spawner from this runtime's services (the same one
+    /// [`Runtime::run_with_parts`] builds inline). `agent` supplies the
+    /// parent permission ruleset a spawned child narrows from; `model_ref` is
+    /// resolved via the route factory to seed the fallback route/model a
+    /// child with no pinned model falls back to. Exposed so drivers above
+    /// `run_loop` (e.g. the workflow engine) can dispatch subagents without
+    /// going through a full `run`.
+    ///
+    /// # Errors
+    /// Returns [`RunError::Route`] if `model_ref` cannot be resolved.
+    pub fn subagent_spawner(
+        &self,
+        agent: &AgentInfo,
+        model_ref: &ModelRef,
+    ) -> std::result::Result<Arc<dyn SubagentSpawner>, RunError> {
+        let (route, model) = self
+            .route_factory
+            .route_for(model_ref)
+            .map_err(|e| RunError::Route(e.to_string()))?;
+        let fallback = (route, model);
+        let sub_factory = self.route_factory.clone();
+        let route_for: RouteFor = Arc::new(move |a: &AgentInfo| match &a.model {
+            Some(m) => sub_factory
+                .route_for(m)
+                .unwrap_or_else(|_| fallback.clone()),
+            None => fallback.clone(),
+        });
+        Ok(Arc::new(SessionSubagentSpawner::new(
+            self.store.clone(),
+            self.tools.clone(),
+            self.permission.clone(),
+            agent.permission.clone(),
+            agent_config(&self.config),
+            route_for,
+            self.directory.clone(),
+            self.project_id.clone(),
+            self.version.clone(),
+        )))
+    }
+
+    /// Like [`Runtime::run`], but persists `extra_parts` on the same user
+    /// message immediately after the prompt `Text` part — e.g. inlined text
+    /// attachments or `File` parts resolved from `files[]` in the prompt
+    /// request. Used by the server's attachment-aware prompt route; `run`
+    /// itself is `run_with_parts` with an empty `extra_parts`.
+    #[must_use]
+    pub fn run_with_parts(
+        &self,
+        session_id: impl Into<String>,
+        prompt: impl Into<String>,
+        extra_parts: Vec<PartKind>,
+        agent: &AgentInfo,
+        model_ref: &ModelRef,
+        abort: CancellationToken,
+    ) -> RunHandle {
+        let (event_tx, events) = mpsc::unbounded_channel::<LLMEvent>();
+
+        // Everything the spawned task needs, owned.
+        let store = self.store.clone();
+        let tools = self.tools.clone();
+        let permission = self.permission.clone();
+        let factory = self.route_factory.clone();
+        let directory = self.directory.clone();
+        let agent = agent.clone();
+        let model_ref = model_ref.clone();
+        let session_id = session_id.into();
+        let prompt = prompt.into();
+        // Built eagerly (outside the spawned task) so any route-resolution
+        // failure surfaces the same way it did inline: as a `RunError::Route`
+        // from the `?` below, once the join awaits it.
+        let spawner_result = self.subagent_spawner(&agent, &model_ref);
+
+        // Compaction knobs (`config.compaction`), falling back to the session
+        // defaults.
+        let compaction = self.config.compaction.clone();
+        let auto_compact = compaction.as_ref().and_then(|c| c.auto).unwrap_or(true);
+        let preserve_recent_tokens = compaction
+            .as_ref()
+            .and_then(|c| c.preserve_recent_tokens)
+            .unwrap_or(DEFAULT_PRESERVE_RECENT_TOKENS);
+        let compaction_reserved = compaction
+            .as_ref()
+            .and_then(|c| c.reserved)
+            .unwrap_or(DEFAULT_COMPACTION_RESERVED);
+
+        let join = tokio::spawn(async move {
+            // 1. Resolve the run's route/model (also the subagent fallback).
+            let (route, model) = factory
+                .route_for(&model_ref)
+                .map_err(|e| RunError::Route(e.to_string()))?;
+
+            // Auto-name the session from its first prompt: only when it still
+            // wears a default title (never clobber a user-set / already-named
+            // one) AND has no prior messages (so we summarize the FIRST
+            // question). Seeds a background title call (best-effort — never
+            // blocks or fails the turn).
+            let title_seed = {
+                let default_title = store
+                    .get_session(&session_id)
+                    .await?
+                    .is_some_and(|s| crate::title::is_default_session_title(&s.title));
+                if default_title && store.list_messages(&session_id).await?.is_empty() {
+                    Some(prompt.clone())
+                } else {
+                    None
+                }
+            };
+
+            // 2. Persist the user prompt (message + text part).
+            let user_id = new_message_id();
+            let user = Info {
+                id: user_id.clone(),
+                session_id: session_id.clone(),
+                body: InfoBody::User(User {
+                    time: UserTime { created: now_ms() },
+                    format: None,
+                    summary: None,
+                    agent: agent.name.clone(),
+                    model: UserModel {
+                        provider_id: model.provider.0.clone(),
+                        model_id: model.id.0.clone(),
+                        variant: agent.variant.clone(),
+                    },
+                    system: None,
+                    tools: None,
+                }),
+            };
+            store.insert_message(&user).await?;
+            store
+                .insert_part(&Part {
+                    id: new_part_id(),
+                    session_id: session_id.clone(),
+                    message_id: user_id.clone(),
+                    kind: PartKind::Text {
+                        text: prompt,
+                        synthetic: None,
+                        ignored: None,
+                        time: None,
+                        metadata: None,
+                    },
+                })
+                .await?;
+            for part in extra_parts {
+                store
+                    .insert_part(&Part {
+                        id: new_part_id(),
+                        session_id: session_id.clone(),
+                        message_id: user_id.clone(),
+                        kind: part,
+                    })
+                    .await?;
+            }
+
+            // Auto-name the session from its first prompt, in the background so
+            // it never delays or fails the turn. Clones the route/model before
+            // they move into the `RunConfig` below.
+            if let Some(seed) = title_seed {
+                let route = route.clone();
+                let model = model.clone();
+                let store = store.clone();
+                let sid = session_id.clone();
+                tokio::spawn(async move {
+                    if let Some(title) =
+                        crate::title::generate_session_title(route, model, &seed).await
+                    {
+                        let _ = store.update_session_title(&sid, &title).await;
+                    }
+                });
+            }
+
+            // 3. Subagent spawner reusing the same route factory (built via
+            //    `subagent_spawner`, resolved eagerly above so its own
+            //    `route_for` failure surfaces through this same `?`).
+            let spawner: Arc<dyn SubagentSpawner> = spawner_result?;
+
+            // 4. Assemble the RunConfig with the live event tap installed.
+            let gate: Arc<dyn PermissionGate> =
+                Arc::new(SessionGate::new(permission.clone(), session_id.clone()));
+            let cfg = RunConfig {
+                store: store.clone(),
+                route,
+                tools: tools.clone(),
+                permission: gate,
+                model,
+                agent: agent.name.clone(),
+                agent_prompt: agent.prompt.clone(),
+                directory,
+                max_steps: agent.steps,
+                abort,
+                subagent: Some(spawner),
+                preserve_recent_tokens,
+                compaction_reserved,
+                auto_compact,
+                max_retries: DEFAULT_MAX_RETRIES,
+                event_tx: Some(event_tx),
+                system_cache: None,
+            };
+
+            // 5. Drive the loop and return the final assistant message.
+            let info = run_loop(&cfg, &session_id).await?;
+            Ok(info)
+        });
+
+        RunHandle { events, join }
+    }
+}
+
+/// The `config.agent` object, or an empty object when unset.
+fn agent_config(config: &Config) -> Value {
+    config
+        .agent
+        .clone()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+}
+
+/// The permission ruleset from `config.permission`, or an empty ruleset.
+fn permission_ruleset(config: &Config) -> Ruleset {
+    config
+        .permission
+        .as_ref()
+        .map(Ruleset::from_config)
+        .unwrap_or_default()
+}
+
+/// A stable project id derived from the working directory.
+fn project_id_for(dir: &Path) -> String {
+    format!("prj_{}", dir.display())
+}
+
+/// Current wall-clock time in milliseconds since the Unix epoch.
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}

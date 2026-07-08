@@ -1,0 +1,35 @@
+[package]
+name = "otto-session"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otto-id.workspace = true
+otto-events.workspace = true
+otto-llm.workspace = true
+otto-tools.workspace = true
+otto-storage.workspace = true
+otto-agent.workspace = true
+otto-permission.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+# MCP is a dev-only dependency: the `mcp_loop` integration test proves MCP tools
+# are first-class in the run loop. otto-session keeps NO production dependency
+# on otto-mcp (no cycle — otto-mcp only depends on otto-tools/otto-events).
+otto-mcp.workspace = true
+# The in-process MCP `TestServer` in `mcp_loop` needs rmcp's server handler +
+# in-memory (duplex) transport. Same version as otto-mcp; default features
+# include the `server` role used here.
+rmcp = { version = "0.9" }

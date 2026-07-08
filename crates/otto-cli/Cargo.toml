@@ -1,0 +1,41 @@
+[package]
+name = "otto-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "otto_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "otto"
+path = "src/main.rs"
+
+[dependencies]
+otto-app.workspace = true
+otto-server.workspace = true
+otto-config.workspace = true
+otto-auth.workspace = true
+otto-events.workspace = true
+otto-llm.workspace = true
+otto-session.workspace = true
+otto-agent.workspace = true
+otto-permission.workspace = true
+otto-mcp.workspace = true
+otto-vcs.workspace = true
+otto-workflow.workspace = true
+otto-tui = { path = "../otto-tui" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+async-trait.workspace = true
+otto-tools.workspace = true

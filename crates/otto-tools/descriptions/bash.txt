@@ -1,0 +1,9 @@
+Executes a given shell command via `sh -c`.
+
+Usage:
+- The command is run from the working directory unless a different one is configured.
+- Provide an optional `description` (5-10 words, active voice) so the user knows what the command does.
+- Provide an optional `timeout` in milliseconds; the command is killed if it exceeds it (default 120000 ms, max 600000 ms).
+- Combined stdout and stderr are returned along with the exit code.
+- Prefer the dedicated read/write/edit/glob/grep tools over shelling out to `cat`, `sed`, `find`, or `grep` where possible.
+- Avoid commands that require interactive input; they will hang until the timeout.
