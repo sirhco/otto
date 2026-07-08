@@ -838,10 +838,17 @@ impl App {
     }
 
     /// Enter on the free-text input: close the overlay and, if the trimmed text
-    /// is non-empty, emit `StartWorkflow` with it. Empty input is a no-op.
+    /// is non-empty, emit `StartWorkflow` with it. Empty input is a no-op. A
+    /// leading `@` is stripped first: Esc-dismissing a mention mid-drill-down
+    /// can leave a literal `@path/` prefix in the query, which would
+    /// otherwise be sent to the workflow as an unresolved mention token.
     pub fn text_input_confirm(&mut self) -> Option<Msg> {
         if let Overlay::TextInput(s) = &self.overlay {
-            let (kind, arg) = (s.kind.clone(), s.query.trim().to_string());
+            let trimmed = s.query.trim();
+            let (kind, arg) = (
+                s.kind.clone(),
+                trimmed.strip_prefix('@').unwrap_or(trimmed).to_string(),
+            );
             self.overlay = Overlay::None;
             if arg.is_empty() {
                 return None;
@@ -4154,6 +4161,30 @@ mod tests {
             matches!(msg, Some(Msg::StartWorkflow { ref kind, ref arg })
                 if kind == "sdd" && arg == ".otto/plans/p.md"),
             "confirm feeds the accepted path to the workflow, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn text_input_confirm_strips_leftover_at_from_dismissed_mention() {
+        // Accepting a DIRECTORY keeps `@dir/` in the query (live drill-down);
+        // Esc-dismissing the mention (`text_input_clear_mention`) leaves that
+        // literal `@`-prefixed text behind. Confirming from there must not
+        // send the raw `@dir/` token to the workflow.
+        let mut app = App::new();
+        app.open_text_input("SDD plan file", "sdd");
+        app.text_input_char('@');
+        app.files_loaded(vec![".otto/plans/".into()], false);
+        app.text_input_mention_accept();
+        match &app.overlay {
+            Overlay::TextInput(s) => assert_eq!(s.query, "@.otto/plans/"),
+            other => panic!("expected text-input overlay, got {other:?}"),
+        }
+        app.text_input_clear_mention();
+        let msg = app.text_input_confirm();
+        assert!(
+            matches!(msg, Some(Msg::StartWorkflow { ref kind, ref arg })
+                if kind == "sdd" && arg == ".otto/plans/"),
+            "leading '@' must be stripped before starting the workflow, got {msg:?}"
         );
     }
 }

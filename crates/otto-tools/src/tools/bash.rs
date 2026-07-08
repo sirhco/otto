@@ -143,6 +143,24 @@ fn clean_token(token: &str) -> &str {
     token.trim_end_matches([',', ';', ':', ')', ']', '}'])
 }
 
+/// The `assert_external_directory` "kind" (see `crate::tools::mod`) a raw
+/// token implies: `"directory"` when the token unambiguously names a
+/// directory — bare `~`, a trailing `/`, or a lexical `..`/`.` as the last
+/// component (`cd ..`, `ls ../..`) — and `"file"` otherwise. This matters
+/// because "directory" kind derives the always-allow glob from the target
+/// itself, while "file" kind derives it from the target's *parent* — using
+/// "file" for a dir-shaped token (e.g. `cd ..` landing on `$HOME`) would glob
+/// one level too broad (`$HOME`'s parent).
+fn token_kind(token: &str) -> &'static str {
+    if token == "~" || token.ends_with('/') {
+        return "directory";
+    }
+    match Path::new(token).components().next_back() {
+        Some(Component::ParentDir) | Some(Component::CurDir) => "directory",
+        _ => "file",
+    }
+}
+
 /// Scan `command` for tokens that look like paths escaping `directory` — the
 /// pure-fn core of the bash sandbox check (see the module docs for why this
 /// is a mitigation, not containment).
@@ -154,10 +172,16 @@ fn clean_token(token: &str) -> &str {
 /// `/usr/bin/env`, `/etc/hosts`, `/opt/...` stay unflagged, avoiding prompt
 /// fatigue for system-wide paths unrelated to the user's projects. Flag-shaped
 /// (`-...`) tokens are split on `=` so `--flag=/x` values are checked. Results
-/// are deduped by parent directory and capped at 5.
-fn external_path_candidates(command: &str, directory: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+/// are deduped by parent directory and capped at 5. Each result carries the
+/// [`token_kind`] of the raw token alongside the resolved path, so callers can
+/// ask `assert_external_directory` with the right kind.
+fn external_path_candidates(
+    command: &str,
+    directory: &Path,
+    home: Option<&Path>,
+) -> Vec<(PathBuf, &'static str)> {
     const MAX_CANDIDATES: usize = 5;
-    let mut out: Vec<PathBuf> = Vec::new();
+    let mut out: Vec<(PathBuf, &'static str)> = Vec::new();
     let mut seen_parents: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     for raw in command.split_whitespace() {
@@ -199,7 +223,7 @@ fn external_path_candidates(command: &str, directory: &Path, home: Option<&Path>
             .map(Path::to_path_buf)
             .unwrap_or_else(|| resolved.clone());
         if seen_parents.insert(parent) {
-            out.push(resolved);
+            out.push((resolved, token_kind(token)));
             if out.len() >= MAX_CANDIDATES {
                 break;
             }
@@ -207,6 +231,38 @@ fn external_path_candidates(command: &str, directory: &Path, home: Option<&Path>
     }
 
     out
+}
+
+/// Clamp the directory an `assert_external_directory` ask for
+/// `(candidate, kind)` would derive, so an "always allow" approval can never
+/// whitelist above `home`. Mirrors the dir-derivation in
+/// `crate::tools::assert_external_directory` (kind `"directory"` → the
+/// target itself; kind `"file"` → its parent) and, if that directory would be
+/// a PROPER ancestor of `home` (e.g. `/Users` or `/` when home is
+/// `/Users/x`), substitutes `home` itself as the ask target with kind
+/// `"directory"`. `home` itself is a legitimate ask target and is left alone
+/// — only ancestors *above* it are clamped.
+fn clamp_ask_to_home(
+    candidate: PathBuf,
+    kind: &'static str,
+    home: Option<&Path>,
+) -> (PathBuf, &'static str) {
+    let Some(home) = home else {
+        return (candidate, kind);
+    };
+    let would_ask_dir = if kind == "directory" {
+        candidate.clone()
+    } else {
+        candidate
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| candidate.clone())
+    };
+    if would_ask_dir != home && home.starts_with(&would_ask_dir) {
+        (home.to_path_buf(), "directory")
+    } else {
+        (candidate, kind)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,13 +318,18 @@ impl Tool for BashTool {
             .await?;
 
         let home = bash_home();
-        for candidate in external_path_candidates(&params.command, &ctx.directory, home.as_deref())
+        for (candidate, kind) in
+            external_path_candidates(&params.command, &ctx.directory, home.as_deref())
         {
-            // "file" kind (the write/edit convention for unknown targets):
-            // the always-allow glob and parentDir derive from the token's
-            // parent directory. Scanned tokens skew heavily toward file
-            // paths; the "directory" kind would glob `{file}/*`.
-            assert_external_directory(ctx, &candidate, "file").await?;
+            // Kind is per-token ([`token_kind`]): "directory" for dir-shaped
+            // tokens (`~`, `cd ..`, trailing `/`) so the glob derives from
+            // the target itself, "file" otherwise so it derives from the
+            // target's parent. Then clamp so the derived ask directory can
+            // never land above `home` (e.g. `cd ..` from `~/proj`, or an
+            // ancestor-of-home token like `ls /Users`, would otherwise glob
+            // one level too broad).
+            let (target, kind) = clamp_ask_to_home(candidate, kind, home.as_deref());
+            assert_external_directory(ctx, &target, kind).await?;
         }
 
         let mut cmd = tokio::process::Command::new("sh");
@@ -403,7 +464,7 @@ mod tests {
         let home = Some(Path::new("/Users/x"));
         assert_eq!(
             external_path_candidates("cat /Users/x/other-repo/secret", dir, home),
-            vec![PathBuf::from("/Users/x/other-repo/secret")]
+            vec![(PathBuf::from("/Users/x/other-repo/secret"), "file")]
         );
     }
 
@@ -413,11 +474,13 @@ mod tests {
         let home = Some(Path::new("/Users/x"));
         assert_eq!(
             external_path_candidates("cat ~/notes.txt", dir, home),
-            vec![PathBuf::from("/Users/x/notes.txt")]
+            vec![(PathBuf::from("/Users/x/notes.txt"), "file")]
         );
+        // Bare `~` is dir-shaped: kind must be "directory" so the derived
+        // ask glob comes from the target itself, not its parent.
         assert_eq!(
             external_path_candidates("cat ~", dir, home),
-            vec![PathBuf::from("/Users/x")]
+            vec![(PathBuf::from("/Users/x"), "directory")]
         );
     }
 
@@ -431,12 +494,34 @@ mod tests {
     }
 
     #[test]
+    fn dir_shaped_tokens_get_directory_kind() {
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        // Bare `..` (last component is ParentDir) resolves to `home` here.
+        assert_eq!(
+            external_path_candidates("cd ..", dir, home),
+            vec![(PathBuf::from("/Users/x"), "directory")]
+        );
+        // Trailing slash.
+        assert_eq!(
+            external_path_candidates("ls ../other/", dir, home),
+            vec![(PathBuf::from("/Users/x/other"), "directory")]
+        );
+        // `cat ../sibling/file` is file-shaped: last component is a normal
+        // filename, not `..`/`.`.
+        assert_eq!(
+            external_path_candidates("cat ../sibling/file", dir, home),
+            vec![(PathBuf::from("/Users/x/sibling/file"), "file")]
+        );
+    }
+
+    #[test]
     fn flag_equals_value_is_split_and_flagged() {
         let dir = Path::new("/Users/x/proj");
         let home = Some(Path::new("/Users/x"));
         assert_eq!(
             external_path_candidates("--output=/Users/x/elsewhere/f", dir, home),
-            vec![PathBuf::from("/Users/x/elsewhere/f")]
+            vec![(PathBuf::from("/Users/x/elsewhere/f"), "file")]
         );
     }
 
@@ -449,11 +534,11 @@ mod tests {
         let home = Some(Path::new("/Users/x"));
         assert_eq!(
             external_path_candidates("cat /Users/x/other-repo/notes=v2.txt", dir, home),
-            vec![PathBuf::from("/Users/x/other-repo/notes=v2.txt")]
+            vec![(PathBuf::from("/Users/x/other-repo/notes=v2.txt"), "file")]
         );
         assert_eq!(
             external_path_candidates("cat ../notes=v2.txt", dir, home),
-            vec![PathBuf::from("/Users/x/notes=v2.txt")]
+            vec![(PathBuf::from("/Users/x/notes=v2.txt"), "file")]
         );
     }
 
@@ -476,11 +561,11 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                PathBuf::from("/Users/x/a/1"),
-                PathBuf::from("/Users/x/b/1"),
-                PathBuf::from("/Users/x/c/1"),
-                PathBuf::from("/Users/x/d/1"),
-                PathBuf::from("/Users/x/e/1"),
+                (PathBuf::from("/Users/x/a/1"), "file"),
+                (PathBuf::from("/Users/x/b/1"), "file"),
+                (PathBuf::from("/Users/x/c/1"), "file"),
+                (PathBuf::from("/Users/x/d/1"), "file"),
+                (PathBuf::from("/Users/x/e/1"), "file"),
             ]
         );
     }
@@ -692,6 +777,109 @@ mod tests {
             reqs[0].metadata["parentDir"],
             serde_json::json!(home.display().to_string())
         );
+    }
+
+    /// `cd ..` from a directory one level under home resolves to home
+    /// itself; the ask must be for home ("directory" kind, dir = target), not
+    /// for home's PARENT (what "file" kind, dir = target.parent(), would
+    /// have produced pre-fix) — an "always allow" on the latter would
+    /// session-wide over-grant everything under home's parent.
+    #[tokio::test]
+    async fn cd_dotdot_from_home_subdir_asks_home_not_its_parent() {
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME must be set"));
+        let dir = tempfile::Builder::new()
+            .prefix("otto-bash-test-")
+            .tempdir_in(&home)
+            .unwrap();
+        let gate = Arc::new(RecordingGate::allow());
+        let ctx = ToolContext::builder(dir.path())
+            .permission(gate.clone())
+            .build();
+
+        BashTool
+            .execute(serde_json::json!({ "command": "cd .." }), &ctx)
+            .await
+            .unwrap();
+
+        let reqs = gate.requests_for("external_directory");
+        assert_eq!(reqs.len(), 1);
+        let want_glob = format!("{}/*", home.display());
+        assert_eq!(
+            reqs[0].patterns,
+            vec![want_glob.clone()],
+            "`cd ..` from a home subdir must ask for home itself, not home's parent"
+        );
+        assert_eq!(reqs[0].always, vec![want_glob]);
+    }
+
+    /// `cat ~/sub/f.txt` is file-shaped (last component is a normal
+    /// filename), so the ask must use "file" kind: glob derived from the
+    /// PARENT of the tilde-expanded path.
+    #[tokio::test]
+    async fn tilde_subpath_asks_file_kind_glob_under_its_parent() {
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME must be set"));
+        let dir = tempfile::Builder::new()
+            .prefix("otto-bash-test-")
+            .tempdir_in(&home)
+            .unwrap();
+        let gate = Arc::new(RecordingGate::allow());
+        let ctx = ToolContext::builder(dir.path())
+            .permission(gate.clone())
+            .build();
+
+        BashTool
+            .execute(
+                serde_json::json!({ "command": "cat ~/otto-bash-test-other/f.txt" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let reqs = gate.requests_for("external_directory");
+        assert_eq!(reqs.len(), 1);
+        let want_glob = format!("{}/otto-bash-test-other/*", home.display());
+        assert_eq!(reqs[0].patterns, vec![want_glob.clone()]);
+        assert_eq!(reqs[0].always, vec![want_glob]);
+    }
+
+    /// A token that resolves to a PROPER ancestor of home (e.g. `ls /Users`
+    /// when home is `/Users/x`) must have its ask clamped to home — never to
+    /// the ancestor's own parent (which, for a token landing on `/`, would
+    /// produce the glob `//*` matching everything).
+    #[tokio::test]
+    async fn ancestor_of_home_token_is_clamped_to_home() {
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME must be set"));
+        let ancestor = home
+            .parent()
+            .filter(|p| p.components().count() > 1)
+            .expect("test HOME must be nested at least two levels deep")
+            .to_path_buf();
+        let dir = tempfile::Builder::new()
+            .prefix("otto-bash-test-")
+            .tempdir_in(&home)
+            .unwrap();
+        let gate = Arc::new(RecordingGate::allow());
+        let ctx = ToolContext::builder(dir.path())
+            .permission(gate.clone())
+            .build();
+
+        BashTool
+            .execute(
+                serde_json::json!({ "command": format!("ls {}", ancestor.display()) }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let reqs = gate.requests_for("external_directory");
+        assert_eq!(reqs.len(), 1);
+        let want_glob = format!("{}/*", home.display());
+        assert_eq!(
+            reqs[0].patterns,
+            vec![want_glob.clone()],
+            "an ancestor-of-home token must clamp the ask to home, never widen above it"
+        );
+        assert_eq!(reqs[0].always, vec![want_glob]);
     }
 
     #[tokio::test]
