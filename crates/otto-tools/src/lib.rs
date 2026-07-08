@@ -18,6 +18,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod hook;
+pub mod hooks;
 pub mod lsp;
 pub mod patch;
 pub mod registry;
@@ -26,6 +28,8 @@ pub mod tool;
 pub mod tools;
 pub mod truncate;
 
+pub use hook::{HookOutcome, ToolHook};
+pub use hooks::RtkHook;
 pub use lsp::LspHandle;
 pub use registry::ToolRegistry;
 pub use subagent::{SubagentRequest, SubagentSpawner};

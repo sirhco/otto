@@ -123,6 +123,13 @@ impl Tool for BashTool {
             output = "(no output)".to_string();
         }
 
+        // Surface RTK wrapping (see `crate::hooks::rtk`): when the command was
+        // rewritten to run through `rtk`, its output is compacted — flag that so
+        // the model does not read the trimmed output as the raw, complete result.
+        if params.command.starts_with("rtk ") {
+            output = format!("[rtk] output compacted by rtk\n\n{output}");
+        }
+
         let mut meta_notes: Vec<String> = Vec::new();
         if expired {
             meta_notes.push(format!(
@@ -170,6 +177,30 @@ mod tests {
         assert!(res.output.contains("hello"));
         assert!(gate.asked_for("bash"));
         assert_eq!(res.metadata["exit"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn rtk_wrapped_command_gets_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::builder(dir.path()).build();
+        // Runs `sh -c "rtk ..."`; whether rtk is installed or not, the prefix is
+        // driven by the command string, so the marker must be present.
+        let res = BashTool
+            .execute(serde_json::json!({ "command": "rtk echo hello" }), &ctx)
+            .await
+            .unwrap();
+        assert!(res.output.starts_with("[rtk] output compacted by rtk"));
+    }
+
+    #[tokio::test]
+    async fn unwrapped_command_has_no_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::builder(dir.path()).build();
+        let res = BashTool
+            .execute(serde_json::json!({ "command": "echo hello" }), &ctx)
+            .await
+            .unwrap();
+        assert!(!res.output.contains("[rtk]"));
     }
 
     #[tokio::test]

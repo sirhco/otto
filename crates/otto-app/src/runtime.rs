@@ -134,6 +134,7 @@ impl Runtime {
         let lsp_handle: Option<Arc<dyn otto_tools::LspHandle>> =
             Some(lsp.clone() as Arc<dyn otto_tools::LspHandle>);
         let mut registry = ToolRegistry::with_builtins(lsp_handle);
+        registry.register_hook(Arc::new(otto_tools::RtkHook::new(rtk_enabled(&config))));
         // Best-effort MCP: connect each configured server and register its
         // namespaced tools. A server that fails to connect is skipped, never
         // fatal (mirrors opencode tolerating an unreachable MCP server).
@@ -201,7 +202,9 @@ impl Runtime {
         );
         let lsp_handle: Option<Arc<dyn otto_tools::LspHandle>> =
             Some(lsp.clone() as Arc<dyn otto_tools::LspHandle>);
-        let tools = Arc::new(ToolRegistry::with_builtins(lsp_handle));
+        let mut registry = ToolRegistry::with_builtins(lsp_handle);
+        registry.register_hook(Arc::new(otto_tools::RtkHook::new(rtk_enabled(&config))));
+        let tools = Arc::new(registry);
 
         let route_factory: Arc<dyn RouteFactory> = Arc::new(AuthRouteFactory::new(
             auth.all().unwrap_or_default(),
@@ -590,6 +593,11 @@ fn agent_config(config: &Config) -> Value {
         .agent
         .clone()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+}
+
+/// Whether RTK shell-command wrapping is enabled in config (default off).
+fn rtk_enabled(config: &Config) -> bool {
+    config.rtk.as_ref().map(|r| r.enabled).unwrap_or(false)
 }
 
 /// The permission ruleset from `config.permission`, or an empty ruleset.

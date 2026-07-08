@@ -11,10 +11,10 @@
 //! (`splash_art.txt`) can be re-spaced or re-centred freely without touching any
 //! code or test.
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
-use ratatui::Frame;
 
 use crate::theme::Theme;
 
@@ -27,9 +27,9 @@ const ART: &str = include_str!("splash_art.txt");
 const VERT_MARGIN: u16 = 2;
 
 /// Ticks the splash stays up before auto-dismissing. The tick pump runs at
-/// 8/s (`view::TICKS_PER_SEC`), so 40 ticks ≈ 5 seconds. Any keypress dismisses
+/// 8/s (`view::TICKS_PER_SEC`), so 24 ticks ≈ 3 seconds. Any keypress dismisses
 /// it earlier (see `App::on_key`).
-pub const SPLASH_TICKS: u16 = 40;
+pub const SPLASH_TICKS: u16 = 24;
 
 /// Split the art into `(banner, portrait)` line slices. The portrait block
 /// starts at the first line containing `@`; the banner is everything before it.

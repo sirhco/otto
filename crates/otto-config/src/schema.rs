@@ -204,6 +204,20 @@ pub struct Config {
     /// `experimental` (`config.ts:166`) — permissive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experimental: Option<Value>,
+
+    /// `rtk` — optional RTK (Rust Token Killer) shell-command wrapping. Otto-only
+    /// (no opencode analogue). When enabled and `rtk` is on `PATH`, the `bash`
+    /// tool's commands are routed through `rtk` to compact their output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtk: Option<Rtk>,
+}
+
+/// `rtk` config block. Off unless `enabled` is set.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Rtk {
+    /// Route `bash` commands through the `rtk` proxy when it is available.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Per-provider `options` override (subset of opencode `ConfigV1.Info.options`).
@@ -283,5 +297,17 @@ mod tests {
     fn theme_absent_is_none() {
         let cfg: Config = serde_json::from_str(r#"{ "shell": "/bin/zsh" }"#).unwrap();
         assert_eq!(cfg.theme, None);
+    }
+
+    #[test]
+    fn parses_rtk_enabled() {
+        let cfg: Config = serde_json::from_str(r#"{ "rtk": { "enabled": true } }"#).unwrap();
+        assert_eq!(cfg.rtk.map(|r| r.enabled), Some(true));
+    }
+
+    #[test]
+    fn rtk_absent_is_none() {
+        let cfg: Config = serde_json::from_str(r#"{ "shell": "/bin/zsh" }"#).unwrap();
+        assert_eq!(cfg.rtk, None);
     }
 }

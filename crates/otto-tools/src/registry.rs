@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::hook::{HookOutcome, ToolHook};
 use crate::tool::{ExecuteResult, Tool, ToolContext, ToolError};
 use crate::tools::{
     ApplyPatchTool, BashTool, EditTool, GlobTool, GrepTool, InvalidTool, QuestionTool, ReadTool,
@@ -17,12 +18,16 @@ use crate::truncate::{MAX_BYTES, MAX_LINES, truncate_output};
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
+    hooks: Vec<Arc<dyn ToolHook>>,
 }
 
 impl ToolRegistry {
     /// An empty registry.
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: Vec::new(),
+            hooks: Vec::new(),
+        }
     }
 
     /// A registry pre-populated with every built-in tool implemented in this
@@ -54,6 +59,12 @@ impl ToolRegistry {
     /// Add a tool to the registry.
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.push(tool);
+    }
+
+    /// Add a pre-execute [`ToolHook`]. Hooks run in registration order before
+    /// every tool call; see [`crate::hook`].
+    pub fn register_hook(&mut self, hook: Arc<dyn ToolHook>) {
+        self.hooks.push(hook);
     }
 
     /// Look up a tool by id.
@@ -102,6 +113,16 @@ impl ToolRegistry {
         let tool = self
             .get(tool_id)
             .ok_or_else(|| ToolError::Execution(format!("unknown tool: {tool_id}")))?;
+
+        // Pre-execute hook seam: each hook may rewrite the args or block the
+        // call. Hooks run in registration order, each seeing the prior output.
+        let mut args = args;
+        for hook in &self.hooks {
+            match hook.before_execute(tool_id, args, ctx).await {
+                HookOutcome::Continue(next) => args = next,
+                HookOutcome::Deny(reason) => return Err(ToolError::Execution(reason)),
+            }
+        }
 
         let mut result = tool.execute(args, ctx).await?;
 
@@ -288,6 +309,87 @@ mod tests {
         // untouched: full 5000-line body, no marker.
         assert!(!res.output.contains("lines truncated"));
         assert_eq!(res.metadata["truncated"], Value::Bool(false));
+    }
+
+    /// Echoes back its `command` arg as output, so a test can observe whether a
+    /// hook rewrote the args before execution.
+    struct EchoCommand;
+    #[async_trait]
+    impl Tool for EchoCommand {
+        fn id(&self) -> &str {
+            "bash"
+        }
+        fn description(&self) -> &str {
+            "echoes the command arg"
+        }
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({})
+        }
+        async fn execute(
+            &self,
+            args: Value,
+            _ctx: &ToolContext,
+        ) -> Result<ExecuteResult, ToolError> {
+            let cmd = args["command"].as_str().unwrap_or_default().to_string();
+            Ok(ExecuteResult::new("echo", cmd))
+        }
+    }
+
+    /// A hook that prefixes the `command` arg for the `bash` tool.
+    struct PrefixHook;
+    #[async_trait]
+    impl crate::hook::ToolHook for PrefixHook {
+        async fn before_execute(
+            &self,
+            tool_id: &str,
+            mut args: Value,
+            _ctx: &ToolContext,
+        ) -> crate::hook::HookOutcome {
+            if tool_id == "bash" {
+                if let Some(cmd) = args["command"].as_str() {
+                    args["command"] = Value::String(format!("wrapped {cmd}"));
+                }
+            }
+            crate::hook::HookOutcome::Continue(args)
+        }
+    }
+
+    /// A hook that always blocks.
+    struct DenyHook;
+    #[async_trait]
+    impl crate::hook::ToolHook for DenyHook {
+        async fn before_execute(
+            &self,
+            _tool_id: &str,
+            _args: Value,
+            _ctx: &ToolContext,
+        ) -> crate::hook::HookOutcome {
+            crate::hook::HookOutcome::Deny("blocked by policy".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_rewrites_args_before_execute() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(EchoCommand));
+        r.register_hook(Arc::new(PrefixHook));
+        let res = r
+            .execute("bash", serde_json::json!({ "command": "git status" }), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(res.output, "wrapped git status");
+    }
+
+    #[tokio::test]
+    async fn hook_deny_short_circuits() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(EchoCommand));
+        r.register_hook(Arc::new(DenyHook));
+        let err = r
+            .execute("bash", serde_json::json!({ "command": "git status" }), &ctx())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("blocked by policy"));
     }
 
     #[tokio::test]
