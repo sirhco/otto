@@ -25,6 +25,21 @@ pub struct ProviderOverride {
     /// An optional API key from config, used as a fallback when no
     /// credential is stored for the provider.
     pub api_key: Option<String>,
+    /// Config-declared context/output windows keyed by model id
+    /// (`provider.<id>.models.<model>.limits`). Overlaid onto the resolved
+    /// [`Model`] so compaction can trigger for models the embedded registry
+    /// doesn't know (local ollama models) before the provider silently
+    /// truncates the prompt.
+    pub model_limits: HashMap<String, ModelLimitsOverride>,
+}
+
+/// One config-declared `limits` block (see [`ProviderOverride::model_limits`]).
+#[derive(Debug, Clone, Default)]
+pub struct ModelLimitsOverride {
+    /// Context window, in tokens.
+    pub context: Option<u64>,
+    /// Max output tokens.
+    pub output: Option<u64>,
 }
 
 /// The default model used when config pins none (`anthropic/claude-sonnet-4-5`).
@@ -197,6 +212,20 @@ impl RouteFactory for AuthRouteFactory {
                 (Arc::from(p.route(model_id)), p.model(model_id))
             }
         };
+        // Overlay config-declared limits (any provider): the run loop's
+        // compaction check reads `model.limits.context`, and local models are
+        // unknown to the embedded registry.
+        let mut model = model;
+        if let Some(ov) = self.providers.get(provider)
+            && let Some(l) = ov.model_limits.get(model_id)
+        {
+            if l.context.is_some() {
+                model.limits.context = l.context;
+            }
+            if l.output.is_some() {
+                model.limits.output = l.output;
+            }
+        }
         Ok((route, model))
     }
 }
@@ -248,6 +277,43 @@ mod tests {
         assert!(msg.contains("resourceName"), "message was: {msg}");
     }
 
+    /// Config-declared `limits` for a model land on the resolved [`Model`], so
+    /// the run loop's compaction check knows the context window of models the
+    /// embedded registry has never heard of (local ollama models).
+    #[test]
+    fn config_model_limits_overlay_resolved_model() {
+        let mut model_limits = HashMap::new();
+        model_limits.insert(
+            "gemma4:26b-mlx".to_string(),
+            ModelLimitsOverride {
+                context: Some(32_768),
+                output: Some(8192),
+            },
+        );
+        let mut providers = HashMap::new();
+        providers.insert(
+            "ollama".to_string(),
+            ProviderOverride {
+                base_url: "http://localhost:11434/v1".to_string(),
+                api_key: None,
+                model_limits,
+            },
+        );
+        let factory = AuthRouteFactory::new(AuthMap::new(), test_transport(), providers);
+
+        let (_route, model) = factory
+            .route_for(&ModelRef::parse("ollama/gemma4:26b-mlx"))
+            .expect("route builds");
+        assert_eq!(model.limits.context, Some(32_768));
+        assert_eq!(model.limits.output, Some(8192));
+
+        // A model without a declared override keeps registry/default limits.
+        let (_route, other) = factory
+            .route_for(&ModelRef::parse("ollama/llama3.2"))
+            .expect("route builds");
+        assert_eq!(other.limits.context, None);
+    }
+
     /// A config-supplied provider override (e.g. `ollama`) resolves to an
     /// OpenAI-compatible route using its configured base URL, rather than the
     /// empty-string fallback for a truly unknown provider.
@@ -259,6 +325,7 @@ mod tests {
             ProviderOverride {
                 base_url: "http://localhost:11434/v1".to_string(),
                 api_key: None,
+                model_limits: HashMap::new(),
             },
         );
         let factory = AuthRouteFactory::new(AuthMap::new(), test_transport(), providers);
