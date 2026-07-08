@@ -53,11 +53,15 @@ fn drain_pipe(
 /// precisely so this can take the whole tree down. Group kill goes through
 /// `/bin/kill` (a negated pid signals the group) because this crate forbids
 /// `unsafe` and there is no safe killpg in std.
+///
+/// The `--` separator is load-bearing: without it, procps kill (Linux) parses
+/// a bare `-<pid>` argument as an option, not a negative pid. The signal is
+/// spelled `-KILL` (not `-9`) for the same portability reason.
 fn kill_child_tree(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         let _ = std::process::Command::new("kill")
-            .args(["-9", &format!("-{pid}")])
+            .args(["-KILL", "--", &format!("-{pid}")])
             .status();
     }
     let _ = child.start_kill();

@@ -1,26 +1,26 @@
-//! XDG-style global directories — port of opencode
-//! `packages/core/src/global.ts:10-29`.
+//! XDG-style global directories — ported from opencode
+//! `packages/core/src/global.ts:10-29`, namespaced under otto's own
+//! directories (no longer shared with an opencode install).
 //!
-//! opencode derives these from `xdg-basedir`; here we use the `dirs` crate,
-//! which resolves the platform-native equivalents (XDG on Linux, the macOS
-//! `~/Library/...` locations, `%APPDATA%` on Windows). Each lives under an
-//! `opencode` subdirectory so the layout stays interoperable with opencode.
+//! Uses the `dirs` crate, which resolves the platform-native equivalents
+//! (XDG on Linux, the macOS `~/Library/...` locations, `%APPDATA%` on
+//! Windows). Each lives under an `otto` subdirectory.
 //!
-//! The `OPENCODE_CONFIG_DIR` env var overrides the config dir
-//! (`global.ts:64` — `Flag.OPENCODE_CONFIG_DIR ?? Path.config`).
+//! The `OTTO_CONFIG_DIR` env var overrides the config dir (port of
+//! `global.ts:64` — `Flag.OPENCODE_CONFIG_DIR ?? Path.config`).
 
 use std::path::PathBuf;
 
 /// Application subdirectory name (`global.ts:10`).
-const APP: &str = "opencode";
+const APP: &str = "otto";
 
 /// Env var overriding the global config dir (`global.ts:64`).
-const CONFIG_DIR_ENV: &str = "OPENCODE_CONFIG_DIR";
+const CONFIG_DIR_ENV: &str = "OTTO_CONFIG_DIR";
 
-/// Global config dir — `xdgConfig/opencode` (`global.ts:13`), or the
-/// `OPENCODE_CONFIG_DIR` override when set (`global.ts:64`).
+/// Global config dir — `xdgConfig/otto` (port of `global.ts:13`), or the
+/// `OTTO_CONFIG_DIR` override when set.
 ///
-/// Falls back to `./opencode` only if the platform config dir can't be resolved.
+/// Falls back to `./otto` only if the platform config dir can't be resolved.
 #[must_use]
 pub fn global_config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(CONFIG_DIR_ENV) {

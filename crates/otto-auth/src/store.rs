@@ -1,8 +1,8 @@
 //! Credential store — port of opencode `packages/opencode/src/auth/index.ts`.
 //!
 //! Persists a map of `provider id -> `[`Credential`]` as pretty JSON at
-//! `<data_dir>/opencode/auth.json`, written with mode `0600` on unix. Honours
-//! the `OPENCODE_AUTH_CONTENT` environment override (read-only short-circuit)
+//! `<data_dir>/otto/auth.json`, written with mode `0600` on unix. Honours
+//! the `OTTO_AUTH_CONTENT` environment override (read-only short-circuit)
 //! and normalises trailing slashes on `set`/`remove`, exactly like the
 //! TypeScript `Auth` service.
 
@@ -14,12 +14,12 @@ use crate::error::{AuthError, Result};
 
 /// Dummy API key handed to SDKs that require *some* key when the real auth is
 /// OAuth-based. Port of `OAUTH_DUMMY_KEY` in opencode `auth/index.ts`.
-pub const OAUTH_DUMMY_KEY: &str = "opencode-oauth-dummy-key";
+pub const OAUTH_DUMMY_KEY: &str = "otto-oauth-dummy-key";
 
 /// Environment variable that, when set, replaces the entire contents of
 /// `auth.json` (read-only). Port of the `OPENCODE_AUTH_CONTENT` branch in
 /// `auth/index.ts` `all()`.
-pub const AUTH_CONTENT_ENV: &str = "OPENCODE_AUTH_CONTENT";
+pub const AUTH_CONTENT_ENV: &str = "OTTO_AUTH_CONTENT";
 
 /// The decoded `auth.json` map: provider id -> credential.
 pub type AuthMap = BTreeMap<String, Credential>;
@@ -44,11 +44,11 @@ pub struct AuthStore {
 
 impl AuthStore {
     /// Store backed by the default `auth.json` path
-    /// (`<data_dir>/opencode/auth.json`).
+    /// (`<data_dir>/otto/auth.json`).
     ///
     /// Port of `const file = path.join(Global.Path.data, "auth.json")` in
     /// `auth/index.ts`. `Global.Path.data` is the XDG data dir under
-    /// `opencode`.
+    /// `otto`.
     ///
     /// # Errors
     /// Returns [`AuthError::Io`] if the platform data directory cannot be
@@ -181,11 +181,11 @@ impl AuthStore {
     }
 }
 
-/// Default `auth.json` path: `<data_dir>/opencode/auth.json`.
+/// Default `auth.json` path: `<data_dir>/otto/auth.json`.
 fn default_path() -> Result<PathBuf> {
     let data = dirs::data_dir()
         .ok_or_else(|| AuthError::Io("could not resolve platform data directory".to_string()))?;
-    Ok(data.join("opencode").join("auth.json"))
+    Ok(data.join("otto").join("auth.json"))
 }
 
 /// Parse a JSON object into an [`AuthMap`], dropping entries that do not decode
