@@ -4,18 +4,20 @@
 
 # otto — an agentic coding harness (Rust port of opencode) with some addtions
 
+> ⚠️ **Work in progress — not stable.** otto is under active development and being actively built out. Config keys, wire formats, HTTP routes, CLI flags, TUI keybindings, and crate APIs can change without notice, and things may break between commits. It is **not recommended for production use** yet. If you depend on current behavior, pin a specific commit.
+
 **otto** is a Rust (edition 2024) implementation of the [opencode](https://github.com/sst/opencode) agentic coding harness. It ships an integrated **CLI**, a native **TUI**, and an opencode-compatible **HTTP/SSE server** for building LLM-driven developer tooling — SDK-free, with its own wire-protocol client for every provider.
 
 Source of behavioral truth: the upstream `opencode/packages/` (primarily `opencode/src` and `llm/src`). otto is a faithful port, not a fork.
 
-> **Status:** `v0.1.0` · 18-crate workspace · **997 tests** passing · `clippy -D warnings` + `fmt` clean.
+> **Status:** `v0.1.0` · **pre-release / unstable** · 18-crate workspace · `clippy -D warnings` + `fmt` clean.
 
 ## Features
 
 - **Six wire protocols, SDK-free** — `anthropic-messages`, `openai-chat`, `openai-compatible-chat`, **`openai-responses`** (gpt-5 class), `gemini`, `bedrock-converse` — plus two transports (`HttpTransport`, and a SigV4-signing `BedrockTransport` with AWS binary event-stream decode).
 - **Broad provider reach** — Anthropic, OpenAI (incl. **gpt-5 via the Responses API**), OpenAI-compatible (DeepSeek / Groq / Together / OpenRouter / xAI / **Ollama** / any custom base URL), Azure OpenAI, Google Gemini, Amazon Bedrock, and **GitHub Copilot** (Claude + OpenAI models, incl. gpt-5 over `/responses`).
 - **Model registry** — the full [models.dev](https://models.dev) catalog (149 providers / 5000+ models) embedded, with fetch-or-embed refresh and capability gating.
-- **Native terminal UI (`otto tui`)** — a `ratatui`/`crossterm` client of `otto serve`: live transcript with markdown + syntax highlighting + colorized diffs, command palette (`ctrl+k`), fuzzy file attachments (`ctrl+f`), live todo panel (`o`), transcript search (`/` + `n`/`N`), interactive permission prompts, session/model/agent pickers, token/cost/context usage, `NO_COLOR` monochrome theme, native drag-select copy + OSC-52 yank (`y`), and `ctrl+z` suspend.
+- **Native terminal UI (`otto tui`)** — a `ratatui`/`crossterm` client of `otto serve`: live transcript with markdown + syntax highlighting + colorized diffs, command palette (`ctrl+k`), fuzzy file attachments (`ctrl+f`), live todo panel (`ctrl+o`), transcript search (`/` + `n`/`N`), interactive permission prompts, **cyclable permission modes** (`shift+tab`: approve-each / accept-edits / full-auto, with a color-coded header indicator), **`Esc` to interrupt a running turn** without ending the session, session/model/agent pickers, token/cost/context usage, `NO_COLOR` monochrome theme, native drag-select copy + OSC-52 yank (`ctrl+y`), and `ctrl+z` suspend.
 - **Comprehensive tooling** — 13 built-in tools (read / write / edit[9-strategy replacer] / glob / grep / bash / apply_patch / webfetch / todo / websearch / skill / question / task-subagent) with truncation and a registry.
 - **LSP diagnostics** — stdio clients for TypeScript, Rust (`rust-analyzer`), Python (`pyright`), and Go (`gopls`); post-edit diagnostics are surfaced back to the model.
 - **Worktree management** — isolated Git sandboxes (`otto worktree list|create|remove|reset`) under a per-project data root.
