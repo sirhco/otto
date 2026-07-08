@@ -69,6 +69,15 @@ pub(crate) mod testing {
             }
         }
 
+        /// Gate that denies exactly `permission` (approving everything else)
+        /// and records requests.
+        pub fn deny(permission: impl Into<String>) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                deny: Some(permission.into()),
+            }
+        }
+
         /// Whether any recorded request used `permission`.
         pub fn asked_for(&self, permission: &str) -> bool {
             self.requests

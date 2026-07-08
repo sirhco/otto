@@ -4,11 +4,23 @@
 //! Runs `sh -c <command>` in `ctx.directory`, honoring a millisecond `timeout`
 //! and cooperative cancellation via `ctx.abort` (killing the child on either),
 //! capturing combined stdout+stderr and the exit code. Asks the `bash`
-//! permission first (shell.ts:283-291).
+//! permission first (shell.ts:283-291), then scans the command string for
+//! tokens that look like paths escaping `ctx.directory` and asks
+//! `external_directory` for each ([`external_path_candidates`]) — the same
+//! guard the filesystem tools apply via
+//! [`crate::tools::assert_external_directory`], before the command spawns.
 //!
-//! TODO(phase-2+): background shells and the tree-sitter path-scan / PowerShell
-//! handling from shell.ts are not ported; only the foreground path is here.
+//! This is a conservative **mitigation, not containment**: it is a
+//! whitespace/token-level string scan, not a shell parser, so it does not see
+//! through `$VAR` expansion, command substitution (`` $(...) ``/backticks),
+//! or quoting/escaping tricks. It only catches literal paths typed on the
+//! command line.
+//!
+//! TODO(phase-2+): string-scan ported; tree-sitter upgrade pending.
+//! Background shells and PowerShell handling from shell.ts are still not
+//! ported; only the foreground path is here.
 
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +28,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 
+use super::assert_external_directory;
 use crate::tool::{ExecuteResult, PermissionRequest, Tool, ToolContext, ToolError, decode_args};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -65,6 +78,132 @@ fn kill_child_tree(child: &mut tokio::process::Child) {
             .status();
     }
     let _ = child.start_kill();
+}
+
+/// The user's home directory, read fresh from `$HOME` at each call site — the
+/// same `cfg(unix)`-for-v1 stance as [`kill_child_tree`]. `None` on other
+/// platforms (and if `$HOME` is unset), which simply means nothing is ever
+/// "under home" and [`external_path_candidates`] flags nothing.
+#[cfg(unix)]
+fn bash_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(not(unix))]
+fn bash_home() -> Option<PathBuf> {
+    None
+}
+
+/// Collapse `.` and lexical `..` components of `path` without touching the
+/// filesystem — the same lexical stance as `contains_path` in
+/// `crate::tools`. A `..` with nothing precedable to pop (already at the
+/// root, or more `..`s than preceding components) is kept as-is rather than
+/// erroring.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut stack: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(stack.last(), Some(Component::Normal(_))) {
+                    stack.pop();
+                } else {
+                    stack.push(component);
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    stack.into_iter().collect()
+}
+
+/// Whether `resolved` sits under `home`, or is an ancestor `home` itself sits
+/// under. The ancestor direction matters because a `..` escape from a
+/// directory nested under `home` can climb *past* `home` towards the root
+/// while still being a "close to home" escape worth flagging (e.g. two `..`
+/// from a project two levels under home lands one level above home). A bare
+/// root (`/`) is excluded from the ancestor check — every absolute path is
+/// an ancestor of the root, which would defeat the whole point of the check.
+fn under_home(resolved: &Path, home: Option<&Path>) -> bool {
+    let Some(home) = home else { return false };
+    resolved.starts_with(home) || (resolved.components().count() > 1 && home.starts_with(resolved))
+}
+
+/// Strip one layer of matching surrounding quotes and trailing punctuation
+/// from a whitespace-delimited token.
+fn clean_token(token: &str) -> &str {
+    let mut token = token;
+    if token.len() >= 2 {
+        let bytes = token.as_bytes();
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            token = &token[1..token.len() - 1];
+        }
+    }
+    token.trim_end_matches([',', ';', ':', ')', ']', '}'])
+}
+
+/// Scan `command` for tokens that look like paths escaping `directory` — the
+/// pure-fn core of the bash sandbox check (see the module docs for why this
+/// is a mitigation, not containment).
+///
+/// A token is a *candidate* when it is absolute (`/...`), tilde-relative
+/// (`~`/`~/...`, expanded via `home`), or contains a lexical `..` escape
+/// (resolved against `directory`; no filesystem access). Candidates are only
+/// **flagged** when they resolve outside `directory` *and* [`under_home`] —
+/// `/usr/bin/env`, `/etc/hosts`, `/opt/...` stay unflagged, avoiding prompt
+/// fatigue for system-wide paths unrelated to the user's projects. `--flag=/x`
+/// style tokens are split on `=` so the value is checked. Results are deduped
+/// by parent directory and capped at 5.
+fn external_path_candidates(command: &str, directory: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    const MAX_CANDIDATES: usize = 5;
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen_parents: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+    for raw in command.split_whitespace() {
+        let token = match raw.split_once('=') {
+            Some((_, value)) if !value.is_empty() => value,
+            _ => raw,
+        };
+        let token = clean_token(token);
+        if token.is_empty() || token.contains("://") || (token.contains('@') && token.contains(':'))
+        {
+            continue;
+        }
+
+        let resolved = if token == "~" {
+            home.map(Path::to_path_buf)
+        } else if let Some(rest) = token.strip_prefix("~/") {
+            home.map(|h| lexical_normalize(&h.join(rest)))
+        } else if token.starts_with('/') {
+            Some(lexical_normalize(Path::new(token)))
+        } else if Path::new(token)
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            Some(lexical_normalize(&directory.join(token)))
+        } else {
+            None
+        };
+
+        let Some(resolved) = resolved else { continue };
+        if resolved.starts_with(directory) || !under_home(&resolved, home) {
+            continue;
+        }
+
+        let parent = resolved
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| resolved.clone());
+        if seen_parents.insert(parent) {
+            out.push(resolved);
+            if out.len() >= MAX_CANDIDATES {
+                break;
+            }
+        }
+    }
+
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +257,12 @@ impl Tool for BashTool {
                 metadata: serde_json::json!({ "command": params.command }),
             })
             .await?;
+
+        let home = bash_home();
+        for candidate in external_path_candidates(&params.command, &ctx.directory, home.as_deref())
+        {
+            assert_external_directory(ctx, &candidate, "directory").await?;
+        }
 
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
@@ -214,6 +359,107 @@ mod tests {
     use crate::testing::RecordingGate;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
+
+    // -- external_path_candidates (pure fn) ---------------------------------
+
+    #[test]
+    fn simple_commands_have_no_candidates() {
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        for cmd in ["echo hello", "ls -la", "git status"] {
+            assert!(
+                external_path_candidates(cmd, dir, home).is_empty(),
+                "expected no candidates for {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn urls_and_scp_remotes_and_unrelated_absolute_paths_are_not_flagged() {
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        for cmd in [
+            "git clone https://github.com/a/b",
+            "git@github.com:a/b.git",
+            "/usr/bin/env python3",
+        ] {
+            assert!(
+                external_path_candidates(cmd, dir, home).is_empty(),
+                "expected no candidates for {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_path_outside_dir_under_home_is_flagged() {
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        assert_eq!(
+            external_path_candidates("cat /Users/x/other-repo/secret", dir, home),
+            vec![PathBuf::from("/Users/x/other-repo/secret")]
+        );
+    }
+
+    #[test]
+    fn tilde_paths_are_flagged() {
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        assert_eq!(
+            external_path_candidates("cat ~/notes.txt", dir, home),
+            vec![PathBuf::from("/Users/x/notes.txt")]
+        );
+        assert_eq!(
+            external_path_candidates("cat ~", dir, home),
+            vec![PathBuf::from("/Users/x")]
+        );
+    }
+
+    #[test]
+    fn dotdot_escapes_landing_under_home_are_flagged() {
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        assert!(!external_path_candidates("cat ../sibling/file", dir, home).is_empty());
+        assert!(!external_path_candidates("cd ..", dir, home).is_empty());
+        assert!(!external_path_candidates("grep -r foo ../../", dir, home).is_empty());
+    }
+
+    #[test]
+    fn flag_equals_value_is_split_and_flagged() {
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        assert_eq!(
+            external_path_candidates("--output=/Users/x/elsewhere/f", dir, home),
+            vec![PathBuf::from("/Users/x/elsewhere/f")]
+        );
+    }
+
+    #[test]
+    fn paths_that_resolve_inside_directory_are_not_flagged() {
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        assert!(external_path_candidates("cat /Users/x/proj/src/main.rs", dir, home).is_empty());
+        assert!(external_path_candidates("cat ./src/../src/main.rs", dir, home).is_empty());
+    }
+
+    #[test]
+    fn candidates_are_deduped_by_parent_and_capped() {
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        let cmd = "cat /Users/x/a/1 /Users/x/a/2 /Users/x/b/1 /Users/x/c/1 /Users/x/d/1 /Users/x/e/1 /Users/x/f/1";
+        let got = external_path_candidates(cmd, dir, home);
+        assert!(got.len() <= 5, "expected cap at 5, got {}", got.len());
+        // /Users/x/a/1 and /Users/x/a/2 share a parent — only the first counts.
+        assert!(!got.contains(&PathBuf::from("/Users/x/a/2")));
+    }
+
+    #[test]
+    fn no_home_means_nothing_is_flagged() {
+        let dir = Path::new("/Users/x/proj");
+        assert!(external_path_candidates("cat /Users/x/other-repo/secret", dir, None).is_empty());
+        assert!(external_path_candidates("cat ~/notes.txt", dir, None).is_empty());
+    }
+
+    // -- integration: BashTool::execute wiring -------------------------------
 
     #[tokio::test]
     async fn echo_round_trip_and_permission() {
@@ -363,5 +609,86 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(res.metadata["aborted"], serde_json::json!(true));
+    }
+
+    // -- integration: external_directory wiring ------------------------------
+    //
+    // These tests need a real path that is genuinely "under home" per
+    // `bash_home()` (which reads the real `$HOME`), so `ctx.directory` is a
+    // tempdir created *inside* `$HOME` rather than the usual
+    // `tempfile::tempdir()` (which lands outside `$HOME`, e.g.
+    // `/var/folders/...` or `/tmp` — exactly why the rest of this file's
+    // tests stay green: none of their commands reference an outside-dir path
+    // that is also under home).
+
+    #[tokio::test]
+    async fn command_touching_path_under_home_asks_external_directory_and_still_runs() {
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME must be set"));
+        let dir = tempfile::Builder::new()
+            .prefix("otto-bash-test-")
+            .tempdir_in(&home)
+            .unwrap();
+        let gate = Arc::new(RecordingGate::allow());
+        let ctx = ToolContext::builder(dir.path())
+            .permission(gate.clone())
+            .build();
+        let outside = home.join("otto-bash-test-outside-marker");
+
+        let res = BashTool
+            .execute(
+                serde_json::json!({ "command": format!("echo hi {}", outside.display()) }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(gate.asked_for("external_directory"));
+        assert!(res.output.contains("hi"));
+    }
+
+    #[tokio::test]
+    async fn echo_hello_does_not_ask_external_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = Arc::new(RecordingGate::allow());
+        let ctx = ToolContext::builder(dir.path())
+            .permission(gate.clone())
+            .build();
+        BashTool
+            .execute(serde_json::json!({ "command": "echo hello" }), &ctx)
+            .await
+            .unwrap();
+        assert!(!gate.asked_for("external_directory"));
+    }
+
+    #[tokio::test]
+    async fn denied_external_directory_blocks_command_before_it_runs() {
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME must be set"));
+        let dir = tempfile::Builder::new()
+            .prefix("otto-bash-test-")
+            .tempdir_in(&home)
+            .unwrap();
+        let gate = Arc::new(RecordingGate::deny("external_directory"));
+        let ctx = ToolContext::builder(dir.path())
+            .permission(gate.clone())
+            .build();
+        let marker = home.join(format!("otto-bash-test-marker-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+
+        let result = BashTool
+            .execute(
+                serde_json::json!({ "command": format!("touch {}", marker.display()) }),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "expected the denial to propagate as an error"
+        );
+        assert!(
+            !marker.exists(),
+            "command must not have run — the denied path was never touched"
+        );
+        let _ = std::fs::remove_file(&marker);
     }
 }
