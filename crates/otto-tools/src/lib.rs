@@ -86,6 +86,17 @@ pub(crate) mod testing {
                 .iter()
                 .any(|r| r.permission == permission)
         }
+
+        /// All recorded requests for `permission`, in ask order.
+        pub fn requests_for(&self, permission: &str) -> Vec<PermissionRequest> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.permission == permission)
+                .cloned()
+                .collect()
+        }
     }
 
     #[async_trait::async_trait]

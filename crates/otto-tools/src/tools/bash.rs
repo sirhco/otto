@@ -152,17 +152,20 @@ fn clean_token(token: &str) -> &str {
 /// (resolved against `directory`; no filesystem access). Candidates are only
 /// **flagged** when they resolve outside `directory` *and* [`under_home`] —
 /// `/usr/bin/env`, `/etc/hosts`, `/opt/...` stay unflagged, avoiding prompt
-/// fatigue for system-wide paths unrelated to the user's projects. `--flag=/x`
-/// style tokens are split on `=` so the value is checked. Results are deduped
-/// by parent directory and capped at 5.
+/// fatigue for system-wide paths unrelated to the user's projects. Flag-shaped
+/// (`-...`) tokens are split on `=` so `--flag=/x` values are checked. Results
+/// are deduped by parent directory and capped at 5.
 fn external_path_candidates(command: &str, directory: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     const MAX_CANDIDATES: usize = 5;
     let mut out: Vec<PathBuf> = Vec::new();
     let mut seen_parents: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     for raw in command.split_whitespace() {
+        // Split `--flag=/x` so the value is checked — but only for
+        // flag-shaped (`-...`) tokens: a *path* whose name contains a
+        // literal `=` (`../notes=v2.txt`) must keep its `/`/`..` prefix.
         let token = match raw.split_once('=') {
-            Some((_, value)) if !value.is_empty() => value,
+            Some((_, value)) if raw.starts_with('-') && !value.is_empty() => value,
             _ => raw,
         };
         let token = clean_token(token);
@@ -261,7 +264,11 @@ impl Tool for BashTool {
         let home = bash_home();
         for candidate in external_path_candidates(&params.command, &ctx.directory, home.as_deref())
         {
-            assert_external_directory(ctx, &candidate, "directory").await?;
+            // "file" kind (the write/edit convention for unknown targets):
+            // the always-allow glob and parentDir derive from the token's
+            // parent directory. Scanned tokens skew heavily toward file
+            // paths; the "directory" kind would glob `{file}/*`.
+            assert_external_directory(ctx, &candidate, "file").await?;
         }
 
         let mut cmd = tokio::process::Command::new("sh");
@@ -434,6 +441,23 @@ mod tests {
     }
 
     #[test]
+    fn escaping_path_containing_equals_is_still_flagged() {
+        // The `=`-split must apply only to flag-shaped (`-...`) tokens: a
+        // path whose *name* contains a literal `=` must not lose its leading
+        // `/` or `..` and slip through unflagged.
+        let dir = Path::new("/Users/x/proj");
+        let home = Some(Path::new("/Users/x"));
+        assert_eq!(
+            external_path_candidates("cat /Users/x/other-repo/notes=v2.txt", dir, home),
+            vec![PathBuf::from("/Users/x/other-repo/notes=v2.txt")]
+        );
+        assert_eq!(
+            external_path_candidates("cat ../notes=v2.txt", dir, home),
+            vec![PathBuf::from("/Users/x/notes=v2.txt")]
+        );
+    }
+
+    #[test]
     fn paths_that_resolve_inside_directory_are_not_flagged() {
         let dir = Path::new("/Users/x/proj");
         let home = Some(Path::new("/Users/x"));
@@ -447,9 +471,18 @@ mod tests {
         let home = Some(Path::new("/Users/x"));
         let cmd = "cat /Users/x/a/1 /Users/x/a/2 /Users/x/b/1 /Users/x/c/1 /Users/x/d/1 /Users/x/e/1 /Users/x/f/1";
         let got = external_path_candidates(cmd, dir, home);
-        assert!(got.len() <= 5, "expected cap at 5, got {}", got.len());
-        // /Users/x/a/1 and /Users/x/a/2 share a parent — only the first counts.
-        assert!(!got.contains(&PathBuf::from("/Users/x/a/2")));
+        // Six distinct parents (a-f) in the command; the cap must actually
+        // bite at 5 and drop the sixth (/Users/x/f/1).
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("/Users/x/a/1"),
+                PathBuf::from("/Users/x/b/1"),
+                PathBuf::from("/Users/x/c/1"),
+                PathBuf::from("/Users/x/d/1"),
+                PathBuf::from("/Users/x/e/1"),
+            ]
+        );
     }
 
     #[test]
@@ -644,6 +677,21 @@ mod tests {
 
         assert!(gate.asked_for("external_directory"));
         assert!(res.output.contains("hi"));
+
+        // The scanned token is a *file*-shaped path, so the ask must use the
+        // "file" kind: the always-allow glob and parentDir come from the
+        // token's PARENT directory ({home}/*), not from the token itself
+        // ({file}/* — which would corrupt the persisted "always allow this
+        // directory" flow).
+        let reqs = gate.requests_for("external_directory");
+        assert_eq!(reqs.len(), 1);
+        let want_glob = format!("{}/*", home.display());
+        assert_eq!(reqs[0].patterns, vec![want_glob.clone()]);
+        assert_eq!(reqs[0].always, vec![want_glob]);
+        assert_eq!(
+            reqs[0].metadata["parentDir"],
+            serde_json::json!(home.display().to_string())
+        );
     }
 
     #[tokio::test]
