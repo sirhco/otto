@@ -17,6 +17,11 @@ use serde_json::{json, Value};
 
 use crate::agent::{AgentInfo, AgentMode};
 
+/// Plan-mode system prompt. No opencode analogue file — opencode's plan agent
+/// relies on the harness UI to surface plans; otto's TUI has no such surface,
+/// so the prompt itself directs persisting the plan to `.opencode/plans/*.md`
+/// (the one path plan mode may write) in the sdd-parseable `### Task N:` form.
+pub const PROMPT_PLAN: &str = include_str!("../assets/plan.txt");
 /// Explore agent system prompt (`agent/prompt/explore.txt`, agent.ts:214).
 pub const PROMPT_EXPLORE: &str = include_str!("../assets/explore.txt");
 /// Compaction agent system prompt (`agent/prompt/compaction.txt`, agent.ts:224).
@@ -118,7 +123,7 @@ pub fn plan() -> AgentInfo {
         })),
         model: None,
         variant: None,
-        prompt: None,
+        prompt: Some(PROMPT_PLAN.into()),
         options: empty_options(),
         steps: None,
     }
@@ -311,6 +316,23 @@ mod tests {
             Action::Allow
         );
         assert_eq!(eval(&rs, "plan_exit", "*"), Action::Allow);
+    }
+
+    /// The ruleset ALLOWS writing `.opencode/plans/*.md`, but without a system
+    /// prompt nothing ever tells the model to do it — plan mode produced no
+    /// plan file. The prompt must direct the agent to persist the final plan
+    /// there, in the `### Task N:` shape the sdd workflow parses.
+    #[test]
+    fn plan_prompt_directs_writing_a_plan_file() {
+        let prompt = plan().prompt.expect("plan agent carries a system prompt");
+        assert!(
+            prompt.contains(".opencode/plans/"),
+            "prompt names the plans directory"
+        );
+        assert!(
+            prompt.contains("### Task"),
+            "prompt pins the sdd-parseable task heading format"
+        );
     }
 
     #[test]
