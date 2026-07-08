@@ -712,9 +712,9 @@ mod tersemode_tests {
     fn enabled_yields_directive_with_preserve_clause() {
         let d = tersemode_directive(&cfg(r#"{ "tersemode": { "enabled": true } }"#)).unwrap();
         // The resolved directive carries the byte-exact-preservation clause and
-        // the Full-level (default) prose rule.
+        // the Full-level (default) prose rule ("drop articles ...").
         assert!(d.contains("byte-for-byte"));
-        assert!(d.contains("tersemode"));
+        assert!(d.contains("articles"));
     }
 
     #[test]
