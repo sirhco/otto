@@ -8,7 +8,7 @@
 
 Source of behavioral truth: the upstream `opencode/packages/` (primarily `opencode/src` and `llm/src`). otto is a faithful port, not a fork.
 
-> **Status:** `v0.1.0` · 17-crate workspace · **749 tests** passing · `clippy -D warnings` + `fmt` clean.
+> **Status:** `v0.1.0` · 18-crate workspace · **997 tests** passing · `clippy -D warnings` + `fmt` clean.
 
 ## Features
 
@@ -16,7 +16,7 @@ Source of behavioral truth: the upstream `opencode/packages/` (primarily `openco
 - **Broad provider reach** — Anthropic, OpenAI (incl. **gpt-5 via the Responses API**), OpenAI-compatible (DeepSeek / Groq / Together / OpenRouter / xAI / **Ollama** / any custom base URL), Azure OpenAI, Google Gemini, Amazon Bedrock, and **GitHub Copilot** (Claude + OpenAI models, incl. gpt-5 over `/responses`).
 - **Model registry** — the full [models.dev](https://models.dev) catalog (149 providers / 5000+ models) embedded, with fetch-or-embed refresh and capability gating.
 - **Native terminal UI (`otto tui`)** — a `ratatui`/`crossterm` client of `otto serve`: live transcript with markdown + syntax highlighting + colorized diffs, command palette (`ctrl+k`), fuzzy file attachments (`ctrl+f`), live todo panel (`o`), transcript search (`/` + `n`/`N`), interactive permission prompts, session/model/agent pickers, token/cost/context usage, `NO_COLOR` monochrome theme, native drag-select copy + OSC-52 yank (`y`), and `ctrl+z` suspend.
-- **Comprehensive tooling** — 14 built-in tools (read / write / edit[9-strategy replacer] / glob / grep / bash / apply_patch / webfetch / todo / websearch / skill / question / task-subagent) with truncation and a registry.
+- **Comprehensive tooling** — 13 built-in tools (read / write / edit[9-strategy replacer] / glob / grep / bash / apply_patch / webfetch / todo / websearch / skill / question / task-subagent) with truncation and a registry.
 - **LSP diagnostics** — stdio clients for TypeScript, Rust (`rust-analyzer`), Python (`pyright`), and Go (`gopls`); post-edit diagnostics are surfaced back to the model.
 - **Worktree management** — isolated Git sandboxes (`otto worktree list|create|remove|reset`) under a per-project data root.
 - **Session persistence** — SQLite (via `sqlx`) for conversational history, parts, tool output, and compaction.
@@ -71,7 +71,7 @@ otto models | otto agent list | otto mcp list | otto worktree list
 
 ## Architecture
 
-A 17-crate workspace under `crates/`, separated by responsibility.
+An 18-crate workspace under `crates/`, separated by responsibility.
 
 | Crate | Purpose |
 | :--- | :--- |
@@ -81,6 +81,7 @@ A 17-crate workspace under `crates/`, separated by responsibility.
 | `otto-tools` | `Tool` trait + 14 built-ins + truncation + registry. |
 | `otto-storage` | Session/message/part model over SQLite (`sqlx`). |
 | `otto-session` | The agent loop: convert, event→part processor, tool-augmented stream, run loop, compaction, retry, subagents. |
+| `otto-workflow` | Deterministic driver above the run loop: step/status types, test-runner abstraction, `judge()` node (TDD/SDD/plan engines land in later phases). |
 | `otto-permission` | Ruleset evaluation + ask/reply gate. |
 | `otto-agent` | Agent identity, config merge, subagent-permission narrowing. |
 | `otto-config` | Config load + provider overrides (custom base URLs / keys). |
@@ -96,7 +97,7 @@ A 17-crate workspace under `crates/`, separated by responsibility.
 ## Testing
 
 ```bash
-cargo test --workspace                          # 749 tests
+cargo test --workspace                          # 997 tests
 cargo test -p otto-llm -- --ignored            # live Anthropic (needs ANTHROPIC_API_KEY)
 cargo test -p otto-lsp -- --ignored            # live rust-analyzer (skips if not on PATH)
 ```
@@ -107,13 +108,14 @@ Actively developed toward parity with upstream opencode. Known limitations:
 
 - **OpenAI Responses (v1):** streaming reasoning + tool calls work; reasoning *input-replay* across turns is intentionally dropped, and hosted (provider-executed) tools + the WebSocket transport are deferred.
 - **share / sync / GitHub-app** features are deliberately not ported (they depend on opencode's hosted cloud backend).
+- **Workflow engine (`otto-workflow`)** is an early skeleton — step/status types, the test-runner abstraction, and the `judge()` node exist; the TDD / SDD / plan-execution engines land in later phases.
 - **Anthropic OAuth** endpoints are `TODO(confirm)` — the API-key path is solid; OAuth is unverified against a live login.
 - **Bedrock** reads AWS credentials from environment only (no profile/SSO chain); **Gemini** is AI-Studio only (no Vertex).
 - The server mirrors opencode API *shapes* but has not been byte-diffed against an external OpenAPI spec.
 
 ## License
 
-MIT.
+Apache-2.0. See [LICENSE](LICENSE).
 
 ---
 *A Rust port built for robust, reproducible agentic workflows.*
