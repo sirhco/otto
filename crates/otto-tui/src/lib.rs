@@ -124,25 +124,39 @@ pub async fn run(opts: TuiOptions) -> Result<()> {
             }
         });
     }
-    // Event (permission) pump.
+    // Event (permission) pump. Reconnects with backoff: the stream ending (or
+    // failing to open) would otherwise silently kill permission prompts and
+    // workflow progress for the rest of the session.
     {
         let tx = tx.clone();
         let client = client.clone();
         tokio::spawn(async move {
-            if let Ok(mut stream) = client.events().await {
-                while let Some(ev) = stream.next().await {
-                    // `permission.mode_changed` is translated straight into the
-                    // dedicated `Msg::PermissionModeChanged` here (the one place
-                    // `ServerEvent`s become `Msg`s) rather than routed through
-                    // `Msg::Event`, so `App::update` can handle it as a plain,
-                    // independently-testable top-level variant.
-                    let msg = match ev {
-                        crate::sse::ServerEvent::PermissionModeChanged { mode, .. } => {
-                            Msg::PermissionModeChanged(mode)
+            let mut attempt: u32 = 0;
+            loop {
+                if let Ok(mut stream) = client.events().await {
+                    attempt = 0;
+                    while let Some(ev) = stream.next().await {
+                        // `permission.mode_changed` is translated straight into
+                        // the dedicated `Msg::PermissionModeChanged` here (the
+                        // one place `ServerEvent`s become `Msg`s) rather than
+                        // routed through `Msg::Event`, so `App::update` can
+                        // handle it as a plain, independently-testable
+                        // top-level variant.
+                        let msg = match ev {
+                            crate::sse::ServerEvent::PermissionModeChanged { mode, .. } => {
+                                Msg::PermissionModeChanged(mode)
+                            }
+                            other => Msg::Event(other),
+                        };
+                        if tx.send(msg).is_err() {
+                            return; // UI gone — stop for good
                         }
-                        other => Msg::Event(other),
-                    };
-                    let _ = tx.send(msg);
+                    }
+                }
+                attempt = attempt.saturating_add(1);
+                tokio::time::sleep(event_reconnect_delay(attempt)).await;
+                if tx.is_closed() {
+                    return;
                 }
             }
         });
@@ -389,6 +403,25 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         }
         return;
     }
+    if let Msg::PromptEnded = &msg {
+        // An errored turn may have dropped deltas the server persisted after
+        // the connection broke — reconcile the transcript from history. The
+        // stream's ProviderError event is processed before PromptEnded (same
+        // FIFO channel), so `app.status` already reflects the failure here.
+        if should_reconcile_history(app)
+            && let Some(id) = app.session_id.clone()
+        {
+            let client = client.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Ok(rows) = client.history(&id).await {
+                    let _ = tx.send(Msg::HistoryLoaded(rows));
+                }
+            });
+        }
+        app.update(msg);
+        return;
+    }
     if let Msg::StartWorkflow { kind, arg } = &msg {
         let kind = kind.clone();
         let arg = arg.clone();
@@ -432,6 +465,23 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         return;
     }
     app.update(msg);
+}
+
+/// Backoff before `/event` reconnect attempt `attempt` (1-based):
+/// 1s, 2s, 4s, 8s, then capped at 15s.
+fn event_reconnect_delay(attempt: u32) -> std::time::Duration {
+    let secs = 1u64
+        .checked_shl(attempt.saturating_sub(1))
+        .unwrap_or(u64::MAX)
+        .min(15);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Whether a just-ended turn warrants a history refetch: a turn that ended in
+/// a transport/provider error may have dropped deltas the server persisted
+/// after the connection broke — reloading history reconciles the transcript.
+fn should_reconcile_history(app: &App) -> bool {
+    app.session_id.is_some() && app.status.starts_with("error:")
 }
 
 fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -509,6 +559,37 @@ fn osc52_copy(s: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_reconnect_delay_backs_off_and_caps() {
+        use std::time::Duration;
+        assert_eq!(event_reconnect_delay(1), Duration::from_secs(1));
+        assert_eq!(event_reconnect_delay(2), Duration::from_secs(2));
+        assert_eq!(event_reconnect_delay(3), Duration::from_secs(4));
+        assert_eq!(event_reconnect_delay(5), Duration::from_secs(15), "capped");
+        assert_eq!(event_reconnect_delay(50), Duration::from_secs(15), "still capped");
+    }
+
+    #[test]
+    fn reconcile_only_after_errored_turn() {
+        let mut app = App::new();
+        app.session_id = Some("ses_1".into());
+        app.status = "ready".into();
+        assert!(
+            !should_reconcile_history(&app),
+            "clean turn end needs no history refetch"
+        );
+        app.status = "error: lost connection to otto server: timed out".into();
+        assert!(
+            should_reconcile_history(&app),
+            "errored turn may have dropped persisted deltas — refetch"
+        );
+        app.session_id = None;
+        assert!(
+            !should_reconcile_history(&app),
+            "no session — nothing to refetch"
+        );
+    }
 
     #[test]
     fn osc52_sequence_encodes_rfc4648_vectors() {

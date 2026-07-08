@@ -88,6 +88,14 @@ struct ToolCallHandle {
     done_rx: Option<oneshot::Receiver<()>>,
 }
 
+/// Minimum wall-clock gap between persisted snapshots of an open streaming
+/// part. Writing the whole accumulated blob on every delta is O(N²) bytes per
+/// message and — because the drain loop awaits each write before polling the
+/// next event — throttles live event delivery to the store-write rate. The
+/// block-end handlers always persist, so at most this window of text is ever
+/// unflushed.
+const PART_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Accumulated streaming state for the currently-open text part.
 struct TextAccum {
     /// Backing part id.
@@ -98,6 +106,8 @@ struct TextAccum {
     start: i64,
     /// Latest provider metadata, if any.
     metadata: Option<Json>,
+    /// When the accumulated text was last persisted (debounce clock).
+    last_persist: std::time::Instant,
 }
 
 /// Accumulated streaming state for one open reasoning block
@@ -111,6 +121,8 @@ struct ReasoningAccum {
     start: i64,
     /// Latest provider metadata, if any.
     metadata: Option<Json>,
+    /// When the accumulated text was last persisted (debounce clock).
+    last_persist: std::time::Instant,
 }
 
 /// Consumes a `Stream<LLMEvent>` for a single assistant message and drives the
@@ -460,6 +472,7 @@ impl Processor {
                 text: String::new(),
                 start,
                 metadata: metadata.clone(),
+                last_persist: std::time::Instant::now(),
             },
         );
         let part = self.reasoning_part(&part_id, "", start, None, metadata);
@@ -481,6 +494,12 @@ impl Processor {
         if metadata.is_some() {
             accum.metadata = metadata;
         }
+        // Debounced: persist a snapshot at most every PART_FLUSH_INTERVAL;
+        // `finish_reasoning` always persists the final text.
+        if accum.last_persist.elapsed() < PART_FLUSH_INTERVAL {
+            return Ok(());
+        }
+        accum.last_persist = std::time::Instant::now();
         let (part_id, text, start, meta) = (
             accum.part_id.clone(),
             accum.text.clone(),
@@ -553,6 +572,7 @@ impl Processor {
             text: String::new(),
             start,
             metadata: metadata.clone(),
+            last_persist: std::time::Instant::now(),
         });
         let part = self.text_part(&part_id, "", start, None, metadata);
         self.store.update_part(&part).await?;
@@ -571,6 +591,12 @@ impl Processor {
         if metadata.is_some() {
             accum.metadata = metadata;
         }
+        // Debounced: persist a snapshot at most every PART_FLUSH_INTERVAL;
+        // `on_text_end` always persists the final text.
+        if accum.last_persist.elapsed() < PART_FLUSH_INTERVAL {
+            return Ok(());
+        }
+        accum.last_persist = std::time::Instant::now();
         let (part_id, text, start, meta) = (
             accum.part_id.clone(),
             accum.text.clone(),

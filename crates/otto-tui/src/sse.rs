@@ -5,9 +5,15 @@ use otto_events::LLMEvent;
 use serde::Deserialize;
 
 /// Accumulates raw SSE bytes and yields each completed `data:` payload.
+///
+/// The buffer holds raw bytes (not `String`): a network chunk boundary can
+/// fall mid-way through a multi-byte UTF-8 sequence, and decoding each chunk
+/// independently would turn both halves into U+FFFD, corrupting the frame and
+/// silently dropping the event. Frames are only decoded once complete (the
+/// `\n\n` separator is ASCII, so scanning bytes for it is safe).
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
-    buf: String,
+    buf: Vec<u8>,
 }
 
 /// A decoded `/event` envelope frame — only the variants the TUI acts on.
@@ -81,24 +87,46 @@ impl FrameDecoder {
     /// event:, id:) are dropped. A `data:` payload spanning multiple lines is
     /// joined with `\n` (SSE spec), though otto emits single-line data.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<String> {
-        self.buf.push_str(&String::from_utf8_lossy(chunk));
+        self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some(pos) = self.buf.find("\n\n") {
-            let raw = self.buf[..pos].to_string();
-            self.buf.drain(..pos + 2);
-            let data: Vec<&str> = raw
-                .lines()
-                .filter_map(|l| {
-                    l.strip_prefix("data:")
-                        .map(|d| d.strip_prefix(' ').unwrap_or(d))
-                })
-                .collect();
-            if !data.is_empty() {
-                out.push(data.join("\n"));
+        while let Some(pos) = find_frame_end(&self.buf) {
+            let raw: Vec<u8> = self.buf.drain(..pos + 2).take(pos).collect();
+            if let Some(data) = extract_data(&raw) {
+                out.push(data);
             }
         }
         out
     }
+
+    /// Drain the buffer, yielding any trailing frame that was never terminated
+    /// with `\n\n` — a server's final frame can be cut off by the connection
+    /// closing, and EOF must not swallow it. Call once when the byte stream
+    /// ends (clean EOF or error).
+    pub fn flush(&mut self) -> Vec<String> {
+        let raw = std::mem::take(&mut self.buf);
+        extract_data(&raw).into_iter().collect()
+    }
+}
+
+/// Byte offset of the first `\n\n` frame separator, if any.
+fn find_frame_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n")
+}
+
+/// Decode one raw frame and join its `data:` line payloads (SSE spec: joined
+/// with `\n`). Returns `None` when the frame carries no `data:` lines
+/// (comments / event: / id: only). Lossy decoding here is safe: the frame is
+/// complete, so any invalid UTF-8 is genuinely invalid, not a chunk artifact.
+fn extract_data(raw: &[u8]) -> Option<String> {
+    let raw = String::from_utf8_lossy(raw);
+    let data: Vec<&str> = raw
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("data:")
+                .map(|d| d.strip_prefix(' ').unwrap_or(d))
+        })
+        .collect();
+    (!data.is_empty()).then(|| data.join("\n"))
 }
 
 /// Parse a bare prompt-stream frame into an [`LLMEvent`]. Returns `None` for
@@ -250,6 +278,27 @@ mod tests {
         let mut d = FrameDecoder::new();
         let out = d.push(b": keep-alive\n\ndata: {\"ok\":true}\n\n");
         assert_eq!(out, vec!["{\"ok\":true}".to_string()]);
+    }
+
+    #[test]
+    fn utf8_sequence_split_across_chunks_survives() {
+        // "é" is 0xC3 0xA9; a TCP chunk boundary mid-sequence must not corrupt
+        // the frame (per-chunk lossy decoding turns both halves into U+FFFD,
+        // making the JSON invalid and silently dropping the delta).
+        let mut d = FrameDecoder::new();
+        assert!(d.push(b"data: {\"text\":\"caf\xC3").is_empty());
+        let out = d.push(b"\xA9\"}\n\n");
+        assert_eq!(out, vec!["{\"text\":\"café\"}".to_string()]);
+    }
+
+    #[test]
+    fn flush_yields_trailing_unterminated_frame() {
+        // A server's final frame may not be followed by \n\n before the
+        // connection closes; EOF must not swallow it.
+        let mut d = FrameDecoder::new();
+        assert!(d.push(b"data: {\"done\":true}").is_empty());
+        assert_eq!(d.flush(), vec!["{\"done\":true}".to_string()]);
+        assert!(d.flush().is_empty(), "flush drains the buffer");
     }
 
     #[test]

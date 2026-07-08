@@ -255,6 +255,45 @@ async fn data_blob_excludes_columns_and_hydrates() {
 }
 
 #[tokio::test]
+async fn messages_with_parts_scoped_to_session() {
+    let store = Store::open_in_memory().await.expect("open");
+    for ses in ["ses_1", "ses_2"] {
+        store.create_session(&session(ses)).await.expect("create");
+    }
+    store
+        .insert_message(&user_info("msg_001", 100))
+        .await
+        .expect("m1");
+    store
+        .insert_part(&text_part("prt_001", "msg_001", "hello"))
+        .await
+        .expect("p1");
+    // A message in ANOTHER session whose parts must not leak into ses_1.
+    let mut other = user_info("msg_101", 100);
+    other.session_id = "ses_2".into();
+    store.insert_message(&other).await.expect("m101");
+    let mut other_part = text_part("prt_101", "msg_101", "other");
+    other_part.session_id = "ses_2".into();
+    store.insert_part(&other_part).await.expect("p101");
+    // A ses_1 message with no parts at all hydrates to an empty vec.
+    store
+        .insert_message(&assistant_info("msg_002", "msg_001", 200))
+        .await
+        .expect("m2");
+
+    let with_parts = store
+        .messages_with_parts("ses_1")
+        .await
+        .expect("with parts");
+    assert_eq!(with_parts.len(), 2);
+    assert_eq!(with_parts[0].info.id, "msg_001");
+    assert_eq!(with_parts[0].parts.len(), 1);
+    assert_eq!(with_parts[0].parts[0].id, "prt_001");
+    assert_eq!(with_parts[1].info.id, "msg_002");
+    assert!(with_parts[1].parts.is_empty(), "part-less message hydrates empty");
+}
+
+#[tokio::test]
 async fn open_file_backed_roundtrips() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("otto.db");
@@ -274,6 +313,32 @@ async fn open_file_backed_roundtrips() {
         .expect("get")
         .expect("some");
     assert_eq!(got, user_info("msg_001", 100));
+}
+
+#[tokio::test]
+async fn open_file_backed_uses_wal_and_busy_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("otto.db");
+    let store = Store::open(&path).await.expect("open");
+
+    // WAL lets readers proceed while the per-delta writer commits; the default
+    // rollback journal serializes them and stalls the streaming drain loop.
+    let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(store.pool())
+        .await
+        .expect("journal_mode");
+    assert_eq!(journal_mode.to_lowercase(), "wal");
+
+    // A zero busy_timeout makes a contended write fail immediately with
+    // SQLITE_BUSY instead of waiting for the lock.
+    let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+        .fetch_one(store.pool())
+        .await
+        .expect("busy_timeout");
+    assert!(
+        busy_timeout_ms >= 1000,
+        "busy_timeout should be at least 1s, got {busy_timeout_ms}ms"
+    );
 }
 
 #[tokio::test]

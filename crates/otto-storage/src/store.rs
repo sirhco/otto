@@ -16,7 +16,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
 use crate::model::{Info, Part, WithParts};
@@ -170,7 +170,14 @@ impl Store {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
-            .foreign_keys(true);
+            .foreign_keys(true)
+            // WAL lets readers proceed while the streaming writer commits;
+            // the default rollback journal serializes them, which stalls the
+            // per-delta persistence path under concurrent history reads.
+            .journal_mode(SqliteJournalMode::Wal)
+            // Wait for a contended lock instead of failing immediately with
+            // SQLITE_BUSY (e.g. the title-generation writer racing a turn).
+            .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
         let store = Self { pool };
         store.migrate().await?;
@@ -516,6 +523,10 @@ impl Store {
     /// Returns a session's messages, each with its ordered parts — the Rust
     /// analog of `hydrate()` (`message-v2.ts:98-123`).
     ///
+    /// Two queries total (messages + all session parts, grouped in memory)
+    /// rather than 1 + one-per-message: the run loop re-reads the full history
+    /// every step, so the N+1 fan-out grows with session length.
+    ///
     /// # Errors
     /// Returns a [`StorageError`] on SQLite or JSON failure.
     pub async fn messages_with_parts(
@@ -523,12 +534,29 @@ impl Store {
         session_id: &str,
     ) -> Result<Vec<WithParts>, StorageError> {
         let messages = self.list_messages(session_id).await?;
-        let mut out = Vec::with_capacity(messages.len());
-        for info in messages {
-            let parts = self.list_parts(info.id()).await?;
-            out.push(WithParts { info, parts });
+        let rows = sqlx::query(
+            "SELECT id, session_id, message_id, data FROM part
+             WHERE session_id = ? ORDER BY message_id, id",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut by_message: std::collections::HashMap<String, Vec<Part>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let part = part_from_row(row)?;
+            by_message
+                .entry(part.message_id.clone())
+                .or_default()
+                .push(part);
         }
-        Ok(out)
+        Ok(messages
+            .into_iter()
+            .map(|info| {
+                let parts = by_message.remove(info.id()).unwrap_or_default();
+                WithParts { info, parts }
+            })
+            .collect())
     }
 }
 

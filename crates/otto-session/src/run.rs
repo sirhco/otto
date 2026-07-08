@@ -150,6 +150,44 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Wrap `stream` so every `Ok` event is forwarded to `tx` **the moment it
+/// arrives from the provider**, independent of how fast the returned stream is
+/// consumed.
+///
+/// The old `.map()` tap only fired when the [`Processor`] polled the next item
+/// — and the processor awaits a store write per event, so client-visible
+/// streaming advanced at SQLite-commit rate and a stalled write froze the SSE
+/// mid-turn. Here a dedicated task drains the provider at wire speed into an
+/// unbounded channel; the processor consumes from the channel at its own pace.
+///
+/// The pump stops (dropping the provider stream and cancelling its HTTP
+/// request) as soon as the consumer side is dropped, and a closed/absent `tx`
+/// receiver is ignored so the run is never blocked or failed by a slow/gone
+/// consumer. Events are forwarded to `tx` only after they are queued for the
+/// consumer, so the tap can never run ahead of what the processor will see.
+pub fn tap_events(
+    mut stream: futures::stream::BoxStream<'static, Result<otto_events::LLMEvent, otto_llm::LLMError>>,
+    tx: tokio::sync::mpsc::UnboundedSender<otto_events::LLMEvent>,
+) -> futures::stream::BoxStream<'static, Result<otto_events::LLMEvent, otto_llm::LLMError>> {
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(item) = stream.next().await {
+            let event = item.as_ref().ok().cloned();
+            if out_tx.send(item).is_err() {
+                break; // consumer gone — stop draining the provider
+            }
+            if let Some(event) = event {
+                let _ = tx.send(event);
+            }
+        }
+    });
+    Box::pin(async_stream::stream! {
+        while let Some(item) = out_rx.recv().await {
+            yield item;
+        }
+    })
+}
+
 /// Whether a tool part represents live (unsatisfied) tool work — the port of
 /// opencode's `hasToolCalls` predicate (`prompt.ts:1106-1109`): a `tool` part
 /// that is not `providerExecuted` and not an orphaned interrupted tool.
@@ -434,26 +472,21 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
             if let Some(spawner) = &cfg.subagent {
                 ctx_builder = ctx_builder.subagent(spawner.clone());
             }
+            // Hand the live tap to tool execution so the `task` tool can
+            // forward its child run's tool activity (filtered) to the client.
+            if let Some(tx) = &cfg.event_tx {
+                ctx_builder = ctx_builder.event_tx(tx.clone());
+            }
             let ctx = ctx_builder.build();
             let augmented =
                 augment_with_tools(provider_stream, cfg.tools.clone(), ctx, model_id.0.clone());
 
-            // Live event tap (`cfg.event_tx`): forward a clone of each event to
-            // the consumer as it passes through, leaving the original in the
-            // stream for the processor. A closed/absent receiver is ignored so
-            // the run is never blocked or failed by a slow/gone consumer.
+            // Live event tap (`cfg.event_tx`): a dedicated pump forwards each
+            // event to the consumer as it arrives from the provider, decoupled
+            // from the processor's per-event persistence awaits (see
+            // [`tap_events`]).
             let augmented = match &cfg.event_tx {
-                Some(tx) => {
-                    let tx = tx.clone();
-                    augmented
-                        .map(move |item| {
-                            if let Ok(event) = &item {
-                                let _ = tx.send(event.clone());
-                            }
-                            item
-                        })
-                        .boxed()
-                }
+                Some(tx) => tap_events(augmented, tx.clone()),
                 None => augmented,
             };
 

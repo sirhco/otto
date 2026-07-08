@@ -794,3 +794,51 @@ async fn abort_under_no_terminal_finish_finalizes_gracefully() {
         "assistant finalized on graceful interrupt"
     );
 }
+
+// -- live-tap decoupling ------------------------------------------------------
+
+/// The live event tap must deliver events to `event_tx` the moment they arrive
+/// from the provider — NOT lazily when the downstream consumer (the processor,
+/// which awaits a store write per event) polls the stream. A stalled consumer
+/// must not stall client-visible streaming.
+#[tokio::test]
+async fn tap_events_delivers_without_consumer_polling() {
+    let (src_tx, src_rx) = tokio::sync::mpsc::unbounded_channel::<Result<LLMEvent, LLMError>>();
+    let src = futures::stream::unfold(src_rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+    .boxed();
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
+    let mut tapped = otto_session::tap_events(src, event_tx);
+
+    // Provider produces three deltas; the consumer never polls `tapped`
+    // (simulating a processor stuck on a slow store write).
+    for i in 0..3 {
+        src_tx
+            .send(Ok(LLMEvent::TextDelta {
+                id: "t1".into(),
+                text: format!("chunk-{i}"),
+                provider_metadata: None,
+            }))
+            .expect("send");
+    }
+
+    for i in 0..3 {
+        let ev = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("event {i} not delivered while consumer idle"))
+            .expect("channel open");
+        assert!(matches!(ev, LLMEvent::TextDelta { .. }));
+    }
+
+    // The consumer still receives every item, in order, once it does poll.
+    drop(src_tx);
+    let mut texts = Vec::new();
+    while let Some(item) = tapped.next().await {
+        if let Ok(LLMEvent::TextDelta { text, .. }) = item {
+            texts.push(text);
+        }
+    }
+    assert_eq!(texts, vec!["chunk-0", "chunk-1", "chunk-2"]);
+}

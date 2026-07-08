@@ -317,6 +317,30 @@ pub struct App {
     /// plain wire-format string rather than `otto_permission::PermissionMode`
     /// to avoid adding that dependency to this dependency-light crate.
     pub permission_mode: String,
+    /// Live retry-backoff countdown, set by [`LLMEvent::Retry`] and re-rendered
+    /// into `status` on every tick so the header counts down instead of
+    /// freezing on the snapshot taken when the event arrived. Cleared by the
+    /// next non-`Retry` stream event (the retried attempt is live again).
+    pub(crate) retry: Option<RetryCountdown>,
+    /// Live tool-call ids mapped to their transcript row, so results landing
+    /// out of submission order (parallel tools) attach to the right row.
+    /// Entries are removed as tools finish; cleared on submit/history reload.
+    pub(crate) running_tools: Vec<(String, usize)>,
+    /// Transcript index where the in-flight assistant message's items begin.
+    /// A mid-stream retry purges that message's parts server-side and
+    /// re-streams them, so the fold rolls the transcript back to this point on
+    /// [`LLMEvent::Retry`] instead of leaving the partial attempt as an
+    /// orphaned duplicate. `None` when no message is streaming.
+    pub(crate) msg_start: Option<usize>,
+}
+
+/// State backing the live retry-backoff countdown in the header.
+#[derive(Debug, Clone)]
+pub(crate) struct RetryCountdown {
+    /// Status prefix, e.g. `"rate-limited — retrying 2/5"`.
+    pub prefix: String,
+    /// Tick at which the backoff wait elapses.
+    pub expires_tick: u32,
 }
 
 /// Memoized transcript render (assembled in view.rs). Line assembly (markdown
@@ -333,6 +357,23 @@ pub struct LineCache {
     /// Assembled-line index at which each `transcript[i]` begins. Content-derived
     /// (same key as `lines`), used to highlight + center the selected tool row.
     pub(crate) item_line_starts: Vec<usize>,
+    /// Per-item render memo: a rebuild re-renders only items whose fingerprint
+    /// changed (during streaming that's just the open block), so cost per delta
+    /// is O(open item), not O(whole transcript).
+    pub(crate) items: Vec<ItemCacheEntry>,
+}
+
+/// One transcript item's memoized render (see [`LineCache::items`]). `lines`
+/// is an `Arc` so reuse across rebuilds is a pointer copy — and testable via
+/// `Arc::ptr_eq`.
+#[derive(Debug, Clone)]
+pub(crate) struct ItemCacheEntry {
+    /// Content hash of the item (see `view::item_fingerprint`).
+    pub(crate) fingerprint: u64,
+    /// The item's assembled lines.
+    pub(crate) lines: std::sync::Arc<Vec<ratatui::text::Line<'static>>>,
+    /// The item's wrapped line count at the cache's width.
+    pub(crate) wrap: u16,
 }
 
 /// A transient, auto-fading status confirmation ("copied", "attached", "sent").
@@ -387,6 +428,9 @@ impl App {
             splash: None,
             workflow: None,
             permission_mode: "approve-each".to_string(),
+            retry: None,
+            running_tools: Vec::new(),
+            msg_start: None,
         }
     }
 
@@ -394,6 +438,14 @@ impl App {
     /// mutation), so the render-side `LineCache` knows to reassemble.
     fn bump_render(&mut self) {
         self.render_gen = self.render_gen.wrapping_add(1);
+    }
+
+    /// Record where the in-flight assistant message's transcript items begin
+    /// (first content event wins), so a mid-stream retry can roll them back.
+    fn mark_msg_start(&mut self) {
+        if self.msg_start.is_none() {
+            self.msg_start = Some(self.transcript.len());
+        }
     }
 
     /// Test-only hook for `view.rs` cache tests, which construct transcript
@@ -837,10 +889,15 @@ impl App {
                 self.open_text = None;
                 self.open_reasoning = None;
                 self.tool_cursor = None;
+                self.running_tools.clear();
+                self.msg_start = None;
                 self.bump_render();
             }
             Msg::Error(e) => self.record_error(e),
             Msg::PromptEnded => {
+                // The turn is over — a stale backoff countdown must not keep
+                // rewriting the header from the tick handler.
+                self.retry = None;
                 // Unstick any lingering busy status (thinking/retrying) when the
                 // stream ends without a terminal finish. An already-resolved
                 // status ("ready", "error: …") is not busy, so it is preserved.
@@ -877,6 +934,16 @@ impl App {
                     self.busy_ticks = self.busy_ticks.saturating_add(1);
                 } else {
                     self.busy_ticks = 0;
+                }
+                // Re-render the live retry-backoff countdown into the header.
+                if let Some(r) = &self.retry {
+                    let remaining_ticks = r.expires_tick.saturating_sub(self.tick);
+                    if remaining_ticks == 0 {
+                        self.status = format!("{} (now)", r.prefix);
+                    } else {
+                        let secs = remaining_ticks.div_ceil(crate::view::TICKS_PER_SEC);
+                        self.status = format!("{} ({secs}s)", r.prefix);
+                    }
                 }
             }
             Msg::FilesLoaded(files, truncated) => {
@@ -1035,8 +1102,14 @@ impl App {
 
     /// Fold one streamed `LLMEvent` into the transcript.
     pub fn fold_event(&mut self, ev: LLMEvent) {
+        // Any non-Retry stream event means the retried attempt is live again —
+        // stop the backoff countdown from rewriting the header.
+        if !matches!(ev, LLMEvent::Retry { .. }) {
+            self.retry = None;
+        }
         match ev {
             LLMEvent::TextStart { .. } => {
+                self.mark_msg_start();
                 self.transcript
                     .push(TranscriptItem::Assistant(String::new()));
                 self.open_text = Some(self.transcript.len() - 1);
@@ -1044,6 +1117,7 @@ impl App {
             }
             LLMEvent::TextDelta { text, .. } => {
                 let idx = self.open_text.unwrap_or_else(|| {
+                    self.mark_msg_start();
                     self.transcript
                         .push(TranscriptItem::Assistant(String::new()));
                     let i = self.transcript.len() - 1;
@@ -1060,24 +1134,35 @@ impl App {
                 self.bump_render();
             }
             LLMEvent::ReasoningStart { .. } => {
+                self.mark_msg_start();
                 self.transcript
                     .push(TranscriptItem::Reasoning(String::new()));
                 self.open_reasoning = Some(self.transcript.len() - 1);
                 self.bump_render();
             }
             LLMEvent::ReasoningDelta { text, .. } => {
-                if let Some(idx) = self.open_reasoning
-                    && let Some(TranscriptItem::Reasoning(s)) = self.transcript.get_mut(idx)
-                {
+                // Auto-open on an orphan delta (lost/never-sent start frame),
+                // mirroring TextDelta — dropping reasoning silently hides work.
+                let idx = self.open_reasoning.unwrap_or_else(|| {
+                    self.mark_msg_start();
+                    self.transcript
+                        .push(TranscriptItem::Reasoning(String::new()));
+                    let i = self.transcript.len() - 1;
+                    self.open_reasoning = Some(i);
+                    i
+                });
+                if let Some(TranscriptItem::Reasoning(s)) = self.transcript.get_mut(idx) {
                     s.push_str(&text);
-                    self.bump_render();
                 }
+                self.bump_render();
             }
             LLMEvent::ReasoningEnd { .. } => {
                 self.open_reasoning = None;
                 self.bump_render();
             }
-            LLMEvent::ToolCall { name, input, .. } => {
+            LLMEvent::ToolCall {
+                id, name, input, ..
+            } => {
                 if name == "todowrite" && input.get("todos").is_some() {
                     let was_active = self.todos_active();
                     self.todos = parse_todos(&input);
@@ -1085,6 +1170,7 @@ impl App {
                         self.todos_collapsed = false;
                     }
                 }
+                self.mark_msg_start();
                 let title = tool_title(&name, &input);
                 self.transcript.push(TranscriptItem::Tool {
                     name,
@@ -1094,6 +1180,7 @@ impl App {
                     output: None,
                     expanded: false,
                 });
+                self.running_tools.push((id, self.transcript.len() - 1));
                 self.bump_render();
             }
             LLMEvent::ToolResult {
@@ -1115,6 +1202,9 @@ impl App {
                 if let Some(u) = usage {
                     self.usage = Some(u);
                 }
+                // The assistant message settled — a later Retry belongs to the
+                // NEXT message and must not roll this one back.
+                self.msg_start = None;
                 self.open_text = None;
                 self.open_reasoning = None;
                 // A turn streams multiple `finish` events over one prompt:
@@ -1140,7 +1230,26 @@ impl App {
                 } else {
                     "retrying"
                 };
-                self.status = format!("{label} {attempt}/{max} ({secs}s)");
+                let prefix = format!("{label} {attempt}/{max}");
+                self.status = format!("{prefix} ({secs}s)");
+                // Arm the live countdown: each tick re-renders the remaining
+                // wait so the header doesn't freeze for the whole backoff.
+                let wait_ticks =
+                    (delay_ms * u64::from(crate::view::TICKS_PER_SEC)).div_ceil(1000) as u32;
+                self.retry = Some(RetryCountdown {
+                    prefix,
+                    expires_tick: self.tick.wrapping_add(wait_ticks),
+                });
+                // The server purged this attempt's parts and will re-stream
+                // the message from scratch — roll the transcript back so the
+                // partial attempt doesn't remain as an orphaned duplicate.
+                if let Some(i) = self.msg_start.take() {
+                    self.transcript.truncate(i);
+                    self.running_tools.retain(|(_, idx)| *idx < i);
+                    self.open_text = None;
+                    self.open_reasoning = None;
+                    self.bump_render();
+                }
             }
             _ => {}
         }
@@ -1154,26 +1263,41 @@ impl App {
         let message = message.into();
         self.transcript.push(TranscriptItem::Error(message.clone()));
         self.status = format!("error: {message}");
+        self.retry = None;
+        self.msg_start = None;
         self.open_text = None;
         self.open_reasoning = None;
         self.bump_render();
     }
 
-    fn finish_tool(&mut self, _id: &str, status: ToolStatus, output: Option<String>) {
-        // Match the most recent still-Running tool (otto emits results in order).
+    fn finish_tool(&mut self, id: &str, status: ToolStatus, output: Option<String>) {
+        // Match by tool-call id first — parallel tools can finish out of
+        // submission order. Fall back to the most recent still-Running row for
+        // results whose call was never registered (e.g. missed start frame).
+        let row = match self.running_tools.iter().position(|(i, _)| i == id) {
+            Some(pos) => {
+                let (_, idx) = self.running_tools.remove(pos);
+                match self.transcript.get_mut(idx) {
+                    Some(item @ TranscriptItem::Tool { .. }) => Some(item),
+                    _ => None,
+                }
+            }
+            None => self.transcript.iter_mut().rev().find(|i| {
+                matches!(
+                    i,
+                    TranscriptItem::Tool {
+                        status: ToolStatus::Running,
+                        ..
+                    }
+                )
+            }),
+        };
         if let Some(TranscriptItem::Tool {
             status: s,
             output: o,
             ..
-        }) = self.transcript.iter_mut().rev().find(|i| {
-            matches!(
-                i,
-                TranscriptItem::Tool {
-                    status: ToolStatus::Running,
-                    ..
-                }
-            )
-        }) {
+        }) = row
+        {
             *s = status;
             if o.is_none() {
                 *o = output;
@@ -1250,6 +1374,8 @@ impl App {
     fn load_history(&mut self, rows: Vec<serde_json::Value>) {
         self.tool_cursor = None;
         self.transcript.clear();
+        self.running_tools.clear();
+        self.msg_start = None;
         self.todos = Vec::new();
         self.todos_collapsed = false;
         for row in &rows {
@@ -3008,6 +3134,200 @@ mod tests {
         assert!(
             !app.status.starts_with("error"),
             "must not render as a fatal error"
+        );
+    }
+
+    #[test]
+    fn parallel_tools_finish_by_id_not_position() {
+        let mut app = App::new();
+        app.fold_event(otto_events::LLMEvent::ToolCall {
+            id: "call_1".into(),
+            name: "read".into(),
+            input: serde_json::json!({}),
+            provider_executed: None,
+            provider_metadata: None,
+        });
+        app.fold_event(otto_events::LLMEvent::ToolCall {
+            id: "call_2".into(),
+            name: "edit".into(),
+            input: serde_json::json!({}),
+            provider_executed: None,
+            provider_metadata: None,
+        });
+        // The OLDER call finishes first (parallel tools complete out of
+        // order): its result must land on call_1's row, not the most-recent
+        // Running row.
+        app.fold_event(otto_events::LLMEvent::ToolResult {
+            id: "call_1".into(),
+            name: "read".into(),
+            result: otto_events::ToolResultValue::Text {
+                value: serde_json::json!("done"),
+            },
+            output: None,
+            provider_executed: None,
+            provider_metadata: None,
+        });
+        let tools: Vec<(&str, &ToolStatus)> = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::Tool { name, status, .. } => Some((name.as_str(), status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(
+            tools[0],
+            ("read", &ToolStatus::Ok),
+            "call_1 (read) finished"
+        );
+        assert_eq!(
+            tools[1],
+            ("edit", &ToolStatus::Running),
+            "call_2 (edit) still running"
+        );
+    }
+
+    #[test]
+    fn reasoning_delta_without_start_opens_block() {
+        let mut app = App::new();
+        // First frame of the stream was lost (chunk corruption, reconnect):
+        // the delta must open a block like TextDelta does, not vanish.
+        app.fold_event(otto_events::LLMEvent::ReasoningDelta {
+            id: "r1".into(),
+            text: "thinking…".into(),
+            provider_metadata: None,
+        });
+        let reasoning = app.transcript.iter().find_map(|i| match i {
+            TranscriptItem::Reasoning(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(reasoning.as_deref(), Some("thinking…"));
+    }
+
+    #[test]
+    fn retry_rolls_back_partial_attempt_no_duplicate_blocks() {
+        let mut app = App::new();
+        // Attempt 1 streams partial text, then dies mid-stream.
+        app.fold_event(otto_events::LLMEvent::TextStart {
+            id: "t1".into(),
+            provider_metadata: None,
+        });
+        app.fold_event(otto_events::LLMEvent::TextDelta {
+            id: "t1".into(),
+            text: "partial answer".into(),
+            provider_metadata: None,
+        });
+        // The server purges the attempt's parts and retries…
+        app.fold_event(otto_events::LLMEvent::Retry {
+            attempt: 1,
+            max: 5,
+            delay_ms: 2000,
+            message: "connection reset".into(),
+        });
+        // …and attempt 2 re-streams the message from scratch.
+        app.fold_event(otto_events::LLMEvent::TextStart {
+            id: "t2".into(),
+            provider_metadata: None,
+        });
+        app.fold_event(otto_events::LLMEvent::TextDelta {
+            id: "t2".into(),
+            text: "full answer".into(),
+            provider_metadata: None,
+        });
+        app.fold_event(otto_events::LLMEvent::TextEnd {
+            id: "t2".into(),
+            provider_metadata: None,
+        });
+
+        let assistants: Vec<&str> = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::Assistant(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            assistants,
+            vec!["full answer"],
+            "attempt-1 partial text must not remain as an orphaned duplicate"
+        );
+    }
+
+    #[test]
+    fn retry_countdown_ticks_down_live() {
+        let mut app = App::new();
+        app.fold_event(otto_events::LLMEvent::Retry {
+            attempt: 1,
+            max: 5,
+            delay_ms: 4000,
+            message: "http error: status 429: rate limit".into(),
+        });
+        assert!(app.status.ends_with("(4s)"), "initial: {}", app.status);
+        // One second of ticks (8/s): the header must count down live, not
+        // freeze on the snapshot taken when the Retry event arrived.
+        for _ in 0..8 {
+            app.update(Msg::Tick);
+        }
+        assert!(
+            app.status.ends_with("(3s)"),
+            "status must count down live, got {:?}",
+            app.status
+        );
+        // Draining the rest of the wait reaches the terminal "now" form.
+        for _ in 0..40 {
+            app.update(Msg::Tick);
+        }
+        assert!(
+            app.status.ends_with("(now)"),
+            "exhausted countdown shows (now), got {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn retry_countdown_cleared_when_prompt_ends() {
+        let mut app = App::new();
+        app.fold_event(otto_events::LLMEvent::Retry {
+            attempt: 1,
+            max: 5,
+            delay_ms: 8000,
+            message: "overloaded".into(),
+        });
+        app.update(Msg::PromptEnded);
+        assert_eq!(app.status, "ready");
+        for _ in 0..8 {
+            app.update(Msg::Tick);
+        }
+        assert_eq!(
+            app.status, "ready",
+            "a stale countdown must not resurrect the retrying status"
+        );
+    }
+
+    #[test]
+    fn retry_countdown_cleared_by_next_stream_event() {
+        let mut app = App::new();
+        app.fold_event(otto_events::LLMEvent::Retry {
+            attempt: 1,
+            max: 5,
+            delay_ms: 4000,
+            message: "overloaded".into(),
+        });
+        // The retried attempt starts streaming: the countdown must stop
+        // rewriting the header.
+        app.fold_event(otto_events::LLMEvent::TextStart {
+            id: "t1".into(),
+            provider_metadata: None,
+        });
+        app.status = "…thinking".into();
+        for _ in 0..8 {
+            app.update(Msg::Tick);
+        }
+        assert_eq!(
+            app.status, "…thinking",
+            "a stale countdown must not clobber the live status"
         );
     }
 

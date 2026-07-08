@@ -21,5 +21,6 @@ hmac.workspace = true
 [dev-dependencies]
 wiremock.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+# `test-util` for `start_paused` in the frame-watchdog timeout tests.
+tokio = { workspace = true, features = ["test-util"] }
 futures.workspace = true

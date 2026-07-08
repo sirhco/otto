@@ -19,8 +19,11 @@ pub const RETRY_INITIAL_DELAY_MS: u64 = 2000;
 /// (`RETRY_MAX_DELAY_NO_HEADERS`, `retry.ts:28`).
 pub const RETRY_MAX_DELAY_MS: u64 = 30_000;
 /// Ceiling for a provider-supplied Retry-After, so a hostile/broken header
-/// can't stall a turn indefinitely.
-pub const RETRY_AFTER_MAX_MS: u64 = 300_000;
+/// can't stall a turn indefinitely. Kept short (60s) because the whole backoff
+/// is a silent pause from the client's perspective — a longer honored header
+/// reads as a hang, and a still-limited provider just 429s again on the next
+/// attempt with a fresh header.
+pub const RETRY_AFTER_MAX_MS: u64 = 60_000;
 
 /// Whether `msg` carries a provider rate-limit signal (port of the plain-text
 /// pattern checks, `retry.ts:126-150`). `pub(crate)` so the processor can reuse
@@ -238,10 +241,16 @@ mod tests {
     #[test]
     fn retry_after_is_capped_at_ceiling() {
         // A hostile/broken provider sending Retry-After: 86400 (24h) must not
-        // stall a turn indefinitely — capped to RETRY_AFTER_MAX_MS (5 min).
+        // stall a turn indefinitely — capped to RETRY_AFTER_MAX_MS.
         assert_eq!(
             delay(0, Some(Duration::from_secs(86_400))),
             Duration::from_millis(RETRY_AFTER_MAX_MS)
+        );
+        // The ceiling itself stays short enough that a turn never looks hung:
+        // a 2-minute Retry-After clamps to at most 60s.
+        assert!(
+            delay(0, Some(Duration::from_secs(120))) <= Duration::from_secs(60),
+            "Retry-After ceiling must not exceed 60s"
         );
     }
 

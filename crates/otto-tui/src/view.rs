@@ -137,7 +137,8 @@ const HINTS_TYPING: &str = "enter send · shift+enter newline · ctrl+k cmds";
 const SPIN: [char; 4] = ['⠋', '⠙', '⠹', '⠸'];
 /// Tick rate driving the spinner/elapsed indicator. Must match the interval
 /// the tick task in `lib.rs` sends `Msg::Tick` on (125ms = 8/s).
-const TICKS_PER_SEC: u32 = 8;
+/// `pub(crate)`: state.rs derives the retry-backoff countdown from it too.
+pub(crate) const TICKS_PER_SEC: u32 = 8;
 /// Ticks between playful-word rotations while thinking (~5s at 8 ticks/s).
 const ROTATE_TICKS: u32 = 40;
 
@@ -276,15 +277,8 @@ fn transcript(app: &App, frame: &mut Frame, area: Rect) -> bool {
             None => true,
         };
         if stale {
-            let (lines, item_line_starts) = transcript_lines_with_starts(app);
-            let wrap_total = Paragraph::new(lines.clone()).line_count(width) as u16;
-            *cache = Some(LineCache {
-                r#gen: app.render_gen,
-                width,
-                lines,
-                wrap_total,
-                item_line_starts,
-            });
+            let prev = cache.take();
+            *cache = Some(rebuild_line_cache(app, width, prev.as_ref()));
         }
     }
     let cache = app.line_cache.borrow();
@@ -363,44 +357,124 @@ fn transcript_lines(app: &App) -> Vec<Line<'static>> {
 /// Assemble transcript lines AND record where each item starts. Built in one
 /// pass so `starts[i]` cannot drift from the actual line output.
 fn transcript_lines_with_starts(app: &App) -> (Vec<Line<'static>>, Vec<usize>) {
-    let t = &app.theme;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut starts: Vec<usize> = Vec::with_capacity(app.transcript.len());
     for item in &app.transcript {
         starts.push(lines.len());
-        match item {
-            TranscriptItem::User(text) => lines.push(Line::from(vec![
-                Span::styled("› ", t.accent),
-                Span::styled(text.clone(), t.text),
-            ])),
-            TranscriptItem::Assistant(text) => {
-                lines.extend(crate::render::markdown::render_markdown(text))
-            }
-            TranscriptItem::Reasoning(text) => {
-                lines.push(Line::from(Span::styled(format!("({text})"), t.reasoning)))
-            }
-            TranscriptItem::Error(msg) => lines.push(Line::from(vec![
-                Span::styled("✖ error: ", t.status_err),
-                Span::styled(msg.clone(), t.status_err),
-            ])),
-            TranscriptItem::Workflow(text) => {
-                lines.push(Line::from(Span::styled(text.clone(), t.text_muted)))
-            }
-            TranscriptItem::Tool {
-                name,
-                status,
-                title,
-                input,
-                output,
-                expanded,
-            } => {
-                lines.extend(crate::render::tool::render_tool(
-                    name, status, title, input, output, *expanded, false, &app.theme,
-                ));
-            }
-        }
+        lines.extend(render_item(item, &app.theme));
     }
     (lines, starts)
+}
+
+/// Assemble ONE transcript item's lines (the per-item unit the incremental
+/// [`rebuild_line_cache`] memoizes).
+fn render_item(item: &TranscriptItem, t: &crate::theme::Theme) -> Vec<Line<'static>> {
+    match item {
+        TranscriptItem::User(text) => vec![Line::from(vec![
+            Span::styled("› ", t.accent),
+            Span::styled(text.clone(), t.text),
+        ])],
+        TranscriptItem::Assistant(text) => crate::render::markdown::render_markdown(text),
+        TranscriptItem::Reasoning(text) => {
+            vec![Line::from(Span::styled(format!("({text})"), t.reasoning))]
+        }
+        TranscriptItem::Error(msg) => vec![Line::from(vec![
+            Span::styled("✖ error: ", t.status_err),
+            Span::styled(msg.clone(), t.status_err),
+        ])],
+        TranscriptItem::Workflow(text) => {
+            vec![Line::from(Span::styled(text.clone(), t.text_muted))]
+        }
+        TranscriptItem::Tool {
+            name,
+            status,
+            title,
+            input,
+            output,
+            expanded,
+        } => crate::render::tool::render_tool(name, status, title, input, output, *expanded, false, t),
+    }
+}
+
+/// Content hash of one transcript item — the reuse key for its memoized
+/// render. A tool's `input` is set once at creation and never mutated, so it
+/// is deliberately excluded (hashing a large JSON per rebuild would defeat
+/// the memo); everything that CAN change (status, output, expanded) is in.
+fn item_fingerprint(item: &TranscriptItem) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(item).hash(&mut h);
+    match item {
+        TranscriptItem::User(s)
+        | TranscriptItem::Assistant(s)
+        | TranscriptItem::Reasoning(s)
+        | TranscriptItem::Error(s)
+        | TranscriptItem::Workflow(s) => s.hash(&mut h),
+        TranscriptItem::Tool {
+            name,
+            status,
+            title,
+            input: _,
+            output,
+            expanded,
+        } => {
+            name.hash(&mut h);
+            format!("{status:?}").hash(&mut h);
+            title.hash(&mut h);
+            output.hash(&mut h);
+            expanded.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// Rebuild the transcript [`LineCache`] incrementally: items whose fingerprint
+/// (and the cache width) match the previous build reuse their rendered lines
+/// and wrap count via `Arc`, so a streaming delta re-renders only the open
+/// item instead of re-parsing the whole transcript — O(open item) per delta,
+/// not O(history).
+fn rebuild_line_cache(
+    app: &App,
+    width: u16,
+    prev: Option<&LineCache>,
+) -> LineCache {
+    // A width change invalidates the per-item wrap counts, so only reuse
+    // entries built at the same width.
+    let prev_items: &[crate::state::ItemCacheEntry] = match prev {
+        Some(c) if c.width == width => &c.items,
+        _ => &[],
+    };
+    let mut items = Vec::with_capacity(app.transcript.len());
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut starts: Vec<usize> = Vec::with_capacity(app.transcript.len());
+    let mut wrap_total: u32 = 0;
+    for (i, item) in app.transcript.iter().enumerate() {
+        let fingerprint = item_fingerprint(item);
+        let entry = match prev_items.get(i) {
+            Some(e) if e.fingerprint == fingerprint => e.clone(),
+            _ => {
+                let rendered = render_item(item, &app.theme);
+                let wrap = Paragraph::new(rendered.clone()).line_count(width) as u16;
+                crate::state::ItemCacheEntry {
+                    fingerprint,
+                    lines: std::sync::Arc::new(rendered),
+                    wrap,
+                }
+            }
+        };
+        starts.push(lines.len());
+        wrap_total += u32::from(entry.wrap);
+        lines.extend(entry.lines.iter().cloned());
+        items.push(entry);
+    }
+    LineCache {
+        r#gen: app.render_gen,
+        width,
+        lines,
+        wrap_total: u16::try_from(wrap_total).unwrap_or(u16::MAX),
+        item_line_starts: starts,
+        items,
+    }
 }
 
 /// Indices of `lines` whose concatenated span text contains `pattern`,
@@ -1169,6 +1243,45 @@ mod tests {
         let c = c.as_ref().unwrap();
         assert_eq!(c.r#gen, gen_before);
         assert_eq!(c.r#gen, app.render_gen); // cache tracks app gen
+    }
+
+    /// A streaming delta mutates only the open item; every completed item's
+    /// rendered lines must be REUSED (same `Arc`), not re-parsed — re-rendering
+    /// the whole transcript per delta is O(history) per delta and shows up as
+    /// growing pauses in long sessions.
+    #[test]
+    fn line_cache_reuses_unchanged_item_renders_across_rebuilds() {
+        let mut app = App::new();
+        app.transcript
+            .push(TranscriptItem::Assistant("# stable heading\nbody".into()));
+        app.transcript
+            .push(TranscriptItem::Assistant("streaming".into()));
+        app.bump_render_for_test();
+        let _ = render(&app); // fills the cache
+        let stable_before = std::sync::Arc::clone(
+            &app.line_cache.borrow().as_ref().unwrap().items[0].lines,
+        );
+        let open_before = std::sync::Arc::clone(
+            &app.line_cache.borrow().as_ref().unwrap().items[1].lines,
+        );
+
+        // A delta lands on the open (second) item only.
+        if let Some(TranscriptItem::Assistant(s)) = app.transcript.get_mut(1) {
+            s.push_str(" more text");
+        }
+        app.bump_render_for_test();
+        let _ = render(&app); // rebuild
+
+        let cache = app.line_cache.borrow();
+        let items = &cache.as_ref().unwrap().items;
+        assert!(
+            std::sync::Arc::ptr_eq(&stable_before, &items[0].lines),
+            "unchanged item was re-rendered instead of reused"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&open_before, &items[1].lines),
+            "changed item must be re-rendered"
+        );
     }
 
     #[test]

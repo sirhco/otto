@@ -80,24 +80,42 @@ pub enum ServerError {
 /// the run ends; `POST /workflow/{session}/cancel` looks up the token and
 /// cancels it (aborting the engine's in-flight subagent spawns). A cancel on a
 /// session with no live run (finished or never started) returns `false`.
+///
+/// Entries are generation-tagged: `insert` cancels any token it replaces (a new
+/// prompt on a busy session interrupts the prior turn instead of racing it),
+/// and `remove` only drops the entry when the generation still matches, so a
+/// replaced turn settling late cannot remove the newer turn's token.
 #[derive(Clone, Default)]
 struct TokenRegistry(
-    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, CancellationToken>>>,
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, CancellationToken)>>>,
 );
 
 impl TokenRegistry {
-    /// Register `token` for `session` (replacing any existing entry).
-    fn insert(&self, session: &str, token: CancellationToken) {
-        self.0.lock().unwrap().insert(session.to_string(), token);
+    /// Register `token` for `session`, cancelling any token it replaces.
+    /// Returns the entry's generation, which the caller passes to [`remove`].
+    ///
+    /// [`remove`]: TokenRegistry::remove
+    fn insert(&self, session: &str, token: CancellationToken) -> u64 {
+        let mut map = self.0.lock().unwrap();
+        let generation = map.get(session).map_or(0, |(g, _)| g + 1);
+        if let Some((_, prev)) = map.insert(session.to_string(), (generation, token)) {
+            prev.cancel();
+        }
+        generation
     }
-    /// Drop `session`'s entry (called when the run ends).
-    fn remove(&self, session: &str) {
-        self.0.lock().unwrap().remove(session);
+    /// Drop `session`'s entry (called when the run ends), but only if it is
+    /// still the `generation` this caller registered — a stale remove from a
+    /// replaced turn must not evict the newer turn's token.
+    fn remove(&self, session: &str, generation: u64) {
+        let mut map = self.0.lock().unwrap();
+        if map.get(session).is_some_and(|(g, _)| *g == generation) {
+            map.remove(session);
+        }
     }
     /// Cancel the run for `session`; returns `true` if one was registered.
     fn cancel(&self, session: &str) -> bool {
         match self.0.lock().unwrap().get(session) {
-            Some(t) => {
+            Some((_, t)) => {
                 t.cancel();
                 true
             }
@@ -581,9 +599,11 @@ async fn session_prompt(
 
     // Register the turn's abort token so `POST /session/{id}/cancel` can
     // interrupt it. Removed once the stream settles (below), so a later cancel
-    // on a finished turn returns `false`.
+    // on a finished turn returns `false`. Registering also cancels any prior
+    // still-running turn on this session — two concurrent runs would race
+    // writes on the same rows.
     let abort = CancellationToken::new();
-    state.runs.insert(&id, abort.clone());
+    let run_generation = state.runs.insert(&id, abort.clone());
 
     let RunHandle { mut events, join } = state.runtime.run_with_parts(
         &id,
@@ -627,8 +647,9 @@ async fn session_prompt(
             yield Ok::<_, Infallible>(Event::default().data(err.to_string()));
         }
         // The turn has settled — drop its cancel token so a later cancel on this
-        // finished turn returns `false`.
-        runs.remove(&run_session);
+        // finished turn returns `false`. Generation-checked: if a newer turn
+        // already replaced this one, its token stays registered.
+        runs.remove(&run_session, run_generation);
     };
     // Keep-alive comments so a legitimately slow turn (tools running, or the
     // provider mid-generation) keeps bytes flowing to the client during quiet
@@ -978,7 +999,7 @@ async fn workflow_run(
     let abort = CancellationToken::new();
     // Register the run's abort token BEFORE spawning so a cancel that races the
     // spawn still finds it; `spawn_workflow` removes it when the run ends.
-    state.workflows.insert(&session_id, abort.clone());
+    let generation = state.workflows.insert(&session_id, abort.clone());
     spawn_workflow(
         kind,
         body.arg,
@@ -987,6 +1008,7 @@ async fn workflow_run(
         events,
         abort,
         state.workflows.clone(),
+        generation,
     );
 
     Ok(Json(json!({ "session": session_id })).into_response())
@@ -1034,6 +1056,7 @@ async fn session_cancel(
 /// /workflow/{session}/cancel` can cancel the run. This task removes the entry
 /// once the run ends (before emitting `workflow.done`), so a later cancel on a
 /// finished session returns `false`.
+#[allow(clippy::too_many_arguments)]
 fn spawn_workflow(
     kind: String,
     arg: String,
@@ -1042,6 +1065,7 @@ fn spawn_workflow(
     events: broadcast::Sender<String>,
     abort: CancellationToken,
     registry: TokenRegistry,
+    generation: u64,
 ) {
     tokio::spawn(async move {
         let _ = events.send(workflow_envelope(
@@ -1110,7 +1134,7 @@ fn spawn_workflow(
 
         // The run has ended (Ok or Err); deregister its abort token before the
         // terminal `workflow.done` so a cancel arriving now returns `false`.
-        registry.remove(&session);
+        registry.remove(&session, generation);
 
         let props = match &result {
             Ok(summary) => json!({
@@ -1315,12 +1339,44 @@ mod tests {
         use tokio_util::sync::CancellationToken;
         let reg: TokenRegistry = Default::default();
         let tok = CancellationToken::new();
-        reg.insert("ses_1", tok.clone());
+        let generation = reg.insert("ses_1", tok.clone());
         assert!(!tok.is_cancelled());
         assert!(reg.cancel("ses_1")); // found + cancelled
         assert!(tok.is_cancelled());
         assert!(!reg.cancel("ses_missing")); // absent
-        reg.remove("ses_1");
+        reg.remove("ses_1", generation);
         assert!(!reg.cancel("ses_1")); // gone after remove
+    }
+
+    /// A second prompt on the same session must interrupt the first turn:
+    /// registering a new token cancels the one it replaces.
+    #[tokio::test]
+    async fn registry_insert_cancels_previous_token() {
+        use tokio_util::sync::CancellationToken;
+        let reg: TokenRegistry = Default::default();
+        let first = CancellationToken::new();
+        let second = CancellationToken::new();
+        reg.insert("ses_1", first.clone());
+        reg.insert("ses_1", second.clone());
+        assert!(first.is_cancelled(), "prior turn's token must be cancelled");
+        assert!(!second.is_cancelled(), "new turn's token must stay live");
+    }
+
+    /// When a replaced (stale) turn settles after a newer turn registered, its
+    /// remove must not drop the newer turn's token.
+    #[tokio::test]
+    async fn registry_stale_remove_keeps_newer_token() {
+        use tokio_util::sync::CancellationToken;
+        let reg: TokenRegistry = Default::default();
+        let first = CancellationToken::new();
+        let second = CancellationToken::new();
+        let gen1 = reg.insert("ses_1", first.clone());
+        reg.insert("ses_1", second.clone());
+        reg.remove("ses_1", gen1); // stale remove from the replaced turn
+        assert!(
+            reg.cancel("ses_1"),
+            "newer turn must still be cancellable after a stale remove"
+        );
+        assert!(second.is_cancelled());
     }
 }

@@ -408,24 +408,44 @@ fn sse_stream<T: 'static>(
 ) -> impl futures::Stream<Item = T> {
     let mut decoder = crate::sse::FrameDecoder::new();
     resp.bytes_stream()
+        // EOF sentinel so the decoder can flush a trailing frame the server
+        // never terminated with \n\n before the connection closed.
+        .map(Some)
+        .chain(futures::stream::iter([None]))
         .scan(false, move |ended, r| {
             let items: Vec<T> = if *ended {
                 Vec::new()
             } else {
                 match r {
-                    Ok(chunk) => decoder
+                    Some(Ok(chunk)) => decoder
                         .push(chunk.as_ref())
                         .into_iter()
                         .filter_map(|f| decode(&f))
                         .collect(),
-                    Err(e) => {
+                    Some(Err(e)) => {
                         *ended = true;
-                        on_error(e.to_string()).into_iter().collect()
+                        // Flush frames that arrived before the failure, then
+                        // append the mapped error item.
+                        let mut items: Vec<T> = decoder
+                            .flush()
+                            .into_iter()
+                            .filter_map(|f| decode(&f))
+                            .collect();
+                        items.extend(on_error(e.to_string()));
+                        items
+                    }
+                    None => {
+                        *ended = true;
+                        decoder
+                            .flush()
+                            .into_iter()
+                            .filter_map(|f| decode(&f))
+                            .collect()
                     }
                 }
             };
-            // Stop once we've handled an error and have nothing left to emit;
-            // otherwise keep forwarding decoded items.
+            // Stop once the stream has settled and there is nothing left to
+            // emit; otherwise keep forwarding decoded items.
             futures::future::ready((!*ended || !items.is_empty()).then_some(items))
         })
         .flat_map(futures::stream::iter)
