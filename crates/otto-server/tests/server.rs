@@ -481,6 +481,34 @@ async fn permission_mode_route_sets_mode_and_rejects_unknown() {
 }
 
 #[tokio::test]
+async fn session_cancel_route_reports_no_live_turn() {
+    let runtime = plain_runtime().await;
+    let base = spawn(runtime, no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let created: Value = http
+        .post(format!("{base}/session"))
+        .json(&json!({ "title": "Cancel" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // No turn in flight for this session -> 200 with cancelled:false.
+    let resp = http
+        .post(format!("{base}/session/{id}/cancel"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["cancelled"], json!(false));
+}
+
+#[tokio::test]
 async fn permission_mode_change_emits_sse_frame() {
     let runtime = plain_runtime().await;
     let base = spawn(runtime, no_auth()).await;

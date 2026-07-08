@@ -81,11 +81,11 @@ pub enum ServerError {
 /// cancels it (aborting the engine's in-flight subagent spawns). A cancel on a
 /// session with no live run (finished or never started) returns `false`.
 #[derive(Clone, Default)]
-struct WorkflowRegistry(
+struct TokenRegistry(
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, CancellationToken>>>,
 );
 
-impl WorkflowRegistry {
+impl TokenRegistry {
     /// Register `token` for `session` (replacing any existing entry).
     fn insert(&self, session: &str, token: CancellationToken) {
         self.0.lock().unwrap().insert(session.to_string(), token);
@@ -115,7 +115,12 @@ struct AppState {
     /// Pre-serialized SSE `data` payloads broadcast to `/event` subscribers.
     events: broadcast::Sender<String>,
     /// Cancellation tokens of currently-running workflows, keyed by session id.
-    workflows: WorkflowRegistry,
+    workflows: TokenRegistry,
+    /// Cancellation tokens of currently-running prompt turns, keyed by session
+    /// id. A turn registers its `abort` token on start and removes it when the
+    /// stream settles; `POST /session/{id}/cancel` cancels it to interrupt a
+    /// turn without ending the session.
+    runs: TokenRegistry,
 }
 
 /// Bind `addr` and serve the [`router`] until the process exits.
@@ -146,7 +151,8 @@ pub fn router(runtime: Arc<Runtime>, opts: ServeOptions) -> Router {
         runtime,
         password: opts.password.map(Arc::from),
         events,
-        workflows: WorkflowRegistry::default(),
+        workflows: TokenRegistry::default(),
+        runs: TokenRegistry::default(),
     };
 
     // Every route except `/doc` (which stays unauthenticated for discovery).
@@ -166,6 +172,7 @@ pub fn router(runtime: Arc<Runtime>, opts: ServeOptions) -> Router {
         .route("/permission", get(permission_list))
         .route("/permission/{request_id}/reply", post(permission_reply))
         .route("/session/{id}/permission-mode", post(set_permission_mode))
+        .route("/session/{id}/cancel", post(session_cancel))
         .route("/find", get(find_text))
         .route("/find/file", get(find_file))
         .route("/file/content", get(file_content))
@@ -572,16 +579,24 @@ async fn session_prompt(
         }
     }
 
+    // Register the turn's abort token so `POST /session/{id}/cancel` can
+    // interrupt it. Removed once the stream settles (below), so a later cancel
+    // on a finished turn returns `false`.
+    let abort = CancellationToken::new();
+    state.runs.insert(&id, abort.clone());
+
     let RunHandle { mut events, join } = state.runtime.run_with_parts(
         &id,
         prompt,
         extra_parts,
         &agent,
         &model,
-        CancellationToken::new(),
+        abort,
     );
 
     let bus = state.events.clone();
+    let runs = state.runs.clone();
+    let run_session = id.clone();
     let sse = stream! {
         while let Some(event) = events.recv().await {
             match serde_json::to_string(&event) {
@@ -611,6 +626,9 @@ async fn session_prompt(
             );
             yield Ok::<_, Infallible>(Event::default().data(err.to_string()));
         }
+        // The turn has settled — drop its cancel token so a later cancel on this
+        // finished turn returns `false`.
+        runs.remove(&run_session);
     };
     // Keep-alive comments so a legitimately slow turn (tools running, or the
     // provider mid-generation) keeps bytes flowing to the client during quiet
@@ -987,6 +1005,19 @@ async fn workflow_cancel(
     Ok(Json(json!({ "cancelled": cancelled })).into_response())
 }
 
+/// `POST /session/{id}/cancel` — interrupt a running prompt turn by session id.
+///
+/// Cancels the turn's [`CancellationToken`] (aborting the in-flight run) if one
+/// is registered, without ending the session. Returns `{"cancelled": bool}` —
+/// `false` when the session has no live turn (already finished, or unknown).
+async fn session_cancel(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+) -> ApiResult<Response> {
+    let cancelled = state.runs.cancel(&session);
+    Ok(Json(json!({ "cancelled": cancelled })).into_response())
+}
+
 /// Spawn the workflow engine on a detached background task, framing
 /// `workflow.started` before the run and `workflow.done` after it onto `events`.
 ///
@@ -1010,7 +1041,7 @@ fn spawn_workflow(
     mut cx: otto_workflow::WfCtx,
     events: broadcast::Sender<String>,
     abort: CancellationToken,
-    registry: WorkflowRegistry,
+    registry: TokenRegistry,
 ) {
     tokio::spawn(async move {
         let _ = events.send(workflow_envelope(
@@ -1282,7 +1313,7 @@ mod tests {
     #[tokio::test]
     async fn workflow_registry_cancels_by_session() {
         use tokio_util::sync::CancellationToken;
-        let reg: WorkflowRegistry = Default::default();
+        let reg: TokenRegistry = Default::default();
         let tok = CancellationToken::new();
         reg.insert("ses_1", tok.clone());
         assert!(!tok.is_cancelled());
