@@ -1010,7 +1010,10 @@ mod tests {
             app.on_key(key(KeyCode::Char(c)));
         }
         app.on_key(key(KeyCode::Char('@'))); // email-style, no boundary
-        assert!(matches!(app.overlay, Overlay::None), "mid-word @ is literal");
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "mid-word @ is literal"
+        );
         assert_eq!(app.input.text(), "foo@");
     }
 
@@ -1056,7 +1059,10 @@ mod tests {
             app.on_key(key(KeyCode::Char(c)));
         }
         app.on_key(key(KeyCode::Char(' ')));
-        assert!(matches!(app.overlay, Overlay::None), "space delimits the token");
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "space delimits the token"
+        );
         assert_eq!(app.input.text(), "@sr ");
     }
 
@@ -1077,6 +1083,9 @@ mod tests {
         let mut app = App::new();
         app.on_key(key(KeyCode::Char('@')));
         let msg = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(msg, Some(Msg::Quit)), "ctrl+c wins over the overlay");
+        assert!(
+            matches!(msg, Some(Msg::Quit)),
+            "ctrl+c wins over the overlay"
+        );
     }
 }

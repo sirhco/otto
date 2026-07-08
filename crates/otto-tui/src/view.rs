@@ -7,8 +7,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::state::{
-    App, COMMANDS, FilePickerState, LineCache, Overlay, PaletteState, SearchState, TextInputState,
-    TodoStatus, TranscriptItem, file_matches, palette_matches,
+    App, COMMANDS, FilePickerState, LineCache, MentionState, Overlay, PaletteState, SearchState,
+    TextInputState, TodoStatus, TranscriptItem, file_matches, palette_matches, ranked_matches,
 };
 
 /// Floor below which the layout is squeezed unusably tight — render a plain
@@ -108,6 +108,15 @@ pub fn view(app: &App, frame: &mut Frame) {
         Overlay::Palette(ps) => palette_overlay(frame, area, ps, &app.theme),
         Overlay::TextInput(s) => text_input_overlay(frame, area, s, &app.theme),
         Overlay::Files(s) => files_overlay(frame, area, s, &app.attachments, &app.theme),
+        // Anchored to the input row (`rows[5]`), floating above it; the editor
+        // keeps the cursor (see `input()`'s focus predicate).
+        Overlay::Mention(m) => mention_dropdown(
+            frame,
+            rows[5],
+            m,
+            &app.mention_query().unwrap_or_default(),
+            &app.theme,
+        ),
         // The toggle only opens this when `app.workflow.is_some()`, so an
         // unexpected `None` (e.g. a race) simply renders nothing.
         Overlay::WorkflowStatus => {
@@ -123,11 +132,11 @@ pub fn view(app: &App, frame: &mut Frame) {
 }
 
 /// Complete binding reference, shown behind the `?` Help overlay only.
-const HELP_FULL: &str = "enter send · shift+enter newline · esc stop · ctrl+n new · ctrl+k cmds · ctrl+g agent · ↑↓ tool · ctrl+t toggle · ctrl+o todos · ctrl+y yank · / search · ? help · ctrl+c quit · ctrl+f attach · shift+tab mode";
+const HELP_FULL: &str = "enter send · shift+enter newline · esc stop · ctrl+n new · ctrl+k cmds · ctrl+g agent · ↑↓ tool · ctrl+t toggle · ctrl+o todos · ctrl+y yank · / search · ? help · ctrl+c quit · ctrl+f attach · @ mention · shift+tab mode";
 
 /// Slim footer hints, input empty: the still-bare keys (`/`, `?`) plus the
 /// command hub, since the former letter shortcuts moved to ctrl chords.
-const HINTS_EMPTY: &str = "enter send · ↑↓ select · / search · ? help · ctrl+k cmds";
+const HINTS_EMPTY: &str = "enter send · ↑↓ select · / search · @ mention · ? help · ctrl+k cmds";
 
 /// Slim footer hints, while typing: bare-letter commands stop firing once
 /// there's text in the buffer, so only universally-live chords show.
@@ -614,8 +623,10 @@ fn input(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
     let t = &app.theme;
-    // The input owns focus whenever no overlay is capturing keys.
-    let focused = matches!(app.overlay, Overlay::None);
+    // The input owns focus whenever no overlay is capturing keys. The inline
+    // `@`-mention dropdown is the exception: the cursor stays live in the
+    // editor while its floating list completes.
+    let focused = matches!(app.overlay, Overlay::None | Overlay::Mention(_));
     let border_style = if focused { t.border_focus } else { t.border };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -958,7 +969,26 @@ fn text_input_overlay(
     s: &TextInputState,
     theme: &crate::theme::Theme,
 ) {
-    let h = 4u16.min(area.height); // input line + hint + 2 borders
+    const MAX: usize = 6;
+    // When a mention is active, show ≤6 ranked candidates (biased toward
+    // `.otto/plans/`) between the input line and the hint.
+    let cand: Vec<usize> = s
+        .mention
+        .as_ref()
+        .filter(|m| !m.loading)
+        .map(|m| {
+            let ranked = ranked_matches(&m.results, &s.query[m.anchor + 1..], Some(".otto/plans/"));
+            ranked.into_iter().take(MAX).collect()
+        })
+        .unwrap_or_default();
+    let mention_loading = s.mention.as_ref().is_some_and(|m| m.loading);
+    // Extra rows: loading / no-match placeholder (1) or the candidate list.
+    let extra = if s.mention.is_some() {
+        cand.len().max(1)
+    } else {
+        0
+    };
+    let h = (4 + extra as u16).min(area.height); // input + hint + 2 borders + candidates
     let r = centered(area, 60, h);
     frame.render_widget(Clear, r);
     let block = Block::default()
@@ -968,13 +998,40 @@ fn text_input_overlay(
     let inner = block.inner(r);
     frame.render_widget(block, r);
 
-    let lines = vec![
-        Line::from(vec![
-            Span::raw(format!("> {}", s.query)),
-            Span::styled("▌", theme.text_muted),
-        ]),
-        Line::from(Span::styled("enter start · esc cancel", theme.text_muted)),
-    ];
+    let mut lines = vec![Line::from(vec![
+        Span::raw(format!("> {}", s.query)),
+        Span::styled("▌", theme.text_muted),
+    ])];
+    if let Some(m) = &s.mention {
+        if mention_loading {
+            lines.push(Line::from(Span::styled("  loading…", theme.text_muted)));
+        } else if cand.is_empty() {
+            lines.push(Line::from(Span::styled("  (no match)", theme.text_muted)));
+        } else {
+            for (row, &ci) in cand.iter().enumerate() {
+                let path = &m.results[ci];
+                let is_dir = path.ends_with('/');
+                if row == m.selected {
+                    lines.push(Line::from(Span::styled(
+                        format!("> {path}"),
+                        theme.selection,
+                    )));
+                } else {
+                    let style = if is_dir { theme.text_muted } else { theme.text };
+                    lines.push(Line::from(Span::styled(format!("  {path}"), style)));
+                }
+            }
+        }
+        lines.push(Line::from(Span::styled(
+            "↑↓ pick · tab/enter insert · esc cancel",
+            theme.text_muted,
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "enter start · esc cancel",
+            theme.text_muted,
+        )));
+    }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1030,6 +1087,75 @@ fn files_overlay(
             }
         }
         if s.truncated {
+            lines.push(Line::from(Span::styled(
+                "  … list truncated",
+                theme.text_muted,
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Render the inline `@`-mention dropdown: a `Clear`-ed bordered box floating
+/// directly ABOVE the input row (its bottom edge meets `input_rect.y`), spanning
+/// the full input width. Shows up to 8 ranked candidates in a scroll window that
+/// keeps the selection visible; directory rows are muted (they already carry a
+/// trailing `/`). Loading / no-match / truncated states get their own line.
+fn mention_dropdown(
+    frame: &mut Frame,
+    input_rect: Rect,
+    m: &MentionState,
+    query: &str,
+    theme: &crate::theme::Theme,
+) {
+    const MAX: usize = 8;
+    let matches = ranked_matches(&m.results, query, None);
+    let window = matches.len().min(MAX);
+    let content_rows = if m.loading || matches.is_empty() {
+        1
+    } else {
+        window + usize::from(m.truncated)
+    };
+    let h = (content_rows as u16) + 2; // + borders
+    let y = input_rect.y.saturating_sub(h);
+    let rect = Rect {
+        x: input_rect.x,
+        y,
+        // If the box would overrun the top of the screen (tiny terminal), it is
+        // clamped so its bottom still meets the input row.
+        width: input_rect.width,
+        height: input_rect.y - y,
+    };
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border_focus)
+        .title(" @ mention ");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(content_rows);
+    if m.loading {
+        lines.push(Line::from(Span::styled("loading…", theme.text_muted)));
+    } else if matches.is_empty() {
+        lines.push(Line::from(Span::styled("(no match)", theme.text_muted)));
+    } else {
+        // Scroll window: keep the selected row on screen.
+        let offset = m.selected.saturating_sub(window.saturating_sub(1));
+        for (row, &ci) in matches.iter().enumerate().skip(offset).take(window) {
+            let path = &m.results[ci];
+            let is_dir = path.ends_with('/');
+            if row == m.selected {
+                lines.push(Line::from(Span::styled(
+                    format!("> {path}"),
+                    theme.selection,
+                )));
+            } else {
+                let style = if is_dir { theme.text_muted } else { theme.text };
+                lines.push(Line::from(Span::styled(format!("  {path}"), style)));
+            }
+        }
+        if m.truncated {
             lines.push(Line::from(Span::styled(
                 "  … list truncated",
                 theme.text_muted,
@@ -2573,5 +2699,76 @@ mod tests {
         assert_eq!(workflow_task_glyph("REVIEWING", &theme).0, '⟳');
         assert_eq!(workflow_task_glyph("IMPLEMENTED", &theme).0, '⟳');
         assert_eq!(workflow_task_glyph("SOMETHING_UNKNOWN", &theme).0, '⟳');
+    }
+
+    // ----- Task D: inline `@` file/folder mention -------------------------
+
+    #[test]
+    fn mention_dropdown_renders_above_input_with_selection() {
+        let mut app = App::new();
+        app.input.insert('@');
+        app.open_mention();
+        app.files_loaded(vec!["src/main.rs".into(), "lib.rs".into()], false);
+        let text = render(&app);
+        assert!(text.contains("@ mention"), "dropdown title shown: {text:?}");
+        assert!(text.contains("src/main.rs"), "candidate listed: {text:?}");
+        assert!(
+            text.contains("> src/main.rs"),
+            "top candidate is selected: {text:?}"
+        );
+    }
+
+    #[test]
+    fn mention_dropdown_marks_dirs() {
+        let mut app = App::new();
+        app.input.insert('@');
+        app.open_mention();
+        app.files_loaded(vec!["src/".into(), "a.rs".into()], false);
+        let text = render(&app);
+        // The trailing slash is the visible directory marker.
+        assert!(
+            text.contains("src/"),
+            "dir shown with trailing slash: {text:?}"
+        );
+    }
+
+    #[test]
+    fn text_input_overlay_lists_plan_candidates_when_mention_active() {
+        let mut app = App::new();
+        app.open_text_input("SDD plan file", "sdd");
+        app.text_input_char('@');
+        app.files_loaded(vec![".otto/plans/p.md".into(), "src/x.rs".into()], false);
+        let text = render(&app);
+        assert!(
+            text.contains(".otto/plans/p.md"),
+            "plan candidate listed: {text:?}"
+        );
+        assert!(
+            text.contains("tab/enter insert"),
+            "mention hint shown: {text:?}"
+        );
+    }
+
+    #[test]
+    fn input_stays_focused_with_mention_open() {
+        use ratatui::{Terminal, backend::TestBackend};
+        // Baseline: identical buffer, no overlay → the focused cursor position.
+        let mut base = App::new();
+        base.input.insert('@');
+        let mut term = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        term.draw(|f| input(&base, f, f.area())).unwrap();
+        let cur_none = term.get_cursor_position().unwrap();
+
+        // With the mention dropdown open the editor must keep the cursor.
+        let mut men = App::new();
+        men.input.insert('@');
+        men.open_mention();
+        let mut term2 = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        term2.draw(|f| input(&men, f, f.area())).unwrap();
+        let cur_men = term2.get_cursor_position().unwrap();
+        assert_eq!(
+            cur_none, cur_men,
+            "mention overlay keeps the editor focused (cursor unchanged)"
+        );
     }
 }

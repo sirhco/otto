@@ -801,7 +801,8 @@ impl App {
                 mention: Some(m),
                 ..
             }) => {
-                let ranked = ranked_matches(&m.results, &query[m.anchor + 1..], Some(".otto/plans/"));
+                let ranked =
+                    ranked_matches(&m.results, &query[m.anchor + 1..], Some(".otto/plans/"));
                 match ranked.get(m.selected) {
                     Some(&i) => (m.results[i].clone(), m.anchor),
                     None => return,
@@ -4045,7 +4046,10 @@ mod tests {
         app.on_key(key(KeyCode::Enter)); // accept highlighted file
         assert_eq!(app.input.text(), "@src/main.rs ", "token swapped + space");
         assert_eq!(app.mention_paths, vec!["src/main.rs".to_string()]);
-        assert!(matches!(app.overlay, Overlay::None), "overlay closed on file");
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "overlay closed on file"
+        );
     }
 
     #[test]
@@ -4080,7 +4084,10 @@ mod tests {
             "still open at empty query"
         );
         app.on_key(key(KeyCode::Backspace)); // deletes the '@'
-        assert!(matches!(app.overlay, Overlay::None), "dismissed with the '@'");
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "dismissed with the '@'"
+        );
         assert_eq!(app.input.text(), "");
     }
 
