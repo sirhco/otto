@@ -2,7 +2,7 @@
   <img src="otto-lockup.svg" alt="otto" width="420">
 </p>
 
-# otto — an agentic coding harness (Rust port of opencode) with some addtions
+# otto — an agentic coding harness (Rust port of opencode) with some additions
 
 > ⚠️ **Work in progress — not stable.** otto is under active development and being actively built out. Config keys, wire formats, HTTP routes, CLI flags, TUI keybindings, and crate APIs can change without notice, and things may break between commits. It is **not recommended for production use** yet. If you depend on current behavior, pin a specific commit.
 
