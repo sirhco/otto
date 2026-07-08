@@ -20,7 +20,7 @@ pub enum AuthError {
     #[error("io error: {0}")]
     Io(String),
 
-    /// The stored auth data (or `OPENCODE_AUTH_CONTENT`) could not be parsed.
+    /// The stored auth data (or `OTTO_AUTH_CONTENT`) could not be parsed.
     ///
     /// Mirrors the `JSON.parse` / schema-decode paths in `auth/index.ts`.
     #[error("failed to parse auth data: {0}")]

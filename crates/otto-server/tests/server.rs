@@ -569,7 +569,7 @@ async fn basic_auth_gate() {
     // Correct credentials -> 200.
     let ok = http
         .get(format!("{base}/agent"))
-        .basic_auth("opencode", Some("secret"))
+        .basic_auth("otto", Some("secret"))
         .send()
         .await
         .unwrap();

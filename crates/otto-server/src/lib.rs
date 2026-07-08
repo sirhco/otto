@@ -45,8 +45,8 @@ use tower_http::cors::CorsLayer;
 
 /// The server version reported by `/app` and `/path`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Usernames accepted by the Basic-auth gate (opencode uses `opencode`).
-const AUTH_USERS: [&str; 2] = ["opencode", "otto"];
+/// Username accepted by the Basic-auth gate.
+const AUTH_USERS: [&str; 1] = ["otto"];
 /// Maximum number of `files[]` attachments accepted per prompt. Guards against
 /// an authenticated client attaching an unbounded list and forcing the server
 /// to sequentially resolve (and hold in memory) an unbounded number of files.

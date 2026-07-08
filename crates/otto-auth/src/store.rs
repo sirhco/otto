@@ -18,7 +18,7 @@ pub const OAUTH_DUMMY_KEY: &str = "otto-oauth-dummy-key";
 
 /// Environment variable that, when set, replaces the entire contents of
 /// `auth.json` (read-only). Port of the `OPENCODE_AUTH_CONTENT` branch in
-/// `auth/index.ts` `all()`.
+/// `auth/index.ts` `all()`, namespaced to otto's own env var.
 pub const AUTH_CONTENT_ENV: &str = "OTTO_AUTH_CONTENT";
 
 /// The decoded `auth.json` map: provider id -> credential.
@@ -68,7 +68,7 @@ impl AuthStore {
     }
 
     /// Read-only store backed by explicit JSON content — the programmatic
-    /// equivalent of the `OPENCODE_AUTH_CONTENT` override, without racing on a
+    /// equivalent of the `OTTO_AUTH_CONTENT` override, without racing on a
     /// process-global env var.
     #[must_use]
     pub fn with_content(content: impl Into<String>) -> Self {
@@ -81,7 +81,7 @@ impl AuthStore {
     ///
     /// Port of `Auth.all`. Precedence:
     /// 1. explicit [`AuthStore::with_content`] content, else
-    /// 2. the `OPENCODE_AUTH_CONTENT` env var (if set and valid JSON), else
+    /// 2. the `OTTO_AUTH_CONTENT` env var (if set and valid JSON), else
     /// 3. the on-disk `auth.json` (missing file -> empty map).
     ///
     /// Entries that fail to decode as a [`Credential`] are silently dropped,
@@ -96,7 +96,7 @@ impl AuthStore {
                 parse_map(content).map_err(|e| AuthError::Parse(e.to_string()))
             }
             Source::File(path) => {
-                // OPENCODE_AUTH_CONTENT env override (read-only short-circuit).
+                // OTTO_AUTH_CONTENT env override (read-only short-circuit).
                 if let Ok(content) = std::env::var(AUTH_CONTENT_ENV)
                     && let Ok(map) = parse_map(&content)
                 {

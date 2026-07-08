@@ -7,7 +7,8 @@
 //! Windows). Each lives under an `otto` subdirectory.
 //!
 //! The `OTTO_CONFIG_DIR` env var overrides the config dir (port of
-//! `global.ts:64` — `Flag.OPENCODE_CONFIG_DIR ?? Path.config`).
+//! `global.ts:64`'s `Flag.OPENCODE_CONFIG_DIR ?? Path.config`, namespaced to
+//! otto's own env var).
 
 use std::path::PathBuf;
 
