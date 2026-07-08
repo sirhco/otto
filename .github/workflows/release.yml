@@ -39,6 +39,14 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # The dtolnay action adds the target to *stable*, but builds in the repo
+      # use the rust-toolchain.toml PINNED toolchain, which rustup installs
+      # without cross targets — the x86_64 build died with E0463 (missing
+      # core). Add the target to whatever toolchain the repo directory
+      # actually resolves to.
+      - name: Add target to pinned toolchain
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build otto
         run: cargo build --release -p otto-cli --target ${{ matrix.target }}
 

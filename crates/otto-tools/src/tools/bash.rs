@@ -214,6 +214,11 @@ mod tests {
         assert_eq!(res.metadata["exit"], serde_json::json!(3));
     }
 
+    // Timing margins: the sleep is 30s and the "was killed" ceilings are 15s,
+    // so a kill/abort (sub-second locally) and a run-to-completion stay
+    // clearly distinguishable even on badly loaded CI runners, where process
+    // spawn alone has been observed to blow a 3s budget.
+
     #[tokio::test]
     async fn timeout_kills_command() {
         let dir = tempfile::tempdir().unwrap();
@@ -221,12 +226,16 @@ mod tests {
         let start = std::time::Instant::now();
         let res = BashTool
             .execute(
-                serde_json::json!({ "command": "sleep 5", "timeout": 100 }),
+                serde_json::json!({ "command": "sleep 30", "timeout": 100 }),
                 &ctx,
             )
             .await
             .unwrap();
-        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(15),
+            "command was not killed by the timeout (ran {:?})",
+            start.elapsed()
+        );
         assert_eq!(res.metadata["expired"], serde_json::json!(true));
     }
 
@@ -239,12 +248,12 @@ mod tests {
             .build();
         let handle = tokio::spawn(async move {
             BashTool
-                .execute(serde_json::json!({ "command": "sleep 5" }), &ctx)
+                .execute(serde_json::json!({ "command": "sleep 30" }), &ctx)
                 .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         token.cancel();
-        let res = tokio::time::timeout(std::time::Duration::from_secs(3), handle)
+        let res = tokio::time::timeout(std::time::Duration::from_secs(15), handle)
             .await
             .expect("did not hang")
             .unwrap()
