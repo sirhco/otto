@@ -321,6 +321,10 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         let id = id.clone();
         app.session_id = Some(id.clone());
         app.transcript.clear();
+        // Adopting a different session: the Σ session-token totals belong to
+        // the old one. (A same-session history reconcile goes through
+        // HistoryLoaded directly and keeps them.)
+        app.reset_session_counters();
         app.status = "loading…".into();
         let client = client.clone();
         let tx = tx.clone();

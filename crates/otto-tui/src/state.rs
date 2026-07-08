@@ -322,6 +322,17 @@ pub struct App {
     /// freezing on the snapshot taken when the event arrived. Cleared by the
     /// next non-`Retry` stream event (the retried attempt is live again).
     pub(crate) retry: Option<RetryCountdown>,
+    /// Real session-total tokens `(input, output)`, accumulated once per
+    /// assistant message on its terminal `Finish` (see `fold_event`). Rendered
+    /// as the `Σ` suffix of [`usage_line`](Self::usage_line) — the honest
+    /// number for comparing runs (e.g. tersemode on vs off): measured usage,
+    /// no estimation. Reset on session switch.
+    pub session_tokens: (u64, u64),
+    /// Last usage reading for the in-flight assistant message (StepFinish and
+    /// Finish REPLACE it — mirroring the processor's `a.tokens = tokens` —
+    /// so duplicated readings can't double-count). Drained into
+    /// `session_tokens` by the message's terminal `Finish`.
+    pub(crate) msg_usage: Option<(u64, u64)>,
     /// Live tool-call ids mapped to their transcript row, so results landing
     /// out of submission order (parallel tools) attach to the right row.
     /// Entries are removed as tools finish; cleared on submit/history reload.
@@ -332,6 +343,24 @@ pub struct App {
     /// [`LLMEvent::Retry`] instead of leaving the partial attempt as an
     /// orphaned duplicate. `None` when no message is streaming.
     pub(crate) msg_start: Option<usize>,
+}
+
+/// `(input, output)` token counts from a [`otto_events::Usage`], zeroing
+/// absent fields — the shape accumulated into `App::session_tokens`.
+fn usage_in_out(u: &otto_events::Usage) -> (u64, u64) {
+    (
+        u.input_tokens.unwrap_or(0),
+        u.output_tokens.unwrap_or(0),
+    )
+}
+
+/// Human token count: `812` below 1k, `12.3k` above.
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 /// State backing the live retry-backoff countdown in the header.
@@ -429,6 +458,8 @@ impl App {
             workflow: None,
             permission_mode: "approve-each".to_string(),
             retry: None,
+            session_tokens: (0, 0),
+            msg_usage: None,
             running_tools: Vec::new(),
             msg_start: None,
         }
@@ -1196,11 +1227,19 @@ impl App {
                 usage: usage @ Some(_),
                 ..
             } => {
+                self.msg_usage = usage.as_ref().map(usage_in_out);
                 self.usage = usage;
             }
             LLMEvent::Finish { usage, reason, .. } => {
                 if let Some(u) = usage {
+                    self.msg_usage = Some(usage_in_out(&u));
                     self.usage = Some(u);
+                }
+                // Fold the settled message's usage into the session totals —
+                // exactly once, however many step/finish readings mirrored it.
+                if let Some((i, o)) = self.msg_usage.take() {
+                    self.session_tokens.0 += i;
+                    self.session_tokens.1 += o;
                 }
                 // The assistant message settled — a later Retry belongs to the
                 // NEXT message and must not roll this one back.
@@ -1324,12 +1363,7 @@ impl App {
                 (Some(i), Some(o)) => Some(i + o),
                 _ => None,
             })?;
-        let toks = if total >= 1000 {
-            format!("{:.1}k tok", total as f64 / 1000.0)
-        } else {
-            format!("{total} tok")
-        };
-        let mut parts = vec![toks];
+        let mut parts = vec![format!("{} tok", fmt_tokens(total))];
 
         if let Some(model_id) = &self.model {
             let r = otto_agent::ModelRef::parse(model_id);
@@ -1346,6 +1380,14 @@ impl App {
                     parts.push(format!("${total_cost:.3}"));
                 }
             }
+        }
+
+        // Real measured session total (Σ input+output across all settled
+        // messages) — the number to compare across runs, e.g. tersemode
+        // on vs off.
+        let session_total = self.session_tokens.0 + self.session_tokens.1;
+        if session_total > 0 {
+            parts.push(format!("Σ {}", fmt_tokens(session_total)));
         }
 
         Some(parts.join(" · "))
@@ -1369,6 +1411,15 @@ impl App {
         let limit = m.limits.context.filter(|c| *c > 0)?;
         let used = u.input_tokens.unwrap_or(total);
         Some((used * 100 / limit).min(100) as u8)
+    }
+
+    /// Reset per-session counters when adopting a different session (switch /
+    /// new). NOT called on a same-session history reconcile, which must keep
+    /// the running totals.
+    pub fn reset_session_counters(&mut self) {
+        self.session_tokens = (0, 0);
+        self.msg_usage = None;
+        self.usage = None;
     }
 
     fn load_history(&mut self, rows: Vec<serde_json::Value>) {
@@ -2720,6 +2771,99 @@ mod tests {
         let line = app.usage_line().unwrap();
         assert!(line.contains("tok"), "usage line: {line}");
         assert!(!line.contains("$0.000"), "usage line: {line}");
+    }
+
+    /// Session totals accumulate once per assistant message: StepFinish and
+    /// the terminal Finish both carry the SAME per-message usage (the
+    /// processor replaces, not adds — `a.tokens = tokens`), so folding both
+    /// must not double-count.
+    #[test]
+    fn session_tokens_accumulate_per_message_not_per_event() {
+        let mut app = App::new();
+        // Message 1: step usage then a mirroring finish.
+        app.fold_event(LLMEvent::StepFinish {
+            index: 0,
+            reason: otto_events::FinishReason::Stop,
+            usage: Some(otto_events::Usage {
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                total_tokens: Some(150),
+                ..Default::default()
+            }),
+            provider_metadata: None,
+        });
+        app.fold_event(LLMEvent::Finish {
+            reason: otto_events::FinishReason::ToolCalls,
+            usage: Some(otto_events::Usage {
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                total_tokens: Some(150),
+                ..Default::default()
+            }),
+            provider_metadata: None,
+        });
+        assert_eq!(app.session_tokens, (100, 50), "one message, counted once");
+
+        // Message 2: usage only on the terminal finish.
+        app.fold_event(LLMEvent::Finish {
+            reason: otto_events::FinishReason::Stop,
+            usage: Some(otto_events::Usage {
+                input_tokens: Some(200),
+                output_tokens: Some(80),
+                total_tokens: Some(280),
+                ..Default::default()
+            }),
+            provider_metadata: None,
+        });
+        assert_eq!(
+            app.session_tokens,
+            (300, 130),
+            "totals accumulate across messages"
+        );
+    }
+
+    /// A finish with no usage must not re-add the PREVIOUS message's usage.
+    #[test]
+    fn usage_free_finish_does_not_recount_previous_message() {
+        let mut app = App::new();
+        app.fold_event(LLMEvent::Finish {
+            reason: otto_events::FinishReason::Stop,
+            usage: Some(otto_events::Usage {
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                total_tokens: Some(150),
+                ..Default::default()
+            }),
+            provider_metadata: None,
+        });
+        app.fold_event(LLMEvent::Finish {
+            reason: otto_events::FinishReason::Stop,
+            usage: None,
+            provider_metadata: None,
+        });
+        assert_eq!(app.session_tokens, (100, 50));
+    }
+
+    #[test]
+    fn usage_line_includes_session_total() {
+        let mut app = App::new();
+        for _ in 0..2 {
+            app.fold_event(LLMEvent::Finish {
+                reason: otto_events::FinishReason::Stop,
+                usage: Some(otto_events::Usage {
+                    input_tokens: Some(600),
+                    output_tokens: Some(400),
+                    total_tokens: Some(1000),
+                    ..Default::default()
+                }),
+                provider_metadata: None,
+            });
+        }
+        let line = app.usage_line().unwrap();
+        assert!(
+            line.contains("Σ 2.0k"),
+            "session total rendered, got {line:?}"
+        );
     }
 
     #[test]
