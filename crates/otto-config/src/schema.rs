@@ -270,11 +270,33 @@ pub struct ProviderOptions {
     pub api_key: Option<String>,
 }
 
-/// One `provider.<id>` config entry (extra opencode keys — name/npm/models/env — ignored).
+/// One `provider.<id>` config entry (extra opencode keys — name/npm/env — ignored).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProviderEntry {
     #[serde(default)]
     pub options: ProviderOptions,
+    /// Per-model overrides keyed by model id (`provider.<id>.models.<model>`).
+    #[serde(default)]
+    pub models: HashMap<String, ModelEntry>,
+}
+
+/// One `provider.<id>.models.<model-id>` entry (extra opencode keys ignored).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelEntry {
+    /// Declared context/output window for models the embedded registry doesn't
+    /// know (e.g. local ollama models). Lets compaction trigger before the
+    /// provider silently truncates the prompt.
+    #[serde(default)]
+    pub limits: Option<ModelLimitsEntry>,
+}
+
+/// `limits` block of a [`ModelEntry`].
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModelLimitsEntry {
+    /// Context window, in tokens.
+    pub context: Option<u64>,
+    /// Max output tokens.
+    pub output: Option<u64>,
 }
 
 impl Config {
@@ -292,6 +314,35 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_overrides_parses_per_model_limits() {
+        // `provider.<id>.models.<model-id>.limits` declares the context/output
+        // window for models the embedded registry doesn't know (local ollama
+        // models), so compaction can trigger before the provider silently
+        // truncates the prompt.
+        let cfg: Config = serde_json::from_value(serde_json::json!({
+            "provider": {
+                "ollama": {
+                    "options": { "baseURL": "http://localhost:11434/v1" },
+                    "models": {
+                        "gemma4:26b-mlx": { "limits": { "context": 32768, "output": 8192 } },
+                        "ornith:9b": { "name": "extra keys ignored" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let ov = cfg.provider_overrides();
+        let gemma = &ov["ollama"].models["gemma4:26b-mlx"];
+        let limits = gemma.limits.as_ref().expect("limits parsed");
+        assert_eq!(limits.context, Some(32_768));
+        assert_eq!(limits.output, Some(8192));
+        assert!(
+            ov["ollama"].models["ornith:9b"].limits.is_none(),
+            "model entry without limits parses as None"
+        );
+    }
 
     #[test]
     fn provider_overrides_parses_baseurl_and_apikey() {

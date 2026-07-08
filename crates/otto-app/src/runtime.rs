@@ -33,27 +33,45 @@ use crate::{Result, RunError};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build the [`AuthRouteFactory`] provider-override map from
-/// `config.provider.<id>.options`, keeping only entries with a non-empty
-/// `baseURL` — a config entry with no base URL supplies nothing the catch-all
+/// `config.provider.<id>`, keeping entries that supply a non-empty `baseURL`
+/// and/or per-model `limits` — an entry with neither supplies nothing any
 /// route arm can use, so it's dropped rather than stored as a no-op override.
 fn provider_overrides(config: &Config) -> HashMap<String, ProviderOverride> {
     config
         .provider_overrides()
         .into_iter()
         .filter_map(|(id, entry)| {
-            entry
+            let base_url = entry
                 .options
                 .base_url
                 .filter(|u| !u.trim().is_empty())
-                .map(|base_url| {
-                    (
-                        id,
-                        ProviderOverride {
-                            base_url,
-                            api_key: entry.options.api_key,
-                        },
-                    )
+                .unwrap_or_default();
+            let model_limits: HashMap<String, crate::route_factory::ModelLimitsOverride> = entry
+                .models
+                .into_iter()
+                .filter_map(|(model, m)| {
+                    m.limits.map(|l| {
+                        (
+                            model,
+                            crate::route_factory::ModelLimitsOverride {
+                                context: l.context,
+                                output: l.output,
+                            },
+                        )
+                    })
                 })
+                .collect();
+            if base_url.is_empty() && model_limits.is_empty() {
+                return None;
+            }
+            Some((
+                id,
+                ProviderOverride {
+                    base_url,
+                    api_key: entry.options.api_key,
+                    model_limits,
+                },
+            ))
         })
         .collect()
 }
@@ -688,6 +706,51 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod provider_override_tests {
+    use super::provider_overrides;
+    use otto_config::Config;
+
+    fn cfg(json: &str) -> Config {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn per_model_limits_map_into_overrides() {
+        let ov = provider_overrides(&cfg(
+            r#"{ "provider": { "ollama": {
+                "options": { "baseURL": "http://localhost:11434/v1" },
+                "models": { "gemma4:26b-mlx": { "limits": { "context": 32768, "output": 8192 } } }
+            } } }"#,
+        ));
+        let l = &ov["ollama"].model_limits["gemma4:26b-mlx"];
+        assert_eq!(l.context, Some(32_768));
+        assert_eq!(l.output, Some(8192));
+    }
+
+    #[test]
+    fn limits_only_entry_survives_without_base_url() {
+        // Declaring limits for a KNOWN provider's model needs no baseURL; the
+        // entry must not be dropped by the base-URL gate.
+        let ov = provider_overrides(&cfg(
+            r#"{ "provider": { "anthropic": {
+                "models": { "my-fine-tune": { "limits": { "context": 100000 } } }
+            } } }"#,
+        ));
+        assert_eq!(
+            ov["anthropic"].model_limits["my-fine-tune"].context,
+            Some(100_000)
+        );
+        assert!(ov["anthropic"].base_url.is_empty());
+    }
+
+    #[test]
+    fn empty_entry_is_dropped() {
+        let ov = provider_overrides(&cfg(r#"{ "provider": { "noop": {} } }"#));
+        assert!(!ov.contains_key("noop"));
+    }
 }
 
 #[cfg(test)]
