@@ -99,7 +99,8 @@ pub fn mode_overlay(mode: PermissionMode) -> Ruleset {
             rule("*", "*", Action::Ask),
             rule("edit", "*", Action::Allow),
             rule("write", "*", Action::Allow),
-            rule("apply_patch", "*", Action::Allow),
+            // Note: the `apply_patch` tool requests under the `edit` permission,
+            // so the `edit` rule above already covers it — no separate rule needed.
         ]),
         PermissionMode::FullAuto => Ruleset(vec![rule("*", "*", Action::Allow)]),
     }
@@ -122,8 +123,10 @@ pub fn danger_ruleset() -> Ruleset {
     for p in bash {
         rules.push(rule("bash", p, Action::Ask));
     }
+    // The `apply_patch` tool requests under the `edit` permission, so `edit`
+    // covers its file writes too — no separate `apply_patch` name needed here.
     for p in files {
-        for perm in ["edit", "write", "apply_patch"] {
+        for perm in ["edit", "write"] {
             rules.push(rule(perm, p, Action::Ask));
         }
     }
