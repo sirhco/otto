@@ -17,7 +17,7 @@ use tempfile::tempdir;
 fn parse_jsonc_with_comments_and_trailing_commas() {
     let text = r#"{
         // leading line comment
-        "$schema": "https://opencode.ai/config.json",
+        "$schema": "https://example.com/config.json",
         "model": "anthropic/claude-2", /* inline block */
         "instructions": [
             "AGENTS.md",
@@ -27,7 +27,7 @@ fn parse_jsonc_with_comments_and_trailing_commas() {
     let cfg = parse(text).expect("jsonc should parse");
     assert_eq!(
         cfg.schema.as_deref(),
-        Some("https://opencode.ai/config.json")
+        Some("https://example.com/config.json")
     );
     assert_eq!(cfg.model.as_deref(), Some("anthropic/claude-2"));
     assert_eq!(
@@ -237,7 +237,7 @@ fn load_default_when_no_config() {
 #[test]
 fn realistic_config_roundtrips_with_unknown_keys() {
     let text = r#"{
-        "$schema": "https://opencode.ai/config.json",
+        "$schema": "https://example.com/config.json",
         "model": "anthropic/claude-sonnet-4",
         "logLevel": "DEBUG",
         "share": "disabled",

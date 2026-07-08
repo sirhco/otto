@@ -18,15 +18,20 @@
 
 use std::collections::HashMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Default `$schema` opencode injects on load
-/// (`packages/opencode/src/config/config.ts:232,254`).
-pub const DEFAULT_SCHEMA: &str = "https://opencode.ai/config.json";
+/// Default `$schema` otto injects on load — points at the JSON schema
+/// generated from this module (`examples/gen_schema.rs`) and committed at
+/// `schema/config.json` in the otto repo. Namespaced away from opencode's
+/// `https://opencode.ai/config.json` (`packages/opencode/src/config/config.ts:232,254`),
+/// which this schema was ported from but no longer shares hosting with.
+pub const DEFAULT_SCHEMA: &str =
+    "https://raw.githubusercontent.com/sirhco/otto/main/schema/config.json";
 
 /// Log verbosity — `LogLevelRef` (`config.ts:27-30`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum LogLevel {
     Debug,
@@ -36,7 +41,7 @@ pub enum LogLevel {
 }
 
 /// Session sharing behavior — `share` (`config.ts:57-60`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Share {
     Manual,
@@ -45,21 +50,21 @@ pub enum Share {
 }
 
 /// `watcher` (`config.ts:51`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Watcher {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ignore: Option<Vec<String>>,
 }
 
 /// `enterprise` (`config.ts:130-132`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Enterprise {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
 
 /// `tool_output` truncation thresholds (`config.ts:133-145`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_lines: Option<u64>,
@@ -68,7 +73,7 @@ pub struct ToolOutput {
 }
 
 /// `compaction` (`config.ts:146-165`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Compaction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<bool>,
@@ -85,7 +90,7 @@ pub struct Compaction {
 /// Port of opencode `ConfigV1.Info` (`config.ts:32-189`).
 ///
 /// Extra / unknown keys parse without error but are dropped on re-serialize.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Config {
     /// `$schema` (`config.ts:33`).
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
@@ -226,7 +231,7 @@ pub struct Config {
 }
 
 /// `rtk` config block. Off unless `enabled` is set.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Rtk {
     /// Route `bash` commands through the `rtk` proxy when it is available.
     #[serde(default)]
@@ -235,7 +240,7 @@ pub struct Rtk {
 
 /// `tersemode` config block. Off unless `enabled` is set; `level` defaults to
 /// [`TersemodeLevel::Full`] when omitted.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Tersemode {
     /// Append the terse-output directive to the system prompt.
     #[serde(default)]
@@ -247,7 +252,7 @@ pub struct Tersemode {
 
 /// Tersemode intensity. Controls how far the brevity directive pushes the model.
 /// Serialized lowercase (`"lite" | "full" | "ultra" | "wenyan"`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TersemodeLevel {
     /// Drop filler/hedging, keep grammar + full sentences.

@@ -4,6 +4,34 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.2.2] - 2026-07-08
+
+### Changed
+
+- **otto no longer shares identity or storage with opencode.** otto was
+  originally a port of opencode; this release finishes disentangling the two:
+  - GitHub Copilot device-flow auth now uses otto's own registered GitHub
+    OAuth App client id instead of opencode's.
+  - Global config/data/cache/state dirs, the `auth.json` credential store, and
+    the Basic-auth server username now live under `otto`, not `opencode`.
+  - Project config files are `otto.json` / `otto.jsonc` (or `.otto/otto.json`)
+    instead of `opencode.json` / `.opencode/opencode.json`; plan mode writes
+    plans to `.otto/plans/*.md`.
+  - Env var overrides renamed `OPENCODE_*` -> `OTTO_*`
+    (`OTTO_CONFIG_DIR`, `OTTO_CONFIG`, `OTTO_CONFIG_CONTENT`,
+    `OTTO_DISABLE_PROJECT_CONFIG`, `OTTO_AUTH_CONTENT`, `OTTO_SERVER_PASSWORD`,
+    `OTTO_WEBSEARCH_PROVIDER`, `OTTO_MODELS_URL`, `OTTO_MODELS_PATH`,
+    `OTTO_DISABLE_MODELS_FETCH`).
+  - The config `$schema` default now points at a JSON schema generated from
+    otto's own `Config` struct and hosted in this repo
+    (`schema/config.json`, regenerate via
+    `cargo run -p otto-config --example gen_schema`) instead of
+    `opencode.ai`.
+
+  Existing `opencode.json` / `.opencode/` project configs and
+  `OPENCODE_*`-prefixed env vars are no longer read — rename them to the
+  `otto` equivalents above.
+
 ## [0.2.1] - 2026-07-08
 
 ### Fixed

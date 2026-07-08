@@ -1,0 +1,416 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Config",
+  "description": "Port of opencode `ConfigV1.Info` (`config.ts:32-189`).\n\nExtra / unknown keys parse without error but are dropped on re-serialize.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "`$schema` (`config.ts:33`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agent": {
+      "description": "`agent` map (`config.ts:93-106`) — permissive, decoupled from `ConfigAgentV1`."
+    },
+    "attachment": {
+      "description": "`attachment` (`config.ts:127`) — permissive."
+    },
+    "autoupdate": {
+      "description": "`autoupdate` — `bool | \"notify\"` (`config.ts:64`), kept permissive."
+    },
+    "command": {
+      "description": "`command` map (`config.ts:41-43`) — kept permissive.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "compaction": {
+      "description": "`compaction` (`config.ts:146`).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Compaction"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "default_agent": {
+      "description": "`default_agent` (`config.ts:80`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "disabled_providers": {
+      "description": "`disabled_providers` (`config.ts:68`).",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "enabled_providers": {
+      "description": "`enabled_providers` (`config.ts:71`).",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "enterprise": {
+      "description": "`enterprise` (`config.ts:130`).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Enterprise"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "experimental": {
+      "description": "`experimental` (`config.ts:166`) — permissive."
+    },
+    "formatter": {
+      "description": "`formatter` — `bool | Record<..>` (`config.ts:113`), permissive."
+    },
+    "instructions": {
+      "description": "`instructions` (`config.ts:121`) — merge concatenates + dedupes these (see `loader::merge`, `mergeConfigConcatArrays` config.ts:45-51).",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "logLevel": {
+      "description": "`logLevel` (`config.ts:37`).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LogLevel"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lsp": {
+      "description": "`lsp` — `bool | Record<..>` (`config.ts:117`), permissive."
+    },
+    "mcp": {
+      "description": "`mcp` map (`config.ts:110-112`) — permissive (typed schema is Phase 6)."
+    },
+    "model": {
+      "description": "`model` as `provider/model` (`config.ts:74`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "permission": {
+      "description": "`permission` (`config.ts:125`) — permissive; typing lives in `otto-permission`."
+    },
+    "permission_mode": {
+      "description": "`permission_mode` — the starting per-session permission mode (`approve-each` | `accept-edits` | `full-auto`). Otto-only. Defaults to `approve-each` when absent. The mode can be cycled live in the TUI.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "plugin": {
+      "description": "`plugin` specs (`config.ts:56`).",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "provider": {
+      "description": "`provider` map (`config.ts:107-109`) — permissive."
+    },
+    "rtk": {
+      "description": "`rtk` — optional RTK (Rust Token Killer) shell-command wrapping. Otto-only (no opencode analogue). When enabled and `rtk` is on `PATH`, the `bash` tool's commands are routed through `rtk` to compact their output.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Rtk"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "share": {
+      "description": "`share` (`config.ts:57`).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Share"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "shell": {
+      "description": "`shell` (`config.ts:36`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "skills": {
+      "description": "`skills` (`config.ts:44`) — kept permissive."
+    },
+    "small_model": {
+      "description": "`small_model` (`config.ts:77`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tersemode": {
+      "description": "`tersemode` — optional terse-output mode. Otto-only (no opencode analogue). When enabled, a brevity directive is appended to the system prompt so the model emits fewer output tokens (drops filler/articles/hedging) while keeping code, paths, and error strings byte-exact.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Tersemode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "theme": {
+      "description": "Named TUI color theme preset (e.g. \"catppuccin\", \"gruvbox\", \"nord\", \"base16\"). Unknown names fall back to the default dark theme.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tool_output": {
+      "description": "`tool_output` (`config.ts:133`).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ToolOutput"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tools": {
+      "description": "`tools` gate map (`config.ts:126`).",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "username": {
+      "description": "`username` (`config.ts:84`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "watcher": {
+      "description": "`watcher` (`config.ts:51`).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Watcher"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "Compaction": {
+      "description": "`compaction` (`config.ts:146-165`).",
+      "type": "object",
+      "properties": {
+        "auto": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "preserve_recent_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "prune": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reserved": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tail_turns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "Enterprise": {
+      "description": "`enterprise` (`config.ts:130-132`).",
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "LogLevel": {
+      "description": "Log verbosity — `LogLevelRef` (`config.ts:27-30`).",
+      "type": "string",
+      "enum": [
+        "DEBUG",
+        "INFO",
+        "WARN",
+        "ERROR"
+      ]
+    },
+    "Rtk": {
+      "description": "`rtk` config block. Off unless `enabled` is set.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Route `bash` commands through the `rtk` proxy when it is available.",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "Share": {
+      "description": "Session sharing behavior — `share` (`config.ts:57-60`).",
+      "type": "string",
+      "enum": [
+        "manual",
+        "auto",
+        "disabled"
+      ]
+    },
+    "Tersemode": {
+      "description": "`tersemode` config block. Off unless `enabled` is set; `level` defaults to [`TersemodeLevel::Full`] when omitted.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Append the terse-output directive to the system prompt.",
+          "default": false,
+          "type": "boolean"
+        },
+        "level": {
+          "description": "How aggressively to compress prose. Ignored when `enabled` is false.",
+          "default": "full",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TersemodeLevel"
+            }
+          ]
+        }
+      }
+    },
+    "TersemodeLevel": {
+      "description": "Tersemode intensity. Controls how far the brevity directive pushes the model. Serialized lowercase (`\"lite\" | \"full\" | \"ultra\" | \"wenyan\"`).",
+      "oneOf": [
+        {
+          "description": "Drop filler/hedging, keep grammar + full sentences.",
+          "type": "string",
+          "enum": [
+            "lite"
+          ]
+        },
+        {
+          "description": "Drop articles, fragments OK, short synonyms. The classic default.",
+          "type": "string",
+          "enum": [
+            "full"
+          ]
+        },
+        {
+          "description": "Telegraphic: heavy abbreviation, arrows for causality, one word when one word does.",
+          "type": "string",
+          "enum": [
+            "ultra"
+          ]
+        },
+        {
+          "description": "Classical-Chinese brevity register (文言文).",
+          "type": "string",
+          "enum": [
+            "wenyan"
+          ]
+        }
+      ]
+    },
+    "ToolOutput": {
+      "description": "`tool_output` truncation thresholds (`config.ts:133-145`).",
+      "type": "object",
+      "properties": {
+        "max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_lines": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "Watcher": {
+      "description": "`watcher` (`config.ts:51`).",
+      "type": "object",
+      "properties": {
+        "ignore": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

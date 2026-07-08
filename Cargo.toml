@@ -23,7 +23,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.2.1"
+version = "0.2.2"
 license = "Apache-2.0"
 repository = "https://github.com/sirhco/otto"
 rust-version = "1.95"
@@ -66,6 +66,7 @@ tempfile = "3"
 wiremock = "0.6"
 dirs = "5"
 jsonc-parser = "0.26"
+schemars = "0.8"
 base64 = "0.22"
 sha2 = "0.10"
 hmac = "0.12"

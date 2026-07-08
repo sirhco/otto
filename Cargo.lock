@@ -1633,7 +1633,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "otto-agent"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "otto-llm",
  "otto-permission",
@@ -1644,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "otto-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "otto-auth"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "dirs",
@@ -1689,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "otto-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1718,10 +1718,11 @@ dependencies = [
 
 [[package]]
 name = "otto-config"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dirs",
  "jsonc-parser",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "tempfile",
@@ -1730,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "otto-events"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1739,14 +1740,14 @@ dependencies = [
 
 [[package]]
 name = "otto-id"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rand 0.8.6",
 ]
 
 [[package]]
 name = "otto-llm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-stream",
  "bytes",
@@ -1765,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "otto-lsp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "otto-config",
@@ -1780,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "otto-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -1797,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "otto-permission"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "otto-id",
@@ -1810,7 +1811,7 @@ dependencies = [
 
 [[package]]
 name = "otto-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1842,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "otto-session"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1867,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "otto-storage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "otto-events",
  "otto-id",
@@ -1881,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "otto-tools"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -1904,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "otto-tui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1935,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "otto-vcs"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -1948,7 +1949,7 @@ dependencies = [
 
 [[package]]
 name = "otto-workflow"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -2433,7 +2434,7 @@ dependencies = [
  "process-wrap",
  "reqwest",
  "rmcp-macros",
- "schemars",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "sse-stream",
@@ -2547,6 +2548,18 @@ dependencies = [
 
 [[package]]
 name = "schemars"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
+dependencies = [
+ "dyn-clone",
+ "schemars_derive 0.8.22",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
@@ -2554,9 +2567,21 @@ dependencies = [
  "chrono",
  "dyn-clone",
  "ref-cast",
- "schemars_derive",
+ "schemars_derive 1.2.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn",
 ]
 
 [[package]]
