@@ -181,6 +181,12 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<Value>,
 
+    /// `permission_mode` — the starting per-session permission mode
+    /// (`approve-each` | `accept-edits` | `full-auto`). Otto-only. Defaults to
+    /// `approve-each` when absent. The mode can be cycled live in the TUI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+
     /// `tools` gate map (`config.ts:126`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<HashMap<String, bool>>,
@@ -367,5 +373,17 @@ mod tests {
     fn tersemode_absent_is_none() {
         let cfg: Config = serde_json::from_str(r#"{ "shell": "/bin/zsh" }"#).unwrap();
         assert_eq!(cfg.tersemode, None);
+    }
+
+    #[test]
+    fn parses_permission_mode() {
+        let cfg: Config = serde_json::from_str(r#"{ "permission_mode": "full-auto" }"#).unwrap();
+        assert_eq!(cfg.permission_mode.as_deref(), Some("full-auto"));
+    }
+
+    #[test]
+    fn permission_mode_absent_is_none() {
+        let cfg: Config = serde_json::from_str(r#"{ "shell": "/bin/zsh" }"#).unwrap();
+        assert_eq!(cfg.permission_mode, None);
     }
 }
