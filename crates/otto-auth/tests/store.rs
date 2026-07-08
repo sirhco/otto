@@ -147,7 +147,7 @@ fn remove_deletes_both_slash_variants() {
 
 #[test]
 fn content_override_returns_parsed_creds() {
-    // Programmatic equivalent of OPENCODE_AUTH_CONTENT (no env race).
+    // Programmatic equivalent of OTTO_AUTH_CONTENT (no env race).
     let content = r#"{
         "anthropic": { "type": "api", "key": "sk-override" },
         "openai": { "type": "oauth", "refresh": "r", "access": "a", "expires": 123 }

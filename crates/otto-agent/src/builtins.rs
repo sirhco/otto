@@ -19,7 +19,7 @@ use crate::agent::{AgentInfo, AgentMode};
 
 /// Plan-mode system prompt. No opencode analogue file — opencode's plan agent
 /// relies on the harness UI to surface plans; otto's TUI has no such surface,
-/// so the prompt itself directs persisting the plan to `.opencode/plans/*.md`
+/// so the prompt itself directs persisting the plan to `.otto/plans/*.md`
 /// (the one path plan mode may write) in the sdd-parseable `### Task N:` form.
 pub const PROMPT_PLAN: &str = include_str!("../assets/plan.txt");
 /// Explore agent system prompt (`agent/prompt/explore.txt`, agent.ts:214).
@@ -100,7 +100,7 @@ pub fn build() -> AgentInfo {
 /// Denies every edit (`edit: { "*": "deny" }`) except plan-mode markdown files.
 /// The opencode ruleset also allows a worktree-relative path under
 /// `Global.Path.data/plans` (agent.ts:174); that path is runtime-derived, so
-/// only the static `.opencode/plans/*.md` exception is baked in here.
+/// only the static `.otto/plans/*.md` exception is baked in here.
 #[must_use]
 pub fn plan() -> AgentInfo {
     AgentInfo {
@@ -118,7 +118,7 @@ pub fn plan() -> AgentInfo {
             "task": { "general": "deny" },
             "edit": {
                 "*": "deny",
-                ".opencode/plans/*.md": "allow"
+                ".otto/plans/*.md": "allow"
             }
         })),
         model: None,
@@ -311,14 +311,11 @@ mod tests {
         // time; the ruleset only carries the `edit` key (agent.ts:171-175).
         let rs = plan().permission;
         assert_eq!(eval(&rs, "edit", "src/main.rs"), Action::Deny);
-        assert_eq!(
-            eval(&rs, "edit", ".opencode/plans/design.md"),
-            Action::Allow
-        );
+        assert_eq!(eval(&rs, "edit", ".otto/plans/design.md"), Action::Allow);
         assert_eq!(eval(&rs, "plan_exit", "*"), Action::Allow);
     }
 
-    /// The ruleset ALLOWS writing `.opencode/plans/*.md`, but without a system
+    /// The ruleset ALLOWS writing `.otto/plans/*.md`, but without a system
     /// prompt nothing ever tells the model to do it — plan mode produced no
     /// plan file. The prompt must direct the agent to persist the final plan
     /// there, in the `### Task N:` shape the sdd workflow parses.
@@ -326,7 +323,7 @@ mod tests {
     fn plan_prompt_directs_writing_a_plan_file() {
         let prompt = plan().prompt.expect("plan agent carries a system prompt");
         assert!(
-            prompt.contains(".opencode/plans/"),
+            prompt.contains(".otto/plans/"),
             "prompt names the plans directory"
         );
         assert!(

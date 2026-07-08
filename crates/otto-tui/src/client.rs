@@ -111,7 +111,7 @@ impl Client {
 
     fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.password {
-            Some(pw) => rb.basic_auth("opencode", Some(pw)),
+            Some(pw) => rb.basic_auth("otto", Some(pw)),
             None => rb,
         }
     }

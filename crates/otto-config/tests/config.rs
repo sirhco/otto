@@ -97,7 +97,7 @@ fn merge_none_does_not_clobber() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn discover_uptree_order_opencode_and_alias() {
+fn discover_uptree_order_legacy_and_alias() {
     let root = tempdir().unwrap();
     let root_p = root.path();
     // mark the git root so discovery stops here
@@ -105,14 +105,14 @@ fn discover_uptree_order_opencode_and_alias() {
     let child = root_p.join("a").join("b");
     fs::create_dir_all(&child).unwrap();
 
-    fs::write(root_p.join("opencode.json"), "{}").unwrap();
+    fs::write(root_p.join("config.json"), "{}").unwrap();
     fs::write(child.join("otto.jsonc"), "{}").unwrap();
 
     let found = discover(&child, Some(root_p), false);
     // root (ancestor) comes before child (closer to cwd wins → merged last)
     let root_idx = found
         .iter()
-        .position(|p| p.ends_with("opencode.json"))
+        .position(|p| p.ends_with("config.json"))
         .unwrap();
     let child_idx = found
         .iter()
@@ -125,26 +125,24 @@ fn discover_uptree_order_opencode_and_alias() {
 }
 
 #[test]
-fn discover_picks_up_dot_opencode_dir() {
+fn discover_picks_up_dot_otto_dir() {
     let root = tempdir().unwrap();
     let root_p = root.path();
     fs::create_dir(root_p.join(".git")).unwrap();
-    fs::create_dir(root_p.join(".opencode")).unwrap();
-    fs::write(root_p.join(".opencode").join("opencode.jsonc"), "{}").unwrap();
+    fs::create_dir(root_p.join(".otto")).unwrap();
+    fs::write(root_p.join(".otto").join("otto.jsonc"), "{}").unwrap();
 
     let found = discover(root_p, Some(root_p), false);
     assert!(
-        found
-            .iter()
-            .any(|p| p.ends_with(".opencode/opencode.jsonc")),
-        "should find .opencode dir config: {found:?}"
+        found.iter().any(|p| p.ends_with(".otto/otto.jsonc")),
+        "should find .otto dir config: {found:?}"
     );
 }
 
 #[test]
 fn discover_disabled_returns_empty() {
     let root = tempdir().unwrap();
-    fs::write(root.path().join("opencode.json"), "{}").unwrap();
+    fs::write(root.path().join("otto.json"), "{}").unwrap();
     assert!(discover(root.path(), Some(root.path()), true).is_empty());
 }
 
@@ -156,7 +154,7 @@ fn discover_disabled_returns_empty() {
 fn load_project_overrides_global_model() {
     let global = tempdir().unwrap();
     fs::write(
-        global.path().join("opencode.json"),
+        global.path().join("otto.json"),
         r#"{ "model": "global/model", "small_model": "keep/me" }"#,
     )
     .unwrap();
@@ -164,7 +162,7 @@ fn load_project_overrides_global_model() {
     let proj = tempdir().unwrap();
     fs::create_dir(proj.path().join(".git")).unwrap();
     fs::write(
-        proj.path().join("opencode.json"),
+        proj.path().join("otto.json"),
         r#"{ "model": "project/model" }"#,
     )
     .unwrap();
@@ -183,7 +181,7 @@ fn load_config_content_wins() {
     let proj = tempdir().unwrap();
     fs::create_dir(proj.path().join(".git")).unwrap();
     fs::write(
-        proj.path().join("opencode.json"),
+        proj.path().join("otto.json"),
         r#"{ "model": "project/model" }"#,
     )
     .unwrap();
@@ -200,7 +198,7 @@ fn load_config_content_wins() {
 fn load_disable_project_config_skips_project() {
     let global = tempdir().unwrap();
     fs::write(
-        global.path().join("opencode.json"),
+        global.path().join("otto.json"),
         r#"{ "model": "global/model" }"#,
     )
     .unwrap();
@@ -208,7 +206,7 @@ fn load_disable_project_config_skips_project() {
     let proj = tempdir().unwrap();
     fs::create_dir(proj.path().join(".git")).unwrap();
     fs::write(
-        proj.path().join("opencode.json"),
+        proj.path().join("otto.json"),
         r#"{ "model": "project/model" }"#,
     )
     .unwrap();
