@@ -10,7 +10,7 @@ mod files;
 pub mod git;
 pub mod worktree;
 
-pub use files::find_files;
+pub use files::{find_entries, find_files};
 
 /// Errors from shelling out to `git` or from worktree management.
 #[derive(Debug, thiserror::Error)]
