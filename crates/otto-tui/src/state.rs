@@ -226,6 +226,10 @@ pub enum Msg {
     /// turns this into a detached `client.cancel_workflow(session)` call; the
     /// server-side cancel surfaces as a `workflow.done{ok:false}` event.
     CancelWorkflow(String),
+    /// Interrupt the in-flight prompt turn for `session` without ending the
+    /// session (Esc while busy). `dispatch` (lib.rs) turns this into a detached
+    /// `client.cancel_run(session)` call; the run aborts and the stream settles.
+    InterruptTurn(String),
     /// Advance the per-session permission mode to the next in the cycle
     /// (`approve-each` → `accept-edits` → `full-auto` → `approve-each`).
     /// `dispatch` (lib.rs) sets `App.permission_mode` optimistically and, if a
@@ -409,6 +413,16 @@ impl App {
             || self.status.contains("new session")
             || self.status.contains("connecting")
             || self.status.contains("retrying")
+    }
+
+    /// Whether a prompt turn is actively generating and thus interruptible —
+    /// the narrow subset of [`is_busy`](Self::is_busy) for which the server has
+    /// a live run token registered (a submitted turn, or a mid-turn retry).
+    /// Excludes transient startup states (connecting/loading/new session) that
+    /// have no cancellable run behind them.
+    #[must_use]
+    pub fn turn_in_flight(&self) -> bool {
+        self.status.contains("thinking") || self.status.contains("retrying")
     }
 
     /// `(name, title)` of the newest tool still `Running`, if any. Backs the
@@ -882,6 +896,10 @@ impl App {
             // effect returns as a `workflow.done{ok:false}` event that folds
             // normally. No local state change here.
             Msg::CancelWorkflow(_) => {}
+            // The cancel HTTP call is performed by `dispatch` (lib.rs); the run
+            // aborting surfaces through the normal stream settle. No local state
+            // change here.
+            Msg::InterruptTurn(_) => {}
             // `dispatch` (lib.rs) sets `permission_mode` optimistically and
             // performs the HTTP call; no local state change needed here.
             Msg::CyclePermissionMode => {}
@@ -2361,7 +2379,9 @@ mod tests {
     }
 
     #[test]
-    fn m_opens_model_picker_and_arrows_navigate() {
+    fn model_picker_arrows_navigate_and_select() {
+        // The bare `m` shortcut was removed (models open via the ctrl+k
+        // palette); this exercises the picker's own nav/select behavior.
         let mut app = App::new();
         app.models = vec![
             crate::client::ModelChoice {
@@ -2373,7 +2393,7 @@ mod tests {
                 model: "y".into(),
             },
         ];
-        app.on_key(key(KeyCode::Char('m')));
+        app.open_picker(Overlay::Models);
         assert!(matches!(app.overlay, Overlay::Models));
         app.on_key(key(KeyCode::Down));
         assert_eq!(app.selected, 1);
@@ -2944,9 +2964,9 @@ mod tests {
     }
 
     #[test]
-    fn o_toggles_todos_when_input_empty() {
+    fn ctrl_o_toggles_todos() {
         let mut app = App::new();
-        let msg = app.on_key(key(KeyCode::Char('o')));
+        let msg = app.on_key(ctrl_key(KeyCode::Char('o')));
         assert!(matches!(msg, Some(Msg::ToggleTodos)));
     }
 

@@ -190,6 +190,26 @@ impl Client {
             .unwrap_or(false))
     }
 
+    /// Interrupt a running prompt turn by session id (without ending the
+    /// session). Returns whether a turn was actually cancelled (`false` if none
+    /// was in flight).
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, the server responds with a
+    /// non-success status, or the body cannot be decoded.
+    pub async fn cancel_run(&self, session: &str) -> Result<bool> {
+        let v: serde_json::Value = self
+            .post(&format!("/session/{session}/cancel"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(v.get("cancelled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false))
+    }
+
     /// `GET /session/{id}/message` — raw message rows (folded by the caller).
     ///
     /// # Errors

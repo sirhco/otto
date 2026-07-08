@@ -173,7 +173,7 @@ fn y_key_sets_pending_yank_through_routing() {
         &mut app,
         &client,
         &tx,
-        Msg::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+        Msg::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
     );
     assert_eq!(app.pending_action, Some(LoopAction::Yank));
 }

@@ -364,16 +364,22 @@ impl App {
                 }
                 Some(Msg::Submitted(self.input.take()))
             }
+            // Esc while a turn is streaming interrupts it (keeps the session).
+            // Checked before the tool-cursor/overlay Esc handling so it wins
+            // whenever the agent is busy.
+            KeyCode::Esc if self.turn_in_flight() => {
+                self.session_id.clone().map(Msg::InterruptTurn)
+            }
             KeyCode::Esc if self.input.is_empty() && self.tool_cursor.is_some() => {
                 self.tool_cursor = None;
                 self.scroll_to_bottom();
                 None
             }
-            KeyCode::Up | KeyCode::Char('k') if self.input.is_empty() => {
+            KeyCode::Up if self.input.is_empty() => {
                 self.select_prev_tool();
                 None
             }
-            KeyCode::Down | KeyCode::Char('j') if self.input.is_empty() => {
+            KeyCode::Down if self.input.is_empty() => {
                 self.select_next_tool();
                 None
             }
@@ -381,31 +387,32 @@ impl App {
                 self.input.backspace();
                 None
             }
+            // `?` (help) and `/` (search) stay bare-when-empty: non-letter keys
+            // that don't shadow ordinary typing. The former letter shortcuts
+            // (t/m/g/s/o/q/y) moved to ctrl chords below so a message can start
+            // with any letter; models/sessions also live in the ctrl+k palette.
             KeyCode::Char('?') if self.input.is_empty() => {
                 self.overlay = Overlay::Help;
                 None
             }
-            KeyCode::Char('q') if self.input.is_empty() => Some(Msg::Quit),
-            KeyCode::Char('m') if self.input.is_empty() => {
-                self.open_picker(Overlay::Models);
-                None
-            }
-            KeyCode::Char('g') if self.input.is_empty() => {
-                self.open_picker(Overlay::Agents);
-                None
-            }
-            KeyCode::Char('s') if self.input.is_empty() => {
-                self.open_picker(Overlay::Sessions);
-                None
-            }
-            KeyCode::Char('t') if self.input.is_empty() => Some(Msg::ToggleTool),
-            KeyCode::BackTab => Some(Msg::CyclePermissionMode),
-            KeyCode::Char('o') if self.input.is_empty() => Some(Msg::ToggleTodos),
             KeyCode::Char('/') if self.input.is_empty() => {
                 self.open_search();
                 None
             }
-            KeyCode::Char('y') if self.input.is_empty() => {
+            KeyCode::BackTab => Some(Msg::CyclePermissionMode),
+            // ctrl chords for quick actions (collision-free: ctrl+m == Enter and
+            // ctrl+s == flow-control, so models/sessions stay on the palette).
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Msg::ToggleTool)
+            }
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_picker(Overlay::Agents);
+                None
+            }
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Msg::ToggleTodos)
+            }
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.pending_action = Some(LoopAction::Yank);
                 None
             }
@@ -482,11 +489,20 @@ mod tests {
     }
 
     #[test]
-    fn y_sets_pending_yank_when_input_empty() {
+    fn ctrl_y_sets_pending_yank() {
         let mut app = App::new();
-        let out = app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        let out = app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
         assert!(out.is_none());
         assert_eq!(app.pending_action, Some(LoopAction::Yank));
+    }
+
+    #[test]
+    fn esc_interrupts_turn_when_generating() {
+        let mut app = App::new();
+        app.session_id = Some("ses_1".into());
+        app.status = "…thinking".into();
+        let out = app.on_key(key(KeyCode::Esc));
+        assert!(matches!(out, Some(crate::state::Msg::InterruptTurn(s)) if s == "ses_1"));
     }
 
     #[test]

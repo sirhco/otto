@@ -123,11 +123,11 @@ pub fn view(app: &App, frame: &mut Frame) {
 }
 
 /// Complete binding reference, shown behind the `?` Help overlay only.
-const HELP_FULL: &str = "enter send · shift+enter newline · ctrl+n new · m model · g agent · s sessions · ↑↓ select tool · enter/t expand · / search · y yank · ? help · q quit · ctrl+k cmds · ctrl+f attach · o todos · shift+tab mode";
+const HELP_FULL: &str = "enter send · shift+enter newline · esc stop · ctrl+n new · ctrl+k cmds · ctrl+g agent · ↑↓ tool · ctrl+t toggle · ctrl+o todos · ctrl+y yank · / search · ? help · ctrl+c quit · ctrl+f attach · shift+tab mode";
 
-/// Slim footer hints, input empty: bare-letter commands are live, so they're
-/// worth the footer space.
-const HINTS_EMPTY: &str = "enter send · ↑↓ select · enter expand · / search · ? help · q quit";
+/// Slim footer hints, input empty: the still-bare keys (`/`, `?`) plus the
+/// command hub, since the former letter shortcuts moved to ctrl chords.
+const HINTS_EMPTY: &str = "enter send · ↑↓ select · / search · ? help · ctrl+k cmds";
 
 /// Slim footer hints, while typing: bare-letter commands stop firing once
 /// there's text in the buffer, so only universally-live chords show.
@@ -1837,7 +1837,7 @@ mod tests {
         let app = App::new();
         assert!(app.input.is_empty());
         let text = render(&app);
-        assert!(text.contains("q quit"), "empty-set token present: {text:?}");
+        assert!(text.contains("? help"), "empty-set token present: {text:?}");
         assert!(
             !text.contains("shift+enter newline"),
             "typing-only chord absent while empty: {text:?}"
@@ -2082,13 +2082,11 @@ mod tests {
         let mut app = App::new();
         app.overlay = Overlay::Help;
         let text = render(&app);
-        for token in [
-            "ctrl+n new",
-            "g agent",
-            "enter/t expand",
-            "o todos",
-            "ctrl+f attach",
-        ] {
+        // Space-free chord tokens: line-wrapping in the help box can split a
+        // multi-word label across rows, but a chord like "ctrl+t" never splits.
+        // (Tail tokens like shift+tab can be clipped at this small test box
+        // size; they still render in a real terminal.)
+        for token in ["esc", "ctrl+n", "ctrl+g", "ctrl+t", "ctrl+o", "ctrl+f"] {
             assert!(
                 text.contains(token),
                 "help overlay missing {token:?}: {text:?}"
