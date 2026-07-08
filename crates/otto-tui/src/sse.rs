@@ -15,6 +15,12 @@ pub struct FrameDecoder {
 pub enum ServerEvent {
     Connected,
     PermissionAsked(PermissionAsked),
+    /// A `permission.mode_changed` envelope: the session whose mode changed
+    /// and the new wire mode (`approve-each`/`accept-edits`/`full-auto`).
+    /// `session_id` is decoded but not currently used to filter (mirrors
+    /// `PermissionAsked`'s MVP: the `/event` bus is global and single-session
+    /// use is the common case).
+    PermissionModeChanged { session_id: String, mode: String },
     Workflow(WorkflowMsg),
     Subagent(SubagentMsg),
     Other,
@@ -120,6 +126,13 @@ struct PermProps {
     patterns: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct ModeChangedProps {
+    #[serde(rename = "sessionID")]
+    session_id: String,
+    mode: String,
+}
+
 /// Parse a `/event` envelope frame. Unknown envelope types map to
 /// [`ServerEvent::Other`]; malformed frames also map to `Other`.
 #[must_use]
@@ -138,6 +151,15 @@ pub fn decode_event(frame: &str) -> ServerEvent {
             }),
             Err(_) => ServerEvent::Other,
         },
+        "permission.mode_changed" => {
+            match serde_json::from_value::<ModeChangedProps>(env.properties) {
+                Ok(p) => ServerEvent::PermissionModeChanged {
+                    session_id: p.session_id,
+                    mode: p.mode,
+                },
+                Err(_) => ServerEvent::Other,
+            }
+        }
         "workflow.started" | "workflow.progress" | "workflow.done" => {
             let p = &env.properties;
             let phase = match env.kind.as_str() {
@@ -248,6 +270,19 @@ mod tests {
                 permission: "edit".into(),
                 patterns: vec!["*.rs".into()],
             })
+        );
+    }
+
+    #[test]
+    fn decode_event_reads_permission_mode_changed() {
+        let frame = "{\"type\":\"permission.mode_changed\",\"properties\":{\"sessionID\":\"ses_1\",\"mode\":\"full-auto\"}}";
+        let ev = decode_event(frame);
+        assert_eq!(
+            ev,
+            ServerEvent::PermissionModeChanged {
+                session_id: "ses_1".into(),
+                mode: "full-auto".into(),
+            }
         );
     }
 

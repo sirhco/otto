@@ -15,6 +15,7 @@ use otto_tools::{PermissionDenied, PermissionRequest};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot};
 
+use crate::mode::{PermissionMode, danger_ruleset, mode_overlay};
 use crate::ruleset::{Action, Rule, Ruleset, evaluate};
 
 /// Session identifier (matches otto session id strings).
@@ -95,28 +96,53 @@ struct Inner {
     approved: HashMap<SessionId, Vec<Rule>>,
     /// In-flight requests awaiting a reply.
     pending: HashMap<RequestId, Pending>,
+    /// Per-session permission mode; absent → `default_mode`.
+    modes: HashMap<SessionId, PermissionMode>,
 }
 
 /// The permission service — port of the `Service` in `permission/index.ts`.
 pub struct Permission {
     ruleset: Ruleset,
+    default_mode: PermissionMode,
     inner: Mutex<Inner>,
     events: broadcast::Sender<Asked>,
 }
 
 impl Permission {
-    /// Create a service configured with `ruleset`.
+    /// Create a service configured with `ruleset`, defaulting every session to
+    /// `PermissionMode::default()` (approve-each).
     #[must_use]
     pub fn new(ruleset: Ruleset) -> Self {
+        Self::with_mode(ruleset, PermissionMode::default())
+    }
+
+    /// Create a service with an explicit per-session default mode.
+    #[must_use]
+    pub fn with_mode(ruleset: Ruleset, default_mode: PermissionMode) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             ruleset,
+            default_mode,
             inner: Mutex::new(Inner {
                 approved: HashMap::new(),
                 pending: HashMap::new(),
+                modes: HashMap::new(),
             }),
             events,
         }
+    }
+
+    /// The current mode for `session_id` (falls back to the default).
+    #[must_use]
+    pub fn mode(&self, session_id: &str) -> PermissionMode {
+        let inner = self.inner.lock().expect("permission mutex poisoned");
+        inner.modes.get(session_id).copied().unwrap_or(self.default_mode)
+    }
+
+    /// Set the mode for `session_id` (live; affects subsequent `ask` calls).
+    pub fn set_mode(&self, session_id: impl Into<SessionId>, mode: PermissionMode) {
+        let mut inner = self.inner.lock().expect("permission mutex poisoned");
+        inner.modes.insert(session_id.into(), mode);
     }
 
     /// Subscribe to [`Asked`] events. A server/CLI drives the prompt UI from
@@ -129,11 +155,12 @@ impl Permission {
     /// Ask for permission on behalf of `session_id` — port of `ask`
     /// (`index.ts:67`).
     ///
-    /// Each pattern is evaluated against `[configured ruleset, session
-    /// approvals]`. Any `Deny` rejects immediately; if every pattern is
-    /// `Allow` the call returns `Ok`; otherwise (at least one `Ask`) a pending
-    /// request is registered, an [`Asked`] event is published, and the call
-    /// blocks on a oneshot until [`reply`](Permission::reply) resolves it.
+    /// Each pattern is evaluated against `[mode overlay, configured ruleset,
+    /// session approvals, danger ruleset]`. Any `Deny` rejects immediately; if
+    /// every pattern is `Allow` the call returns `Ok`; otherwise (at least one
+    /// `Ask`) a pending request is registered, an [`Asked`] event is
+    /// published, and the call blocks on a oneshot until
+    /// [`reply`](Permission::reply) resolves it.
     pub async fn ask(
         &self,
         session_id: impl Into<SessionId>,
@@ -145,11 +172,14 @@ impl Permission {
             let mut inner = self.inner.lock().expect("permission mutex poisoned");
             let session_approved =
                 Ruleset(inner.approved.get(&session_id).cloned().unwrap_or_default());
+            let mode = inner.modes.get(&session_id).copied().unwrap_or(self.default_mode);
+            let overlay = mode_overlay(mode);
+            let danger = danger_ruleset();
 
             let mut needs_ask = false;
             for pattern in &req.patterns {
                 let resolved = evaluate(
-                    &[&self.ruleset, &session_approved],
+                    &[&overlay, &self.ruleset, &session_approved, &danger],
                     &req.permission,
                     pattern,
                 );
@@ -303,5 +333,53 @@ impl Permission {
                 metadata: p.metadata.clone(),
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mode::PermissionMode;
+
+    #[tokio::test]
+    async fn full_auto_auto_allows_normal_command() {
+        let perm = Permission::with_mode(Ruleset::new(), PermissionMode::ApproveEach);
+        perm.set_mode("ses_1", PermissionMode::FullAuto);
+        let req = PermissionRequest {
+            permission: "bash".into(),
+            patterns: vec!["cargo test".into()],
+            always: vec![],
+            metadata: serde_json::json!({}),
+        };
+        // Auto-allowed: returns Ok without any reply being sent.
+        perm.ask("ses_1", req).await.expect("full-auto allows normal command");
+    }
+
+    #[tokio::test]
+    async fn full_auto_still_asks_on_danger() {
+        let perm = Permission::with_mode(Ruleset::new(), PermissionMode::FullAuto);
+        let mut rx = perm.subscribe();
+        let req = PermissionRequest {
+            permission: "bash".into(),
+            patterns: vec!["rm -rf build".into()],
+            always: vec![],
+            metadata: serde_json::json!({}),
+        };
+        // Danger pattern → the call blocks on an ask; prove an Asked event fires.
+        let perm2 = std::sync::Arc::new(perm);
+        let p = perm2.clone();
+        let h = tokio::spawn(async move { p.ask("ses_1", req).await });
+        let asked = rx.recv().await.expect("danger op should emit an Asked event");
+        perm2.reply(&asked.request_id, Reply::Once);
+        h.await.unwrap().expect("approved once");
+    }
+
+    #[test]
+    fn mode_defaults_and_set() {
+        let perm = Permission::with_mode(Ruleset::new(), PermissionMode::AcceptEdits);
+        assert_eq!(perm.mode("unknown_session"), PermissionMode::AcceptEdits);
+        perm.set_mode("ses_1", PermissionMode::FullAuto);
+        assert_eq!(perm.mode("ses_1"), PermissionMode::FullAuto);
+        assert_eq!(perm.mode("ses_2"), PermissionMode::AcceptEdits); // isolated
     }
 }

@@ -226,6 +226,16 @@ pub enum Msg {
     /// turns this into a detached `client.cancel_workflow(session)` call; the
     /// server-side cancel surfaces as a `workflow.done{ok:false}` event.
     CancelWorkflow(String),
+    /// Advance the per-session permission mode to the next in the cycle
+    /// (`approve-each` → `accept-edits` → `full-auto` → `approve-each`).
+    /// `dispatch` (lib.rs) sets `App.permission_mode` optimistically and, if a
+    /// session is active, fires the `client.set_permission_mode` call; the
+    /// server confirms (or corrects) via a `permission.mode_changed` event.
+    CyclePermissionMode,
+    /// The server confirmed the session's permission mode (via
+    /// `permission.mode_changed` on the `/event` stream, translated in the
+    /// event pump). Syncs `App.permission_mode` to the authoritative value.
+    PermissionModeChanged(String),
 }
 
 /// A side effect the event loop must perform because it needs the terminal or
@@ -298,6 +308,11 @@ pub struct App {
     /// Live view of the in-flight workflow run, folded from `workflow.*`
     /// events. `None` until a run starts; a fresh `Started` resets it.
     pub(crate) workflow: Option<WorkflowView>,
+    /// Current per-session permission mode (`approve-each`/`accept-edits`/
+    /// `full-auto`), shown in the header and cycled by shift+tab. Kept as a
+    /// plain wire-format string rather than `otto_permission::PermissionMode`
+    /// to avoid adding that dependency to this dependency-light crate.
+    pub permission_mode: String,
 }
 
 /// Memoized transcript render (assembled in view.rs). Line assembly (markdown
@@ -367,6 +382,7 @@ impl App {
             line_cache: std::cell::RefCell::new(None),
             splash: None,
             workflow: None,
+            permission_mode: "approve-each".to_string(),
         }
     }
 
@@ -866,6 +882,10 @@ impl App {
             // effect returns as a `workflow.done{ok:false}` event that folds
             // normally. No local state change here.
             Msg::CancelWorkflow(_) => {}
+            // `dispatch` (lib.rs) sets `permission_mode` optimistically and
+            // performs the HTTP call; no local state change needed here.
+            Msg::CyclePermissionMode => {}
+            Msg::PermissionModeChanged(mode) => self.permission_mode = mode,
         }
     }
 
@@ -1582,6 +1602,14 @@ mod tests {
         app.workflow = None;
         app.toggle_workflow_status();
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn permission_mode_changed_sets_permission_mode() {
+        let mut app = App::new();
+        assert_eq!(app.permission_mode, "approve-each");
+        app.update(Msg::PermissionModeChanged("full-auto".into()));
+        assert_eq!(app.permission_mode, "full-auto");
     }
 
     #[test]

@@ -131,7 +131,18 @@ pub async fn run(opts: TuiOptions) -> Result<()> {
         tokio::spawn(async move {
             if let Ok(mut stream) = client.events().await {
                 while let Some(ev) = stream.next().await {
-                    let _ = tx.send(Msg::Event(ev));
+                    // `permission.mode_changed` is translated straight into the
+                    // dedicated `Msg::PermissionModeChanged` here (the one place
+                    // `ServerEvent`s become `Msg`s) rather than routed through
+                    // `Msg::Event`, so `App::update` can handle it as a plain,
+                    // independently-testable top-level variant.
+                    let msg = match ev {
+                        crate::sse::ServerEvent::PermissionModeChanged { mode, .. } => {
+                            Msg::PermissionModeChanged(mode)
+                        }
+                        other => Msg::Event(other),
+                    };
+                    let _ = tx.send(msg);
                 }
             }
         });
@@ -329,6 +340,23 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         tokio::spawn(async move {
             let _ = client.reply_permission(&id, &reply, None).await;
         });
+        return;
+    }
+    if let Msg::CyclePermissionMode = &msg {
+        // compute the next mode from the current one
+        let next = match app.permission_mode.as_str() {
+            "approve-each" => "accept-edits",
+            "accept-edits" => "full-auto",
+            _ => "approve-each",
+        };
+        app.permission_mode = next.to_string(); // optimistic; server confirms via SSE
+        if let Some(id) = app.session_id.clone() {
+            let client = client.clone();
+            let next = next.to_string();
+            tokio::spawn(async move {
+                let _ = client.set_permission_mode(&id, &next).await;
+            });
+        }
         return;
     }
     if let Msg::Submitted(text) = &msg {

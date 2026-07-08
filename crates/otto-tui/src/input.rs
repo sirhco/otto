@@ -399,6 +399,7 @@ impl App {
                 None
             }
             KeyCode::Char('t') if self.input.is_empty() => Some(Msg::ToggleTool),
+            KeyCode::BackTab => Some(Msg::CyclePermissionMode),
             KeyCode::Char('o') if self.input.is_empty() => Some(Msg::ToggleTodos),
             KeyCode::Char('/') if self.input.is_empty() => {
                 self.open_search();
@@ -504,6 +505,13 @@ mod tests {
         let _ = app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert_eq!(app.pending_action, None);
         assert_eq!(app.input.text(), "xy");
+    }
+
+    #[test]
+    fn backtab_cycles_permission_mode_when_no_overlay() {
+        let mut app = App::new();
+        let msg = app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert!(matches!(msg, Some(Msg::CyclePermissionMode)));
     }
 
     #[test]
