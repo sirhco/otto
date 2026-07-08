@@ -165,6 +165,7 @@ pub fn router(runtime: Arc<Runtime>, opts: ServeOptions) -> Router {
         .route("/event", get(event_stream))
         .route("/permission", get(permission_list))
         .route("/permission/{request_id}/reply", post(permission_reply))
+        .route("/session/{id}/permission-mode", post(set_permission_mode))
         .route("/find", get(find_text))
         .route("/find/file", get(find_file))
         .route("/file/content", get(file_content))
@@ -723,6 +724,50 @@ async fn permission_reply(
     }
 }
 
+/// Body for `POST /session/{id}/permission-mode`.
+#[derive(Debug, Deserialize)]
+struct SetModeBody {
+    mode: String,
+}
+
+/// `POST /session/{id}/permission-mode` — set a session's live permission mode
+/// (drives the TUI's mode-cycle keybind; no direct opencode analog).
+///
+/// A recognized wire string (`PermissionMode::from_str_opt`) sets the mode via
+/// [`otto_permission::Permission::set_mode`] and fans a `permission.mode_changed`
+/// frame `{ sessionID, mode }` out over the `/event` bus, mirroring the
+/// `permission.asked` envelope shape built in [`event_stream`]. An
+/// unrecognized string is a 400, matching `permission_reply`'s handling of an
+/// unknown `reply`.
+async fn set_permission_mode(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<SetModeBody>,
+) -> ApiResult<Json<bool>> {
+    let Some(mode) = otto_permission::PermissionMode::from_str_opt(&body.mode) else {
+        return Err(ApiError::bad_request(format!(
+            "unknown permission mode: {}",
+            body.mode
+        )));
+    };
+    state
+        .runtime
+        .permission()
+        .set_mode(session_id.clone(), mode);
+
+    let envelope = json!({
+        "type": "permission.mode_changed",
+        "properties": {
+            "sessionID": session_id,
+            "mode": mode.as_str(),
+        }
+    })
+    .to_string();
+    let _ = state.events.send(envelope);
+
+    Ok(Json(true))
+}
+
 // -- find / file -------------------------------------------------------------
 
 /// Query for `GET /find`.
@@ -1152,6 +1197,7 @@ async fn doc() -> Json<Value> {
             "/event": { "get": { "summary": "Global event stream (SSE)" } },
             "/permission": { "get": { "summary": "List pending permissions" } },
             "/permission/{request_id}/reply": { "post": { "summary": "Reply to a permission" } },
+            "/session/{id}/permission-mode": { "post": { "summary": "Set a session's permission mode" } },
             "/find": { "get": { "summary": "Content search" } },
             "/find/file": { "get": { "summary": "Filename search" } },
             "/file/content": { "get": { "summary": "Read a file" } },

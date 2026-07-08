@@ -437,6 +437,95 @@ async fn permission_flow() {
 }
 
 #[tokio::test]
+async fn permission_mode_route_sets_mode_and_rejects_unknown() {
+    let runtime = plain_runtime().await;
+    let base = spawn(runtime.clone(), no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let created: Value = http
+        .post(format!("{base}/session"))
+        .json(&json!({ "title": "Mode" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Valid mode -> 200, and the runtime's permission service reflects it.
+    let resp = http
+        .post(format!("{base}/session/{id}/permission-mode"))
+        .json(&json!({ "mode": "full-auto" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        runtime.permission().mode(&id),
+        otto_permission::PermissionMode::FullAuto
+    );
+
+    // Unknown mode -> 400, and the previously-set mode is unchanged.
+    let resp = http
+        .post(format!("{base}/session/{id}/permission-mode"))
+        .json(&json!({ "mode": "nope" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert_eq!(
+        runtime.permission().mode(&id),
+        otto_permission::PermissionMode::FullAuto
+    );
+}
+
+#[tokio::test]
+async fn permission_mode_change_emits_sse_frame() {
+    let runtime = plain_runtime().await;
+    let base = spawn(runtime, no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let created: Value = http
+        .post(format!("{base}/session"))
+        .json(&json!({ "title": "ModeSSE" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Open the /event stream, then flip the mode and confirm a
+    // `permission.mode_changed` frame with the session id + mode arrives.
+    let event_resp = http.get(format!("{base}/event")).send().await.unwrap();
+    let mut body = event_resp.bytes_stream();
+    // Drain the initial `server.connected` frame.
+    let _ = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("initial frame within 2s");
+
+    let set = http
+        .post(format!("{base}/session/{id}/permission-mode"))
+        .json(&json!({ "mode": "accept-edits" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set.status(), 200);
+
+    let frame = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("a mode_changed frame within 2s")
+        .expect("a chunk")
+        .expect("chunk ok");
+    let text = String::from_utf8_lossy(&frame);
+    assert!(text.contains("permission.mode_changed"), "frame: {text}");
+    assert!(text.contains(&id), "frame: {text}");
+    assert!(text.contains("accept-edits"), "frame: {text}");
+}
+
+#[tokio::test]
 async fn basic_auth_gate() {
     let opts = ServeOptions {
         password: Some("secret".into()),
