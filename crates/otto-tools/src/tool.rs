@@ -160,6 +160,11 @@ pub struct ToolContext {
     /// opencode analogue is the `Agent`/`Session` services pulled from the
     /// Effect context (task.ts:84-90).
     pub subagent: Option<Arc<dyn SubagentSpawner>>,
+    /// Live event tap of the parent turn (`RunConfig.event_tx`), when a run
+    /// loop is driving execution. The `task` tool forwards a *filtered* view
+    /// of its child run's events through this so a subagent isn't a silent
+    /// multi-minute pause on the client.
+    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<otto_events::LLMEvent>>,
 }
 
 impl ToolContext {
@@ -175,6 +180,7 @@ impl ToolContext {
             permission: None,
             metadata: None,
             subagent: None,
+            event_tx: None,
         }
     }
 }
@@ -190,6 +196,7 @@ pub struct ToolContextBuilder {
     permission: Option<Arc<dyn PermissionGate>>,
     metadata: Option<Arc<dyn MetadataSink>>,
     subagent: Option<Arc<dyn SubagentSpawner>>,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<otto_events::LLMEvent>>,
 }
 
 impl ToolContextBuilder {
@@ -243,6 +250,16 @@ impl ToolContextBuilder {
         self
     }
 
+    /// Set the parent turn's live event tap (see [`ToolContext::event_tx`]).
+    #[must_use]
+    pub fn event_tx(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<otto_events::LLMEvent>,
+    ) -> Self {
+        self.event_tx = Some(tx);
+        self
+    }
+
     /// Finish building.
     pub fn build(self) -> ToolContext {
         ToolContext {
@@ -254,6 +271,7 @@ impl ToolContextBuilder {
             permission: self.permission.unwrap_or_else(|| Arc::new(AllowAll)),
             metadata: self.metadata.unwrap_or_else(|| Arc::new(NoopSink)),
             subagent: self.subagent,
+            event_tx: self.event_tx,
         }
     }
 }

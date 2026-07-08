@@ -83,6 +83,32 @@ impl Tool for TaskTool {
         // otto spawner always runs foreground; ignore the flag.
         let _ = params.background;
 
+        // Wire a filtered live tap: the child's tool lifecycle events are
+        // forwarded to the parent turn's event channel so a subagent isn't a
+        // silent multi-minute pause on the client. Prose/finish events are
+        // dropped — raw child text would garble the parent transcript, and a
+        // child `Finish` would wrongly flip the parent's status to idle.
+        let (event_tx, forward) = match ctx.event_tx.clone() {
+            Some(parent) => {
+                let (child_tx, mut child_rx) = tokio::sync::mpsc::unbounded_channel();
+                let pump = tokio::spawn(async move {
+                    while let Some(ev) = child_rx.recv().await {
+                        let forwardable = matches!(
+                            ev,
+                            otto_events::LLMEvent::ToolCall { .. }
+                                | otto_events::LLMEvent::ToolResult { .. }
+                                | otto_events::LLMEvent::ToolError { .. }
+                        );
+                        if forwardable && parent.send(ev).is_err() {
+                            break; // parent consumer gone
+                        }
+                    }
+                });
+                (Some(child_tx), Some(pump))
+            }
+            None => (None, None),
+        };
+
         let req = SubagentRequest {
             subagent_type: params.subagent_type,
             description: params.description.clone(),
@@ -92,10 +118,16 @@ impl Tool for TaskTool {
             task_id: params.task_id,
             command: params.command,
             abort: ctx.abort.clone(),
-            event_tx: None,
+            event_tx,
         };
 
         let text = spawner.spawn(req).await?;
+        // Drain the tap before returning so forwarded events are ordered
+        // before this tool's own result. `spawn` has returned, so every
+        // sender clone is dropped and the pump ends promptly.
+        if let Some(pump) = forward {
+            let _ = pump.await;
+        }
         Ok(ExecuteResult::new(
             params.description,
             Self::render_output(&text),
@@ -132,6 +164,79 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments { .. }));
+    }
+
+    #[tokio::test]
+    async fn child_tool_events_forward_filtered_to_parent_tap() {
+        use crate::subagent::{SubagentRequest, SubagentSpawner};
+        use std::sync::Arc;
+
+        // A spawner standing in for a child run: emits a tool call, a text
+        // delta, and a tool result on the channel the task tool wired up.
+        struct EmittingSpawner;
+        #[async_trait::async_trait]
+        impl SubagentSpawner for EmittingSpawner {
+            async fn spawn(&self, req: SubagentRequest) -> Result<String, ToolError> {
+                let tx = req.event_tx.expect("task tool wires a child event tap");
+                tx.send(otto_events::LLMEvent::ToolCall {
+                    id: "child_call".into(),
+                    name: "read".into(),
+                    input: json!({}),
+                    provider_executed: None,
+                    provider_metadata: None,
+                })
+                .unwrap();
+                tx.send(otto_events::LLMEvent::TextDelta {
+                    id: "t1".into(),
+                    text: "child prose that must NOT reach the parent".into(),
+                    provider_metadata: None,
+                })
+                .unwrap();
+                tx.send(otto_events::LLMEvent::ToolResult {
+                    id: "child_call".into(),
+                    name: "read".into(),
+                    result: otto_events::ToolResultValue::Text {
+                        value: json!("ok"),
+                    },
+                    output: None,
+                    provider_executed: None,
+                    provider_metadata: None,
+                })
+                .unwrap();
+                Ok("done".to_string())
+            }
+        }
+
+        let (parent_tx, mut parent_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolContext::builder(std::env::temp_dir())
+            .session_id("ses_parent")
+            .message_id("msg_parent")
+            .subagent(Arc::new(EmittingSpawner))
+            .event_tx(parent_tx)
+            .build();
+
+        TaskTool
+            .execute(
+                json!({
+                    "description": "do X",
+                    "prompt": "please do X",
+                    "subagent_type": "general"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("spawn");
+
+        // Only the tool lifecycle events cross into the parent tap; the
+        // child's prose (text/reasoning/finish) is filtered so it can't
+        // garble the parent transcript or status line.
+        let mut got = Vec::new();
+        while let Ok(ev) = parent_rx.try_recv() {
+            got.push(ev);
+        }
+        assert_eq!(got.len(), 2, "expected ToolCall + ToolResult, got {got:?}");
+        assert!(matches!(got[0], otto_events::LLMEvent::ToolCall { .. }));
+        assert!(matches!(got[1], otto_events::LLMEvent::ToolResult { .. }));
     }
 
     #[tokio::test]

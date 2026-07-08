@@ -155,8 +155,52 @@ impl Transport for HttpTransport {
                 }
             }
         };
-        stream.boxed()
+        // The reqwest read_timeout resets on ANY bytes — including SSE
+        // keepalive comments the decoder discards — so a semantically-stalled
+        // provider behind a chatty proxy would hang forever without this
+        // frame-level watchdog.
+        with_frame_watchdog(
+            stream.boxed(),
+            std::time::Duration::from_secs(idle_timeout_secs()),
+        )
     }
+}
+
+/// Wrap `frames` with an application-level stall watchdog: if no item (decoded
+/// `data:` frame or error) is yielded within `window`, the stream yields a
+/// retryable [`LLMError::Transport`] and ends.
+///
+/// This complements the transport-level `read_timeout`, which resets on every
+/// received byte: SSE keepalive/comment lines keep the socket "alive" while
+/// carrying no data, so only counting decoded frames catches a provider (or
+/// intermediary) that stalled semantically.
+#[must_use]
+pub fn with_frame_watchdog(
+    mut frames: BoxStream<'static, Result<String, LLMError>>,
+    window: std::time::Duration,
+) -> BoxStream<'static, Result<String, LLMError>> {
+    let stream = async_stream::stream! {
+        loop {
+            match tokio::time::timeout(window, frames.next()).await {
+                Ok(Some(item)) => {
+                    let is_err = item.is_err();
+                    yield item;
+                    if is_err {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    yield Err(LLMError::Transport(format!(
+                        "stream stalled: no data frame within {}s",
+                        window.as_secs()
+                    )));
+                    break;
+                }
+            }
+        }
+    };
+    stream.boxed()
 }
 
 /// Parse a `Retry-After` header value in its integer-seconds form
@@ -206,6 +250,36 @@ mod tests {
             parse_idle_secs(Some("-5".to_string())),
             DEFAULT_IDLE_TIMEOUT_SECS
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_errors_when_no_frames_within_window() {
+        // A provider that keeps the socket alive (keepalive comments reset
+        // reqwest's read_timeout) but never sends a data frame must not hang
+        // forever — the watchdog counts decoded frames, not raw bytes.
+        let frames = futures::stream::pending::<Result<String, LLMError>>().boxed();
+        let mut wrapped = with_frame_watchdog(frames, std::time::Duration::from_secs(5));
+        let item = wrapped.next().await.expect("watchdog fires");
+        assert!(
+            matches!(item, Err(LLMError::Transport(ref m)) if m.contains("stalled")),
+            "expected a stalled-stream transport error, got {item:?}"
+        );
+        assert!(
+            wrapped.next().await.is_none(),
+            "stream ends after the watchdog error"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_passes_frames_through_unchanged() {
+        let frames = futures::stream::iter(vec![
+            Ok::<String, LLMError>("a".into()),
+            Ok("b".into()),
+        ])
+        .boxed();
+        let wrapped = with_frame_watchdog(frames, std::time::Duration::from_secs(5));
+        let items: Vec<String> = wrapped.map(|r| r.expect("ok frame")).collect().await;
+        assert_eq!(items, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]

@@ -472,6 +472,11 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
             if let Some(spawner) = &cfg.subagent {
                 ctx_builder = ctx_builder.subagent(spawner.clone());
             }
+            // Hand the live tap to tool execution so the `task` tool can
+            // forward its child run's tool activity (filtered) to the client.
+            if let Some(tx) = &cfg.event_tx {
+                ctx_builder = ctx_builder.event_tx(tx.clone());
+            }
             let ctx = ctx_builder.build();
             let augmented =
                 augment_with_tools(provider_stream, cfg.tools.clone(), ctx, model_id.0.clone());
