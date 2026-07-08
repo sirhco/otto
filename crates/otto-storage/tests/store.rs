@@ -277,6 +277,32 @@ async fn open_file_backed_roundtrips() {
 }
 
 #[tokio::test]
+async fn open_file_backed_uses_wal_and_busy_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("otto.db");
+    let store = Store::open(&path).await.expect("open");
+
+    // WAL lets readers proceed while the per-delta writer commits; the default
+    // rollback journal serializes them and stalls the streaming drain loop.
+    let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(store.pool())
+        .await
+        .expect("journal_mode");
+    assert_eq!(journal_mode.to_lowercase(), "wal");
+
+    // A zero busy_timeout makes a contended write fail immediately with
+    // SQLITE_BUSY instead of waiting for the lock.
+    let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+        .fetch_one(store.pool())
+        .await
+        .expect("busy_timeout");
+    assert!(
+        busy_timeout_ms >= 1000,
+        "busy_timeout should be at least 1s, got {busy_timeout_ms}ms"
+    );
+}
+
+#[tokio::test]
 async fn foreign_key_cascade_and_enforcement() {
     let store = Store::open_in_memory().await.expect("open");
     // Inserting a message without its session violates the FK.

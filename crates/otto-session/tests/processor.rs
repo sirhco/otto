@@ -759,3 +759,137 @@ async fn empty_stream_without_content_is_not_no_terminal_finish() {
         "no content ⇒ not a spurious NoTerminalFinish"
     );
 }
+
+#[tokio::test]
+async fn text_deltas_are_debounced_into_few_part_writes() {
+    let store = store_with_message().await;
+    let gate: Arc<dyn PermissionGate> = Arc::new(RecordingGate::default());
+    let mut proc = Processor::new(store.clone(), SES, MSG, model(), "build", gate);
+
+    // A fast burst of 200 one-char deltas. Un-debounced, each delta rewrites
+    // the whole accumulated blob (200 row changes); debounced, only the start
+    // row, sparse interval flushes, and the end/step/finish writes remain.
+    let mut events = vec![
+        LLMEvent::StepStart { index: 0 },
+        LLMEvent::TextStart {
+            id: "t1".into(),
+            provider_metadata: None,
+        },
+    ];
+    for _ in 0..200 {
+        events.push(LLMEvent::TextDelta {
+            id: "t1".into(),
+            text: "x".into(),
+            provider_metadata: None,
+        });
+    }
+    events.push(LLMEvent::TextEnd {
+        id: "t1".into(),
+        provider_metadata: None,
+    });
+    events.push(LLMEvent::StepFinish {
+        index: 0,
+        reason: FinishReason::Stop,
+        usage: None,
+        provider_metadata: None,
+    });
+    events.push(LLMEvent::Finish {
+        reason: FinishReason::Stop,
+        usage: None,
+        provider_metadata: None,
+    });
+
+    // The in-memory store lives on a single connection, so `total_changes()`
+    // counts every row change the processor makes.
+    let before: i64 = sqlx::query_scalar("SELECT total_changes()")
+        .fetch_one(store.pool())
+        .await
+        .expect("before");
+    let outcome = proc.process(ok_stream(events)).await.expect("process");
+    let after: i64 = sqlx::query_scalar("SELECT total_changes()")
+        .fetch_one(store.pool())
+        .await
+        .expect("after");
+    assert_eq!(outcome, ProcessOutcome::Continue);
+
+    let writes = after - before;
+    assert!(
+        writes < 30,
+        "per-delta persistence must be debounced: {writes} row changes for 200 deltas"
+    );
+
+    // Debouncing must not lose text: the final part holds the full blob.
+    let text = parts(&store)
+        .await
+        .into_iter()
+        .find_map(|p| match p.kind {
+            PartKind::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .expect("a text part");
+    assert_eq!(text, "x".repeat(200));
+}
+
+#[tokio::test]
+async fn reasoning_deltas_are_debounced_into_few_part_writes() {
+    let store = store_with_message().await;
+    let gate: Arc<dyn PermissionGate> = Arc::new(RecordingGate::default());
+    let mut proc = Processor::new(store.clone(), SES, MSG, model(), "build", gate);
+
+    let mut events = vec![
+        LLMEvent::StepStart { index: 0 },
+        LLMEvent::ReasoningStart {
+            id: "r1".into(),
+            provider_metadata: None,
+        },
+    ];
+    for _ in 0..200 {
+        events.push(LLMEvent::ReasoningDelta {
+            id: "r1".into(),
+            text: "y".into(),
+            provider_metadata: None,
+        });
+    }
+    events.push(LLMEvent::ReasoningEnd {
+        id: "r1".into(),
+        provider_metadata: None,
+    });
+    events.push(LLMEvent::StepFinish {
+        index: 0,
+        reason: FinishReason::Stop,
+        usage: None,
+        provider_metadata: None,
+    });
+    events.push(LLMEvent::Finish {
+        reason: FinishReason::Stop,
+        usage: None,
+        provider_metadata: None,
+    });
+
+    let before: i64 = sqlx::query_scalar("SELECT total_changes()")
+        .fetch_one(store.pool())
+        .await
+        .expect("before");
+    let outcome = proc.process(ok_stream(events)).await.expect("process");
+    let after: i64 = sqlx::query_scalar("SELECT total_changes()")
+        .fetch_one(store.pool())
+        .await
+        .expect("after");
+    assert_eq!(outcome, ProcessOutcome::Continue);
+
+    let writes = after - before;
+    assert!(
+        writes < 30,
+        "per-delta persistence must be debounced: {writes} row changes for 200 deltas"
+    );
+
+    let text = parts(&store)
+        .await
+        .into_iter()
+        .find_map(|p| match p.kind {
+            PartKind::Reasoning { text, .. } => Some(text),
+            _ => None,
+        })
+        .expect("a reasoning part");
+    assert_eq!(text, "y".repeat(200));
+}

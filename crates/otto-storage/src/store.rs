@@ -16,7 +16,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
 use crate::model::{Info, Part, WithParts};
@@ -170,7 +170,14 @@ impl Store {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
-            .foreign_keys(true);
+            .foreign_keys(true)
+            // WAL lets readers proceed while the streaming writer commits;
+            // the default rollback journal serializes them, which stalls the
+            // per-delta persistence path under concurrent history reads.
+            .journal_mode(SqliteJournalMode::Wal)
+            // Wait for a contended lock instead of failing immediately with
+            // SQLITE_BUSY (e.g. the title-generation writer racing a turn).
+            .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
         let store = Self { pool };
         store.migrate().await?;

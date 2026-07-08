@@ -25,6 +25,9 @@ async-stream.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# `processor` test asserts the per-delta persistence debounce by counting row
+# changes via `SELECT total_changes()` on the in-memory store's pool.
+sqlx.workspace = true
 # MCP is a dev-only dependency: the `mcp_loop` integration test proves MCP tools
 # are first-class in the run loop. otto-session keeps NO production dependency
 # on otto-mcp (no cycle — otto-mcp only depends on otto-tools/otto-events).

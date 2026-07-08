@@ -23,7 +23,7 @@ pub use convert::{to_model_messages, ConvertOptions};
 pub use overflow::is_overflow;
 pub use processor::{ProcessOutcome, Processor, ProcessorError};
 pub use retry::{retryable, with_retry};
-pub use run::{run_loop, RunConfig, RunError};
+pub use run::{run_loop, tap_events, RunConfig, RunError};
 pub use run_state::RunnerRegistry;
 pub use runtime::augment_with_tools;
 pub use subagent::{RouteFor, SessionSubagentSpawner};
