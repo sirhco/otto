@@ -332,6 +332,19 @@ impl Client {
             .error_for_status()?;
         Ok(())
     }
+
+    /// `POST /session/{session_id}/permission-mode`.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or the server responds non-success.
+    pub async fn set_permission_mode(&self, session_id: &str, mode: &str) -> Result<()> {
+        self.post(&format!("/session/{session_id}/permission-mode"))
+            .json(&serde_json::json!({ "mode": mode }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
 }
 
 /// Build the JSON body for `POST /session/{id}/message`. `files` is included

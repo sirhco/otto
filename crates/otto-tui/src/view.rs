@@ -123,7 +123,7 @@ pub fn view(app: &App, frame: &mut Frame) {
 }
 
 /// Complete binding reference, shown behind the `?` Help overlay only.
-const HELP_FULL: &str = "enter send · shift+enter newline · ctrl+n new · m model · g agent · s sessions · ↑↓ select tool · enter/t expand · / search · y yank · ? help · q quit · ctrl+k cmds · ctrl+f attach · o todos";
+const HELP_FULL: &str = "enter send · shift+enter newline · ctrl+n new · m model · g agent · s sessions · ↑↓ select tool · enter/t expand · / search · y yank · ? help · q quit · ctrl+k cmds · ctrl+f attach · o todos · shift+tab mode";
 
 /// Slim footer hints, input empty: bare-letter commands are live, so they're
 /// worth the footer space.
@@ -176,6 +176,7 @@ fn header(app: &App, frame: &mut Frame, area: Rect) {
     let session = app.session_id.as_deref().unwrap_or("(no session)");
     let model = app.model.as_deref().unwrap_or("default");
     let agent = app.agent.as_deref().unwrap_or("build");
+    let mode = app.permission_mode.as_str();
 
     // Right-aligned status: a colored dot + word (glyph pairing survives mono
     // and CVD), spinner + elapsed while busy, red+bold on error.
@@ -203,6 +204,7 @@ fn header(app: &App, frame: &mut Frame, area: Rect) {
     // Degrade the meta at narrow widths so the status dot+word never clips:
     // drop trailing segments in order model → agent → session, keeping brand.
     let candidates = [
+        format!(" otto · {session} · {agent} · {model} · mode:{mode} "),
         format!(" otto · {session} · {agent} · {model} "),
         format!(" otto · {session} · {agent} "),
         format!(" otto · {session} "),
