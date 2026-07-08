@@ -10,6 +10,7 @@
 //! handling from shell.ts are not ported; only the foreground path is here.
 
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,6 +20,48 @@ use crate::tool::{ExecuteResult, PermissionRequest, Tool, ToolContext, ToolError
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
+
+/// How long to wait for the stdout/stderr pipes to reach EOF once the child
+/// has exited (or been killed). A background/daemon grandchild can inherit
+/// the pipe write ends and hold them open long after the shell is gone —
+/// without this bound, `execute` blocked until that orphan exited.
+const PIPE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Incrementally drain `pipe` into `buf` until EOF. Incremental (rather than
+/// `read_to_end` into a task-local Vec) so output captured before a drain
+/// deadline is not lost when the task is abandoned.
+fn drain_pipe(
+    mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    buf: Arc<Mutex<Vec<u8>>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.lock().unwrap().extend_from_slice(&chunk[..n]),
+            }
+        }
+    })
+}
+
+/// Kill the child's entire process group, falling back to the direct child.
+///
+/// The shell frequently FORKS the command instead of exec'ing it (dash does,
+/// bash does for compound commands), so signalling only `sh` leaves the real
+/// work running as an orphan — the spawn puts the child in its own group
+/// precisely so this can take the whole tree down. Group kill goes through
+/// `/bin/kill` (a negated pid signals the group) because this crate forbids
+/// `unsafe` and there is no safe killpg in std.
+fn kill_child_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .status();
+    }
+    let _ = child.start_kill();
+}
 
 #[derive(Debug, Deserialize)]
 struct BashParams {
@@ -72,27 +115,25 @@ impl Tool for BashTool {
             })
             .await?;
 
-        let mut child = tokio::process::Command::new("sh")
-            .arg("-c")
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
             .arg(&params.command)
             .current_dir(&ctx.directory)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        // Own process group so timeout/abort can kill the child's whole tree
+        // (see `kill_child_tree`), not just the `sh` wrapper.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd.spawn()?;
 
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let out_task = tokio::spawn(async move {
-            let mut b = Vec::new();
-            let _ = stdout.read_to_end(&mut b).await;
-            b
-        });
-        let err_task = tokio::spawn(async move {
-            let mut b = Vec::new();
-            let _ = stderr.read_to_end(&mut b).await;
-            b
-        });
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let out_buf = Arc::new(Mutex::new(Vec::new()));
+        let err_buf = Arc::new(Mutex::new(Vec::new()));
+        let out_task = drain_pipe(stdout, out_buf.clone());
+        let err_task = drain_pipe(stderr, err_buf.clone());
 
         let mut exit_code: Option<i32> = None;
         let mut expired = false;
@@ -104,18 +145,25 @@ impl Tool for BashTool {
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(timeout)) => {
                 expired = true;
-                let _ = child.start_kill();
+                kill_child_tree(&mut child);
                 let _ = child.wait().await;
             }
             _ = ctx.abort.cancelled() => {
                 aborted = true;
-                let _ = child.start_kill();
+                kill_child_tree(&mut child);
                 let _ = child.wait().await;
             }
         }
 
-        let out = out_task.await.unwrap_or_default();
-        let err = err_task.await.unwrap_or_default();
+        // The child is gone; give the pipes a bounded grace period to reach
+        // EOF. A surviving background/daemon grandchild (spawned into a new
+        // session, or left behind on the non-kill path) can hold the write
+        // ends open indefinitely — output captured so far is kept either way.
+        let _ = tokio::time::timeout(PIPE_DRAIN_GRACE, out_task).await;
+        let _ = tokio::time::timeout(PIPE_DRAIN_GRACE, err_task).await;
+
+        let out = std::mem::take(&mut *out_buf.lock().unwrap());
+        let err = std::mem::take(&mut *err_buf.lock().unwrap());
         let mut output = String::new();
         output.push_str(&String::from_utf8_lossy(&out));
         output.push_str(&String::from_utf8_lossy(&err));
@@ -237,6 +285,58 @@ mod tests {
             start.elapsed()
         );
         assert_eq!(res.metadata["expired"], serde_json::json!(true));
+    }
+
+    /// The timeout must kill the whole process GROUP, not just the `sh`
+    /// wrapper: a compound command makes the shell fork the child instead of
+    /// exec'ing it (dash on Linux does this even for simple commands), and
+    /// killing only `sh` leaves an orphan running — and holding the stdout
+    /// pipe open, which blocked `execute` until the orphan exited.
+    #[tokio::test]
+    async fn timeout_kills_forked_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::builder(dir.path()).build();
+        let start = std::time::Instant::now();
+        // `sleep 30; echo done` forces the shell to fork `sleep` (no exec
+        // optimization), reproducing the Linux CI behavior everywhere.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            BashTool.execute(
+                serde_json::json!({ "command": "sleep 30; echo done", "timeout": 100 }),
+                &ctx,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "execute hung on the orphaned grandchild ({:?})",
+                start.elapsed()
+            )
+        })
+        .unwrap();
+        assert_eq!(res.metadata["expired"], serde_json::json!(true));
+    }
+
+    /// A command that leaves a BACKGROUND child behind must not hold
+    /// `execute` hostage: the shell exits immediately, but the background
+    /// child inherits the stdout pipe, and reading to EOF would block until
+    /// it dies.
+    #[tokio::test]
+    async fn background_child_does_not_hold_pipes_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::builder(dir.path()).build();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            BashTool.execute(
+                serde_json::json!({ "command": "sleep 30 & echo started" }),
+                &ctx,
+            ),
+        )
+        .await
+        .expect("execute must return when the shell exits, not when its background child does")
+        .unwrap();
+        assert!(res.output.contains("started"));
+        assert_eq!(res.metadata["exit"], serde_json::json!(0));
     }
 
     #[tokio::test]
