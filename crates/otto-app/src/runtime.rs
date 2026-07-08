@@ -11,7 +11,7 @@ use otto_config::{TersemodeLevel, Config};
 use otto_events::LLMEvent;
 use otto_llm::HttpTransport;
 use otto_mcp::{McpClient, McpServerConfig};
-use otto_permission::{Permission, Ruleset, SessionGate};
+use otto_permission::{Permission, PermissionMode, Ruleset, SessionGate};
 use otto_session::run::{
     DEFAULT_COMPACTION_RESERVED, DEFAULT_MAX_RETRIES, DEFAULT_PRESERVE_RECENT_TOKENS,
 };
@@ -122,7 +122,10 @@ impl Runtime {
         otto_llm::registry::install(registry);
 
         let agents = resolve_agents(&agent_config(&config));
-        let permission = Arc::new(Permission::new(permission_ruleset(&config)));
+        let permission = Arc::new(Permission::with_mode(
+            permission_ruleset(&config),
+            permission_mode(&config),
+        ));
 
         // Construct the LSP service and inject it into the diagnostics-aware
         // tools (edit/write/apply_patch). Retained on the runtime so the server
@@ -195,7 +198,10 @@ impl Runtime {
         otto_llm::registry::install(otto_llm::models_dev::Registry::embedded());
 
         let agents = resolve_agents(&agent_config(&config));
-        let permission = Arc::new(Permission::new(permission_ruleset(&config)));
+        let permission = Arc::new(Permission::with_mode(
+            permission_ruleset(&config),
+            permission_mode(&config),
+        ));
         let lsp: Arc<otto_lsp::Lsp> = otto_lsp::Lsp::new(
             directory.clone(),
             otto_lsp::LspConfigResolved::enabled_default(),
@@ -662,6 +668,15 @@ fn permission_ruleset(config: &Config) -> Ruleset {
         .unwrap_or_default()
 }
 
+/// The configured starting permission mode (default approve-each; unknown → default).
+fn permission_mode(config: &Config) -> PermissionMode {
+    config
+        .permission_mode
+        .as_deref()
+        .and_then(PermissionMode::from_str_opt)
+        .unwrap_or_default()
+}
+
 /// A stable project id derived from the working directory.
 fn project_id_for(dir: &Path) -> String {
     format!("prj_{}", dir.display())
@@ -710,5 +725,37 @@ mod tersemode_tests {
         assert_ne!(lite, ultra);
         assert!(lite.contains("byte-for-byte") && ultra.contains("byte-for-byte"));
         assert!(ultra.contains("telegraphic"));
+    }
+}
+
+#[cfg(test)]
+mod permission_mode_tests {
+    use super::permission_mode;
+    use otto_config::Config;
+    use otto_permission::PermissionMode;
+
+    fn cfg(json: &str) -> Config {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn absent_defaults_to_approve_each() {
+        assert_eq!(permission_mode(&cfg("{}")), PermissionMode::ApproveEach);
+    }
+
+    #[test]
+    fn parses_configured_mode() {
+        assert_eq!(
+            permission_mode(&cfg(r#"{ "permission_mode": "full-auto" }"#)),
+            PermissionMode::FullAuto
+        );
+    }
+
+    #[test]
+    fn unknown_mode_falls_back_to_default() {
+        assert_eq!(
+            permission_mode(&cfg(r#"{ "permission_mode": "bogus" }"#)),
+            PermissionMode::ApproveEach
+        );
     }
 }
