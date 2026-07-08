@@ -333,6 +333,19 @@ mod tests {
     }
 
     #[test]
+    fn plan_prompt_scopes_to_workspace() {
+        let prompt = plan().prompt.expect("plan agent carries a system prompt");
+        assert!(
+            prompt.contains("Working directory"),
+            "prompt references Working directory as authoritative root"
+        );
+        assert!(
+            prompt.contains("sibling"),
+            "prompt prohibits reading sibling directories"
+        );
+    }
+
+    #[test]
     fn general_denies_todowrite_but_allows_edit() {
         let rs = general().permission;
         assert_eq!(eval(&rs, "todowrite", "*"), Action::Deny);
