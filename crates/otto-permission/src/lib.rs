@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod gate;
+pub mod mode;
 pub mod permission;
 pub mod ruleset;
 mod wildcard;
@@ -23,6 +24,7 @@ mod wildcard;
 use std::collections::HashSet;
 
 pub use gate::SessionGate;
+pub use mode::PermissionMode;
 pub use otto_tools::AllowAll;
 pub use permission::{Asked, PendingInfo, Permission, Reply, RequestId, SessionId};
 pub use ruleset::{Action, ResolvedRule, Rule, Ruleset, evaluate, expand, merge};
