@@ -236,6 +236,7 @@ fn config(
         max_retries: 5,
         event_tx: None,
         system_cache: None,
+        tersemode_directive: None,
     }
 }
 

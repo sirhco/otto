@@ -63,8 +63,14 @@ pub struct SessionSubagentSpawner {
     project_id: String,
     version: String,
     /// Warm-boot system-prompt cache, memoized per `(provider, model, agent,
-    /// directory)` and shared across nested spawns (see [`crate::warm`]).
+    /// directory, user_system)` and shared across nested spawns (see
+    /// [`crate::warm`]).
     warm: Arc<Mutex<HashMap<WarmKey, Arc<WarmCache>>>>,
+    /// The tersemode brevity directive (resolved from `config.tersemode` by
+    /// `otto-app`), baked into every child's warm cache so subagent output is
+    /// terse too. `None` disables it. Carried across nested spawns via
+    /// [`Self::with_parent_ruleset`]'s clone.
+    tersemode_directive: Option<String>,
 }
 
 impl SessionSubagentSpawner {
@@ -78,6 +84,8 @@ impl SessionSubagentSpawner {
     /// * `config_agents` — the resolved `config.agent` object for agent lookup.
     /// * `route_for` — the per-subagent route/model factory.
     /// * `directory` / `project_id` / `version` — child session scaffolding.
+    /// * `tersemode_directive` — the resolved `config.tersemode` brevity directive
+    ///   (or `None`), baked into every child's warm cache.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -90,6 +98,7 @@ impl SessionSubagentSpawner {
         directory: PathBuf,
         project_id: impl Into<String>,
         version: impl Into<String>,
+        tersemode_directive: Option<String>,
     ) -> Self {
         Self {
             store,
@@ -102,6 +111,7 @@ impl SessionSubagentSpawner {
             project_id: project_id.into(),
             version: version.into(),
             warm: Arc::new(Mutex::new(HashMap::new())),
+            tersemode_directive,
         }
     }
 
@@ -247,6 +257,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
             &model,
             &subagent.name,
             subagent.prompt.as_deref(),
+            self.tersemode_directive.as_deref(),
         ));
         let cfg = RunConfig {
             store: self.store.clone(),
@@ -270,6 +281,10 @@ impl SubagentSpawner for SessionSubagentSpawner {
             // surfaces the child's live event stream to the requester.
             event_tx: req.event_tx,
             system_cache,
+            // Unused on the cached path (the directive is already baked into
+            // `system_cache` above), but carried so a nested spawn that rebuilds
+            // still has it.
+            tersemode_directive: self.tersemode_directive.clone(),
         };
 
         // 6. Run the child loop and 7. return its last assistant text

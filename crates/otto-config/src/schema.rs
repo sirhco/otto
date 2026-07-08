@@ -210,6 +210,13 @@ pub struct Config {
     /// tool's commands are routed through `rtk` to compact their output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtk: Option<Rtk>,
+
+    /// `tersemode` — optional terse-output mode. Otto-only (no opencode analogue).
+    /// When enabled, a brevity directive is appended to the system prompt so the
+    /// model emits fewer output tokens (drops filler/articles/hedging) while
+    /// keeping code, paths, and error strings byte-exact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tersemode: Option<Tersemode>,
 }
 
 /// `rtk` config block. Off unless `enabled` is set.
@@ -218,6 +225,34 @@ pub struct Rtk {
     /// Route `bash` commands through the `rtk` proxy when it is available.
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// `tersemode` config block. Off unless `enabled` is set; `level` defaults to
+/// [`TersemodeLevel::Full`] when omitted.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Tersemode {
+    /// Append the terse-output directive to the system prompt.
+    #[serde(default)]
+    pub enabled: bool,
+    /// How aggressively to compress prose. Ignored when `enabled` is false.
+    #[serde(default)]
+    pub level: TersemodeLevel,
+}
+
+/// Tersemode intensity. Controls how far the brevity directive pushes the model.
+/// Serialized lowercase (`"lite" | "full" | "ultra" | "wenyan"`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TersemodeLevel {
+    /// Drop filler/hedging, keep grammar + full sentences.
+    Lite,
+    /// Drop articles, fragments OK, short synonyms. The classic default.
+    #[default]
+    Full,
+    /// Telegraphic: heavy abbreviation, arrows for causality, one word when one word does.
+    Ultra,
+    /// Classical-Chinese brevity register (文言文).
+    Wenyan,
 }
 
 /// Per-provider `options` override (subset of opencode `ConfigV1.Info.options`).
@@ -309,5 +344,28 @@ mod tests {
     fn rtk_absent_is_none() {
         let cfg: Config = serde_json::from_str(r#"{ "shell": "/bin/zsh" }"#).unwrap();
         assert_eq!(cfg.rtk, None);
+    }
+
+    #[test]
+    fn parses_tersemode_enabled_and_level() {
+        let cfg: Config =
+            serde_json::from_str(r#"{ "tersemode": { "enabled": true, "level": "ultra" } }"#).unwrap();
+        let c = cfg.tersemode.unwrap();
+        assert!(c.enabled);
+        assert_eq!(c.level, TersemodeLevel::Ultra);
+    }
+
+    #[test]
+    fn tersemode_level_defaults_to_full() {
+        let cfg: Config = serde_json::from_str(r#"{ "tersemode": { "enabled": true } }"#).unwrap();
+        let c = cfg.tersemode.unwrap();
+        assert!(c.enabled);
+        assert_eq!(c.level, TersemodeLevel::Full);
+    }
+
+    #[test]
+    fn tersemode_absent_is_none() {
+        let cfg: Config = serde_json::from_str(r#"{ "shell": "/bin/zsh" }"#).unwrap();
+        assert_eq!(cfg.tersemode, None);
     }
 }

@@ -111,6 +111,12 @@ pub struct RunConfig {
     /// where [`SessionSubagentSpawner`](crate::subagent::SessionSubagentSpawner)
     /// memoizes the prompt per `(provider, model, agent, directory)`.
     pub system_cache: Option<Arc<WarmCache>>,
+    /// Optional tersemode brevity directive, resolved from `config.tersemode` by
+    /// `otto-app`. When `Some`, it is passed as `build_system`'s `user_system`
+    /// arg so it is appended last in the system prompt. For subagents the same
+    /// text is baked into the warm cache (see [`crate::warm::compute_warm`]), so
+    /// this field is unused on the cached path.
+    pub tersemode_directive: Option<String>,
 }
 
 /// Errors raised by [`run_loop`].
@@ -376,7 +382,7 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
             platform,
             "",
             None,
-            None,
+            cfg.tersemode_directive.as_deref(),
             cfg.system_cache.as_deref(),
         );
 

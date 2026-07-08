@@ -25,5 +25,6 @@ pub mod schema;
 pub use error::{Error, Result};
 pub use loader::{EnvOverrides, discover, load, load_global, load_with, merge, parse};
 pub use schema::{
-    Compaction, Config, DEFAULT_SCHEMA, Enterprise, LogLevel, Share, ToolOutput, Watcher,
+    Tersemode, TersemodeLevel, Compaction, Config, DEFAULT_SCHEMA, Enterprise, LogLevel, Share,
+    ToolOutput, Watcher,
 };

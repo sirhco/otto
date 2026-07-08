@@ -22,7 +22,9 @@ pub struct WarmCache {
 
 /// Cache key. Keyed on the `ProviderId`/`ModelId` *strings* (`Model` itself is
 /// not `Hash`/`Eq` — its `cost` holds `f64`). `is_git` is included so a repo
-/// that gains a `.git` mid-process keys to a fresh entry.
+/// that gains a `.git` mid-process keys to a fresh entry. `user_system` (the
+/// tersemode directive) is included so toggling/retuning it keys to a fresh entry
+/// rather than serving a stale prompt.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct WarmKey {
     pub provider: String,
@@ -30,6 +32,7 @@ pub(crate) struct WarmKey {
     pub agent: String,
     pub directory: PathBuf,
     pub is_git: bool,
+    pub user_system: Option<String>,
 }
 
 /// Return the cached `WarmCache` for `(model, agent, directory)`, building it
@@ -43,6 +46,7 @@ pub(crate) fn compute_warm(
     model: &Model,
     agent: &str,
     agent_prompt: Option<&str>,
+    user_system: Option<&str>,
 ) -> Arc<WarmCache> {
     let is_git = directory.join(".git").exists();
     let key = WarmKey {
@@ -51,6 +55,7 @@ pub(crate) fn compute_warm(
         agent: agent.to_string(),
         directory: directory.to_path_buf(),
         is_git,
+        user_system: user_system.map(str::to_string),
     };
     let mut m = map.lock().unwrap();
     if let Some(c) = m.get(&key) {
@@ -65,7 +70,7 @@ pub(crate) fn compute_warm(
         std::env::consts::OS,
         "",
         None,
-        None,
+        user_system,
         None,
     );
     let c = Arc::new(WarmCache {
@@ -97,12 +102,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = test_model();
 
-        let a = compute_warm(&map, dir.path(), &model, "build", None);
-        let b = compute_warm(&map, dir.path(), &model, "build", None);
+        let a = compute_warm(&map, dir.path(), &model, "build", None, None);
+        let b = compute_warm(&map, dir.path(), &model, "build", None, None);
         // Second lookup returns the SAME Arc — a cache hit, not a rebuild.
         assert!(Arc::ptr_eq(&a, &b));
 
-        let c = compute_warm(&map, dir.path(), &model, "plan", None);
+        let c = compute_warm(&map, dir.path(), &model, "plan", None, None);
         // Different agent -> distinct entry.
         assert!(!Arc::ptr_eq(&a, &c));
         assert_eq!(map.lock().unwrap().len(), 2);
@@ -113,8 +118,26 @@ mod tests {
         let map = Mutex::new(HashMap::new());
         let dir = tempfile::tempdir().unwrap();
         let model = test_model();
-        let c = compute_warm(&map, dir.path(), &model, "build", None);
+        let c = compute_warm(&map, dir.path(), &model, "build", None, None);
         // The cached system prompt is the non-empty build output.
         assert!(!c.system.is_empty());
+    }
+
+    #[test]
+    fn compute_warm_bakes_user_system_and_keys_distinctly() {
+        let map = Mutex::new(HashMap::new());
+        let dir = tempfile::tempdir().unwrap();
+        let model = test_model();
+        let directive = "TERSEMODE-DIRECTIVE-MARKER";
+
+        let with = compute_warm(&map, dir.path(), &model, "build", None, Some(directive));
+        // The directive is baked into the memoized prompt.
+        assert!(with.system.iter().any(|s| s.contains(directive)));
+
+        // A different (here: absent) directive keys to a distinct entry.
+        let without = compute_warm(&map, dir.path(), &model, "build", None, None);
+        assert!(!Arc::ptr_eq(&with, &without));
+        assert!(!without.system.iter().any(|s| s.contains(directive)));
+        assert_eq!(map.lock().unwrap().len(), 2);
     }
 }

@@ -230,6 +230,7 @@ async fn subagent_spawn_end_to_end() {
         std::env::temp_dir(),
         "prj_1",
         "1.0.0",
+        None,
     ));
 
     // Parent turn 1: a task tool-call; turn 2: text done.
@@ -266,6 +267,7 @@ async fn subagent_spawn_end_to_end() {
         max_retries: 5,
         event_tx: None,
         system_cache: None,
+        tersemode_directive: None,
     };
 
     run_loop(&cfg, parent_id).await.expect("parent run_loop");
@@ -332,6 +334,7 @@ async fn spawn_many_delegates_in_order() {
         std::env::temp_dir(),
         "prj_1",
         "1.0.0",
+        None,
     );
 
     let make_req = |description: &str| otto_tools::SubagentRequest {
@@ -376,6 +379,7 @@ async fn unknown_subagent_type_errors() {
         std::env::temp_dir(),
         "prj_1",
         "1.0.0",
+        None,
     );
 
     let err = spawner
@@ -422,6 +426,7 @@ async fn event_tx_forwards_child_run_events() {
         std::env::temp_dir(),
         "prj_1",
         "1.0.0",
+        None,
     );
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
@@ -501,6 +506,7 @@ async fn nested_subagent_spawn() {
         std::env::temp_dir(),
         "prj_1",
         "1.0.0",
+        None,
     ));
 
     let mut parent_turn1 = vec![step_start()];
@@ -532,6 +538,7 @@ async fn nested_subagent_spawn() {
         max_retries: 5,
         event_tx: None,
         system_cache: None,
+        tersemode_directive: None,
     };
 
     run_loop(&cfg, parent_id).await.expect("parent run_loop");
@@ -613,6 +620,7 @@ async fn run_askedit_with_ruleset(ruleset: Value) -> ToolState {
         max_retries: 5,
         event_tx: None,
         system_cache: None,
+        tersemode_directive: None,
     };
     run_loop(&cfg, ses).await.expect("run_loop");
     tool_state(&store, ses, "askedit")
@@ -684,6 +692,7 @@ async fn permission_ask_admits_on_reply_once() {
         max_retries: 5,
         event_tx: None,
         system_cache: None,
+        tersemode_directive: None,
     };
     run_loop(&cfg, ses).await.expect("run_loop");
 

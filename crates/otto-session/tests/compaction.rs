@@ -288,6 +288,7 @@ fn config(store: Store, route: Arc<dyn Route>, model: Model) -> RunConfig {
         max_retries: 5,
         event_tx: None,
         system_cache: None,
+        tersemode_directive: None,
     }
 }
 

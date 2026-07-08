@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use otto_agent::{AgentInfo, ModelRef, resolve_agents};
 use otto_auth::AuthStore;
-use otto_config::Config;
+use otto_config::{TersemodeLevel, Config};
 use otto_events::LLMEvent;
 use otto_llm::HttpTransport;
 use otto_mcp::{McpClient, McpServerConfig};
@@ -417,6 +417,7 @@ impl Runtime {
             self.directory.clone(),
             self.project_id.clone(),
             self.version.clone(),
+            tersemode_directive(&self.config),
         )))
     }
 
@@ -464,6 +465,10 @@ impl Runtime {
             .as_ref()
             .and_then(|c| c.reserved)
             .unwrap_or(DEFAULT_COMPACTION_RESERVED);
+
+        // Tersemode brevity directive, resolved before the spawn (borrows
+        // `self.config`) and moved into the run.
+        let tersemode = tersemode_directive(&self.config);
 
         let join = tokio::spawn(async move {
             // 1. Resolve the run's route/model (also the subagent fallback).
@@ -576,6 +581,7 @@ impl Runtime {
                 max_retries: DEFAULT_MAX_RETRIES,
                 event_tx: Some(event_tx),
                 system_cache: None,
+                tersemode_directive: tersemode,
             };
 
             // 5. Drive the loop and return the final assistant message.
@@ -600,6 +606,53 @@ fn rtk_enabled(config: &Config) -> bool {
     config.rtk.as_ref().map(|r| r.enabled).unwrap_or(false)
 }
 
+/// The tersemode brevity directive from `config.tersemode`, or `None` when the block
+/// is absent or disabled. Threaded into every run's `RunConfig` (main session +
+/// subagent warm cache) so it is appended last in the system prompt.
+fn tersemode_directive(config: &Config) -> Option<String> {
+    let c = config.tersemode.as_ref()?;
+    if !c.enabled {
+        return None;
+    }
+    Some(tersemode_text(c.level))
+}
+
+/// The system-prompt directive text for a tersemode intensity level. Every level
+/// carries the same byte-exact-preservation clause; they differ only in how far
+/// prose is compressed.
+fn tersemode_text(level: TersemodeLevel) -> String {
+    const PRESERVE: &str = "Never alter, abbreviate, reword, or reformat anything \
+inside code blocks, inline code, file paths, shell commands, identifiers, URLs, or \
+error/log strings — reproduce them byte-for-byte. Do not compress commit messages, \
+PRs, or code you write. When a security warning, an irreversible-action \
+confirmation, or a multi-step instruction risks being misread if compressed, answer \
+in full prose instead.";
+    let head = match level {
+        TersemodeLevel::Lite => {
+            "Answer tersely. Drop filler, hedging, and pleasantries (no \"sure\", \
+\"of course\", \"I'd be happy to\"). Keep normal grammar and full sentences."
+        }
+        TersemodeLevel::Full => {
+            "Answer like a smart tersemode: drop articles (a/an/the), filler \
+(just/really/basically), hedging, and pleasantries. Sentence fragments are fine. \
+Prefer short synonyms (big not extensive, fix not implement-a-solution-for). \
+Pattern: [thing] [action] [reason]. [next step]."
+        }
+        TersemodeLevel::Ultra => {
+            "Answer in maximally compressed tersemode: telegraphic fragments, one word \
+where one word does, heavy abbreviation of common prose words \
+(config/req/res/fn/impl/DB/auth), arrows for causality (X -> Y), strip \
+conjunctions. Never abbreviate technical names, APIs, or error strings."
+        }
+        TersemodeLevel::Wenyan => {
+            "Answer in a classical-Chinese brevity register (文言文): maximum \
+terseness, classical sentence patterns, particles (之/乃/為/其), subjects often \
+omitted. Keep all code, paths, commands, and identifiers in their original form."
+        }
+    };
+    format!("<output_style>\n{head}\n\n{PRESERVE}\n</output_style>")
+}
+
 /// The permission ruleset from `config.permission`, or an empty ruleset.
 fn permission_ruleset(config: &Config) -> Ruleset {
     config
@@ -620,4 +673,42 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tersemode_tests {
+    use super::{TersemodeLevel, tersemode_directive, tersemode_text};
+    use otto_config::Config;
+
+    fn cfg(json: &str) -> Config {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn absent_or_disabled_yields_none() {
+        assert_eq!(tersemode_directive(&cfg(r#"{}"#)), None);
+        assert_eq!(
+            tersemode_directive(&cfg(r#"{ "tersemode": { "enabled": false } }"#)),
+            None
+        );
+    }
+
+    #[test]
+    fn enabled_yields_directive_with_preserve_clause() {
+        let d = tersemode_directive(&cfg(r#"{ "tersemode": { "enabled": true } }"#)).unwrap();
+        // The resolved directive carries the byte-exact-preservation clause and
+        // the Full-level (default) prose rule.
+        assert!(d.contains("byte-for-byte"));
+        assert!(d.contains("tersemode"));
+    }
+
+    #[test]
+    fn level_selects_distinct_text() {
+        // Each level produces a different directive; all keep the preserve clause.
+        let lite = tersemode_text(TersemodeLevel::Lite);
+        let ultra = tersemode_text(TersemodeLevel::Ultra);
+        assert_ne!(lite, ultra);
+        assert!(lite.contains("byte-for-byte") && ultra.contains("byte-for-byte"));
+        assert!(ultra.contains("telegraphic"));
+    }
 }
