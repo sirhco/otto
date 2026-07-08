@@ -122,6 +122,12 @@ pub enum Overlay {
     /// every other overlay, it filters no known list; `kind` tags which
     /// workflow the typed text feeds.
     TextInput(TextInputState),
+    /// Inline `@`-file/folder completion, anchored in the chat editor. Unlike
+    /// every other overlay the editor keeps focus (the cursor stays in the
+    /// buffer); this state only tracks the dropdown. The completion *query* is
+    /// never stored — it is derived on demand from the editor buffer between
+    /// the `@` anchor and the cursor (see [`App::mention_query`]).
+    Mention(MentionState),
     /// Read-only progress panel for the in-flight workflow run, rendering
     /// `App.workflow` (the task→state map). Opened by the toggle key
     /// (`ctrl+w`) only while `App.workflow.is_some()`, so the render can
@@ -137,6 +143,36 @@ pub struct TextInputState {
     pub title: String,
     pub query: String,
     pub kind: String,
+    /// Active inline `@`-mention completion within this text box, if any. The
+    /// query is `&query[anchor + 1..]` (single-line, cursor always at the end).
+    pub(crate) mention: Option<TextMentionState>,
+}
+
+/// Inline `@`-mention completion state for the chat editor
+/// ([`Overlay::Mention`]). The `@` sits at byte offset `anchor_col` on logical
+/// row `anchor_row`; the live query is derived from the editor buffer
+/// ([`App::mention_query`]) rather than stored, so backspacing/typing never
+/// desyncs it from what the user sees.
+#[derive(Debug, Clone)]
+pub struct MentionState {
+    pub(crate) anchor_row: usize,
+    pub(crate) anchor_col: usize,
+    pub(crate) selected: usize,
+    pub(crate) results: Vec<String>,
+    pub(crate) truncated: bool,
+    pub(crate) loading: bool,
+}
+
+/// Inline `@`-mention completion state for a [`TextInputState`] box. `anchor`
+/// is the byte offset of the `@` within the box's `query`; the live query is
+/// `&query[anchor + 1..]`.
+#[derive(Debug, Default, Clone)]
+pub struct TextMentionState {
+    pub(crate) anchor: usize,
+    pub(crate) selected: usize,
+    pub(crate) results: Vec<String>,
+    pub(crate) truncated: bool,
+    pub(crate) loading: bool,
 }
 
 /// State for the file-attachment picker overlay: the typed query, the
@@ -290,8 +326,13 @@ pub struct App {
     pub(crate) flash: Option<Flash>,
     /// Last-seen token usage from a `StepFinish`/`Finish` event, if any.
     pub usage: Option<otto_events::Usage>,
-    /// Paths attached to the next prompt submission via the file picker.
+    /// Paths attached to the next prompt submission via the ctrl+f file picker.
     pub(crate) attachments: Vec<String>,
+    /// Paths accepted via inline `@`-mentions, kept separate from
+    /// [`attachments`](Self::attachments) so the ctrl+f flow is untouched. At
+    /// submit time these are filtered to the ones whose `@path` token still
+    /// survives in the message text (see [`take_files_for_submit`]).
+    pub(crate) mention_paths: Vec<String>,
     /// Latest todo list from a `todowrite` tool call, if any.
     pub(crate) todos: Vec<TodoItem>,
     /// Whether the todo panel is collapsed.
@@ -446,6 +487,7 @@ impl App {
             flash: None,
             usage: None,
             attachments: Vec::new(),
+            mention_paths: Vec::new(),
             todos: Vec::new(),
             todos_collapsed: false,
             theme: crate::theme::Theme::dark(),
@@ -680,28 +722,133 @@ impl App {
             title: title.to_string(),
             query: String::new(),
             kind: kind.to_string(),
+            mention: None,
         });
     }
 
-    /// Append `c` to the free-text input query (if that overlay is open).
+    /// Append `c` to the free-text input query (if that overlay is open). An
+    /// `@` typed at a word boundary (query empty or ending in whitespace) opens
+    /// an inline mention (kicking off a `/file/list` fetch); otherwise a
+    /// keystroke under an active mention just resets its selection.
     pub fn text_input_char(&mut self, c: char) {
         if let Overlay::TextInput(s) = &mut self.overlay {
+            let at_boundary = s.query.is_empty() || s.query.ends_with(char::is_whitespace);
             s.query.push(c);
+            if c == '@' && at_boundary {
+                s.mention = Some(TextMentionState {
+                    anchor: s.query.len() - c.len_utf8(),
+                    selected: 0,
+                    results: Vec::new(),
+                    truncated: false,
+                    loading: true,
+                });
+            } else if let Some(m) = &mut s.mention {
+                m.selected = 0;
+            }
         }
     }
 
-    /// Drop the last character of the free-text input query.
+    /// Drop the last character of the free-text input query. Dismisses an
+    /// active mention if the `@` anchor was deleted, else resets its selection.
     pub fn text_input_backspace(&mut self) {
         if let Overlay::TextInput(s) = &mut self.overlay {
             s.query.pop();
+            let dismiss = s
+                .mention
+                .as_ref()
+                .is_some_and(|m| s.query.len() <= m.anchor);
+            if dismiss {
+                s.mention = None;
+            } else if let Some(m) = &mut s.mention {
+                m.selected = 0;
+            }
         }
     }
 
+    /// Clamp/step the text-input mention selection by `delta` over its live
+    /// ranked matches (biased toward `.otto/plans/`, the common workflow arg).
+    pub fn text_input_mention_move(&mut self, delta: i32) {
+        if let Overlay::TextInput(s) = &mut self.overlay
+            && let Some(m) = &mut s.mention
+        {
+            let query = &s.query[m.anchor + 1..];
+            let len = ranked_matches(&m.results, query, Some(".otto/plans/")).len();
+            if len == 0 {
+                m.selected = 0;
+                return;
+            }
+            let max = (len - 1) as i32;
+            m.selected = (m.selected as i32 + delta).clamp(0, max) as usize;
+        }
+    }
+
+    /// Dismiss the text-input mention (typed text stays; a second Esc then
+    /// closes the whole overlay via the normal path).
+    pub fn text_input_clear_mention(&mut self) {
+        if let Overlay::TextInput(s) = &mut self.overlay {
+            s.mention = None;
+        }
+    }
+
+    /// Accept the highlighted text-input mention candidate. The workflow arg IS
+    /// a path, so a file inserts the **bare** path (no `@`) and clears the
+    /// mention; a directory inserts `@path/` (keeping the `@` so drill-down
+    /// stays live) and keeps the mention active. No match → no-op.
+    pub fn text_input_mention_accept(&mut self) {
+        let (path, anchor) = match &self.overlay {
+            Overlay::TextInput(TextInputState {
+                query,
+                mention: Some(m),
+                ..
+            }) => {
+                let ranked =
+                    ranked_matches(&m.results, &query[m.anchor + 1..], Some(".otto/plans/"));
+                match ranked.get(m.selected) {
+                    Some(&i) => (m.results[i].clone(), m.anchor),
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        let is_dir = path.ends_with('/');
+        if let Overlay::TextInput(s) = &mut self.overlay {
+            if is_dir {
+                s.query.replace_range(anchor.., &format!("@{path}"));
+                if let Some(m) = &mut s.mention {
+                    m.selected = 0;
+                }
+            } else {
+                s.query.replace_range(anchor.., &path);
+                s.mention = None;
+            }
+        }
+    }
+
+    /// Take the files to attach to a submission: the ctrl+f `attachments` plus
+    /// any `@`-mention paths whose `@path` token still survives in `text`
+    /// (deleted mentions drop out), deduped. Both source lists are drained.
+    pub(crate) fn take_files_for_submit(&mut self, text: &str) -> Vec<String> {
+        let mut out = std::mem::take(&mut self.attachments);
+        for p in std::mem::take(&mut self.mention_paths) {
+            if text.contains(&format!("@{p}")) && !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
     /// Enter on the free-text input: close the overlay and, if the trimmed text
-    /// is non-empty, emit `StartWorkflow` with it. Empty input is a no-op.
+    /// is non-empty, emit `StartWorkflow` with it. Empty input is a no-op. A
+    /// leading `@` is stripped first: Esc-dismissing a mention mid-drill-down
+    /// can leave a literal `@path/` prefix in the query, which would
+    /// otherwise be sent to the workflow as an unresolved mention token.
     pub fn text_input_confirm(&mut self) -> Option<Msg> {
         if let Overlay::TextInput(s) = &self.overlay {
-            let (kind, arg) = (s.kind.clone(), s.query.trim().to_string());
+            let trimmed = s.query.trim();
+            let (kind, arg) = (
+                s.kind.clone(),
+                trimmed.strip_prefix('@').unwrap_or(trimmed).to_string(),
+            );
             self.overlay = Overlay::None;
             if arg.is_empty() {
                 return None;
@@ -755,14 +902,155 @@ impl App {
         });
     }
 
-    /// Fold a completed `/file/list` fetch into the picker overlay, if still
-    /// open. Resets the selection to the top of the (now-current) results.
+    /// Fold a completed `/file/list` fetch into whichever picker is loading,
+    /// resetting the selection to the top of the (now-current) results. The
+    /// ctrl+f Files overlay drops directory entries (`ends_with('/')`) — dirs
+    /// aren't attachable there, keeping that flow byte-for-byte unchanged; the
+    /// `@`-mention pickers keep them for drill-down.
     pub fn files_loaded(&mut self, files: Vec<String>, truncated: bool) {
-        if let Overlay::Files(s) = &mut self.overlay {
-            s.results = files;
-            s.truncated = truncated;
-            s.loading = false;
-            s.selected = 0;
+        match &mut self.overlay {
+            Overlay::Files(s) => {
+                s.results = files.into_iter().filter(|p| !p.ends_with('/')).collect();
+                s.truncated = truncated;
+                s.loading = false;
+                s.selected = 0;
+            }
+            Overlay::Mention(m) => {
+                m.results = files;
+                m.truncated = truncated;
+                m.loading = false;
+                m.selected = 0;
+            }
+            Overlay::TextInput(TextInputState {
+                mention: Some(m), ..
+            }) => {
+                m.results = files;
+                m.truncated = truncated;
+                m.loading = false;
+                m.selected = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether any picker is awaiting a `/file/list` fetch — the trigger the
+    /// event loop watches to fire exactly one `list_files` call (see
+    /// `route_message`).
+    #[must_use]
+    pub(crate) fn file_fetch_pending(&self) -> bool {
+        match &self.overlay {
+            Overlay::Files(s) => s.loading,
+            Overlay::Mention(m) => m.loading,
+            Overlay::TextInput(s) => s.mention.as_ref().is_some_and(|m| m.loading),
+            _ => false,
+        }
+    }
+
+    /// Derive the live `@`-mention query from the editor buffer: the text
+    /// between the `@` anchor and the cursor on the anchor row. Returns `None`
+    /// when the cursor has left the token (different row, or at/left of the
+    /// `@`), which callers treat as "dismiss". Never stored — the buffer is the
+    /// single source of truth.
+    #[must_use]
+    pub(crate) fn mention_query(&self) -> Option<String> {
+        let Overlay::Mention(m) = &self.overlay else {
+            return None;
+        };
+        let (row, col) = self.input.cursor();
+        if row != m.anchor_row || col <= m.anchor_col {
+            return None;
+        }
+        // `anchor_col` is the byte offset of the `@` (one byte); the query is
+        // everything up to the cursor.
+        let line = &self.input.lines()[row];
+        let start = m.anchor_col + 1;
+        (col >= start).then(|| line[start..col].to_string())
+    }
+
+    /// Open the inline `@`-mention completion. The `@` has just been inserted,
+    /// so the anchor is the cursor position minus that one byte. Kicks off a
+    /// `/file/list` fetch (loop-driven, like the ctrl+f picker).
+    pub fn open_mention(&mut self) {
+        let (row, col) = self.input.cursor();
+        self.overlay = Overlay::Mention(MentionState {
+            anchor_row: row,
+            anchor_col: col.saturating_sub(1),
+            selected: 0,
+            results: Vec::new(),
+            truncated: false,
+            loading: true,
+        });
+    }
+
+    /// Clamp/step the mention selection by `delta` over the live ranked matches.
+    pub fn mention_move(&mut self, delta: i32) {
+        let query = self.mention_query();
+        if let Overlay::Mention(m) = &mut self.overlay {
+            let len = query
+                .map(|q| ranked_matches(&m.results, &q, None).len())
+                .unwrap_or(0);
+            if len == 0 {
+                m.selected = 0;
+                return;
+            }
+            let max = (len - 1) as i32;
+            m.selected = (m.selected as i32 + delta).clamp(0, max) as usize;
+        }
+    }
+
+    /// React to a buffer edit under an open mention: dismiss if the query is
+    /// gone (cursor left the token), else reset the selection to the top.
+    pub fn mention_after_edit(&mut self) {
+        if self.mention_query().is_none() {
+            self.close_overlay();
+        } else if let Overlay::Mention(m) = &mut self.overlay {
+            m.selected = 0;
+        }
+    }
+
+    /// Accept the highlighted mention candidate. A file swaps `@partial` →
+    /// `@path ` (trailing space), records the path, and closes the overlay. A
+    /// directory swaps `@partial` → `@path/` and keeps the overlay open so the
+    /// derived query becomes `path/` (fuzzy drill-down over full paths). No
+    /// match → dismiss only (never submits — that is the input layer's job).
+    pub fn mention_accept(&mut self) {
+        let Some(query) = self.mention_query() else {
+            self.close_overlay();
+            return;
+        };
+        let (path, anchor_col) = match &self.overlay {
+            Overlay::Mention(m) => {
+                let ranked = ranked_matches(&m.results, &query, None);
+                match ranked.get(m.selected) {
+                    Some(&i) => (m.results[i].clone(), m.anchor_col),
+                    // No match: dismiss, leaving the typed text in place.
+                    None => {
+                        self.close_overlay();
+                        return;
+                    }
+                }
+            }
+            _ => return,
+        };
+        let is_dir = path.ends_with('/');
+        let (row, _) = self.input.cursor();
+        // A dir already carries its trailing `/`; a file gets a trailing space
+        // so the token is delimited and the next keystroke types normally.
+        let replacement = if is_dir {
+            format!("@{path}")
+        } else {
+            format!("@{path} ")
+        };
+        self.input.replace_to_cursor(row, anchor_col, &replacement);
+        if is_dir {
+            if let Overlay::Mention(m) = &mut self.overlay {
+                m.selected = 0;
+            }
+        } else {
+            if !self.mention_paths.contains(&path) {
+                self.mention_paths.push(path);
+            }
+            self.close_overlay();
         }
     }
 
@@ -1600,14 +1888,33 @@ fn fuzzy_subsequence(query: &str, cand: &str) -> Option<i32> {
 
 /// Indices into `results` that fuzzy-match `query`, best score first,
 /// original-order for ties. Empty query returns every index in order.
-pub(crate) fn file_matches(results: &[String], query: &str) -> Vec<usize> {
+/// `boost_prefix`, when set, adds a flat +100 to any result whose path starts
+/// with it, floating that subtree to the top (e.g. `.otto/plans/` for the SDD
+/// workflow arg).
+pub(crate) fn ranked_matches(
+    results: &[String],
+    query: &str,
+    boost_prefix: Option<&str>,
+) -> Vec<usize> {
     let mut scored: Vec<(usize, i32)> = results
         .iter()
         .enumerate()
-        .filter_map(|(i, r)| fuzzy_subsequence(query, r).map(|s| (i, s)))
+        .filter_map(|(i, r)| {
+            fuzzy_subsequence(query, r).map(|s| {
+                let boost = boost_prefix
+                    .filter(|p| r.starts_with(*p))
+                    .map_or(0, |_| 100);
+                (i, s + boost)
+            })
+        })
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     scored.into_iter().map(|(i, _)| i).collect()
+}
+
+/// Unbiased [`ranked_matches`] — the ctrl+f file picker's ranking.
+pub(crate) fn file_matches(results: &[String], query: &str) -> Vec<usize> {
+    ranked_matches(results, query, None)
 }
 
 /// Best-effort display text for a finished tool call.
@@ -3055,6 +3362,7 @@ mod tests {
             title: "SDD plan file".into(),
             query: "docs/plan.md".into(),
             kind: "sdd".into(),
+            mention: None,
         });
         let msg = app.text_input_confirm();
         assert!(
@@ -3075,6 +3383,7 @@ mod tests {
             title: "SDD plan file".into(),
             query: "   ".into(),
             kind: "sdd".into(),
+            mention: None,
         });
         let msg = app.text_input_confirm();
         assert!(msg.is_none(), "empty/whitespace arg emits no Msg");
@@ -3642,6 +3951,240 @@ mod tests {
         assert_eq!(
             app.tool_cursor, None,
             "history reload must clear stale selection"
+        );
+    }
+
+    // ----- Task D: inline `@` file/folder mention -------------------------
+
+    #[test]
+    fn ranked_matches_boost_prefers_prefix() {
+        let results = vec!["zzz/plan.md".to_string(), ".otto/plans/x.md".to_string()];
+        // Both fuzzy-match "plan"; the boost floats the `.otto/plans/` subtree
+        // to the top regardless of the base fuzzy score.
+        let ranked = ranked_matches(&results, "plan", Some(".otto/plans/"));
+        assert_eq!(results[ranked[0]], ".otto/plans/x.md");
+        // Unbiased ranking still returns both (no forced ordering here).
+        assert_eq!(ranked_matches(&results, "plan", None).len(), 2);
+    }
+
+    #[test]
+    fn open_mention_captures_anchor_and_loads() {
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        match &app.overlay {
+            Overlay::Mention(m) => {
+                assert_eq!((m.anchor_row, m.anchor_col), (0, 0));
+                assert!(m.loading, "opens in loading state to trigger the fetch");
+            }
+            other => panic!("expected mention overlay, got {other:?}"),
+        }
+        assert_eq!(app.input.text(), "@", "the '@' is inserted into the buffer");
+    }
+
+    #[test]
+    fn mention_query_derives_from_buffer() {
+        let mut app = App::new();
+        // A multibyte prefix before the trigger exercises byte-offset slicing.
+        for c in "é ".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Char('@')));
+        assert!(matches!(app.overlay, Overlay::Mention(_)));
+        assert_eq!(app.mention_query().as_deref(), Some(""), "empty at the '@'");
+        for c in "wörld".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.mention_query().as_deref(), Some("wörld"));
+        assert_eq!(app.input.text(), "é @wörld");
+    }
+
+    #[test]
+    fn files_loaded_folds_into_mention_and_textinput_mention() {
+        // Chat editor mention.
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        app.files_loaded(vec!["a.rs".into(), "src/".into()], true);
+        match &app.overlay {
+            Overlay::Mention(m) => {
+                assert_eq!(m.results, vec!["a.rs".to_string(), "src/".to_string()]);
+                assert!(m.truncated);
+                assert!(!m.loading);
+            }
+            other => panic!("expected mention overlay, got {other:?}"),
+        }
+        // Text-input (workflow arg) mention.
+        let mut app = App::new();
+        app.open_text_input("SDD plan file", "sdd");
+        app.text_input_char('@');
+        app.files_loaded(vec![".otto/plans/p.md".into()], false);
+        match &app.overlay {
+            Overlay::TextInput(s) => {
+                let m = s.mention.as_ref().expect("mention still active");
+                assert_eq!(m.results, vec![".otto/plans/p.md".to_string()]);
+                assert!(!m.loading);
+            }
+            other => panic!("expected text-input overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn files_loaded_filters_dirs_from_ctrl_f_picker() {
+        let mut app = App::new();
+        app.open_file_picker();
+        app.files_loaded(vec!["a.rs".into(), "src/".into(), "b.rs".into()], false);
+        match &app.overlay {
+            Overlay::Files(s) => assert_eq!(
+                s.results,
+                vec!["a.rs".to_string(), "b.rs".to_string()],
+                "ctrl+f picker drops directory entries"
+            ),
+            other => panic!("expected files overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mention_accept_file_replaces_token_appends_space_and_records_path() {
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        app.files_loaded(vec!["src/main.rs".into(), "src/".into()], false);
+        for c in "main".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter)); // accept highlighted file
+        assert_eq!(app.input.text(), "@src/main.rs ", "token swapped + space");
+        assert_eq!(app.mention_paths, vec!["src/main.rs".to_string()]);
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "overlay closed on file"
+        );
+    }
+
+    #[test]
+    fn mention_accept_dir_inserts_trailing_slash_keeps_overlay_no_attach() {
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        app.files_loaded(vec!["src/".into(), "src/main.rs".into()], false);
+        for c in "src".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter)); // accept highlighted dir (src/)
+        assert_eq!(app.input.text(), "@src/", "dir keeps its trailing slash");
+        assert!(
+            matches!(app.overlay, Overlay::Mention(_)),
+            "dir accept keeps the dropdown open for drill-down"
+        );
+        assert!(app.mention_paths.is_empty(), "dirs are not attachable");
+        assert_eq!(app.mention_query().as_deref(), Some("src/"));
+    }
+
+    #[test]
+    fn mention_backspace_past_at_dismisses() {
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        for c in "sr".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Backspace)); // 'r'
+        app.on_key(key(KeyCode::Backspace)); // 's'
+        assert!(
+            matches!(app.overlay, Overlay::Mention(_)),
+            "still open at empty query"
+        );
+        app.on_key(key(KeyCode::Backspace)); // deletes the '@'
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "dismissed with the '@'"
+        );
+        assert_eq!(app.input.text(), "");
+    }
+
+    #[test]
+    fn take_files_for_submit_drops_deleted_mentions_keeps_ctrl_f_attachments_and_dedups() {
+        let mut app = App::new();
+        app.attachments = vec!["ctrlf.rs".into()];
+        // "kept.rs" listed twice (dedup) + "gone.rs" whose token was edited out.
+        app.mention_paths = vec!["kept.rs".into(), "gone.rs".into(), "kept.rs".into()];
+        let files = app.take_files_for_submit("see @kept.rs please");
+        assert_eq!(files, vec!["ctrlf.rs".to_string(), "kept.rs".to_string()]);
+        assert!(app.attachments.is_empty(), "attachments drained");
+        assert!(app.mention_paths.is_empty(), "mention paths drained");
+    }
+
+    #[test]
+    fn text_input_at_opens_biased_mention() {
+        let mut app = App::new();
+        app.open_text_input("SDD plan file", "sdd");
+        app.text_input_char('@');
+        match &app.overlay {
+            Overlay::TextInput(s) => {
+                let m = s.mention.as_ref().expect("mention opened");
+                assert_eq!(m.anchor, 0);
+                assert!(m.loading);
+            }
+            other => panic!("expected text-input overlay, got {other:?}"),
+        }
+        app.files_loaded(vec!["src/plan.rs".into(), ".otto/plans/p.md".into()], false);
+        let m = match &app.overlay {
+            Overlay::TextInput(s) => s.mention.as_ref().unwrap(),
+            other => panic!("expected text-input overlay, got {other:?}"),
+        };
+        // Empty query: the `.otto/plans/` bias floats the plan file to the top.
+        let ranked = ranked_matches(&m.results, "", Some(".otto/plans/"));
+        assert_eq!(m.results[ranked[0]], ".otto/plans/p.md");
+    }
+
+    #[test]
+    fn text_input_mention_accept_inserts_bare_path() {
+        let mut app = App::new();
+        app.open_text_input("SDD plan file", "sdd");
+        app.text_input_char('@');
+        app.files_loaded(vec![".otto/plans/p.md".into()], false);
+        app.text_input_mention_accept();
+        match &app.overlay {
+            Overlay::TextInput(s) => {
+                assert_eq!(s.query, ".otto/plans/p.md", "bare path, no '@'");
+                assert!(s.mention.is_none(), "file accept clears the mention");
+            }
+            other => panic!("expected text-input overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_input_confirm_after_accept_starts_workflow_with_path() {
+        let mut app = App::new();
+        app.open_text_input("SDD plan file", "sdd");
+        app.text_input_char('@');
+        app.files_loaded(vec![".otto/plans/p.md".into()], false);
+        app.text_input_mention_accept();
+        let msg = app.text_input_confirm();
+        assert!(
+            matches!(msg, Some(Msg::StartWorkflow { ref kind, ref arg })
+                if kind == "sdd" && arg == ".otto/plans/p.md"),
+            "confirm feeds the accepted path to the workflow, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn text_input_confirm_strips_leftover_at_from_dismissed_mention() {
+        // Accepting a DIRECTORY keeps `@dir/` in the query (live drill-down);
+        // Esc-dismissing the mention (`text_input_clear_mention`) leaves that
+        // literal `@`-prefixed text behind. Confirming from there must not
+        // send the raw `@dir/` token to the workflow.
+        let mut app = App::new();
+        app.open_text_input("SDD plan file", "sdd");
+        app.text_input_char('@');
+        app.files_loaded(vec![".otto/plans/".into()], false);
+        app.text_input_mention_accept();
+        match &app.overlay {
+            Overlay::TextInput(s) => assert_eq!(s.query, "@.otto/plans/"),
+            other => panic!("expected text-input overlay, got {other:?}"),
+        }
+        app.text_input_clear_mention();
+        let msg = app.text_input_confirm();
+        assert!(
+            matches!(msg, Some(Msg::StartWorkflow { ref kind, ref arg })
+                if kind == "sdd" && arg == ".otto/plans/"),
+            "leading '@' must be stripped before starting the workflow, got {msg:?}"
         );
     }
 }

@@ -6,6 +6,9 @@ Rules:
   file outside the plans directory — edits are denied in this mode.
 - Ask clarifying questions when requirements are ambiguous BEFORE writing the
   plan.
+- Stay inside the workspace: the Working directory in <env> is the authoritative
+  root. Never read, list, glob, or grep parent or sibling directories, other
+  repositories, or the user's home directory unless the user explicitly asks.
 
 When your plan is ready, you MUST persist it:
 1. Write the final plan to `.otto/plans/<kebab-case-title>.md` using the

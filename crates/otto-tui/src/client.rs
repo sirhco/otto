@@ -287,7 +287,12 @@ impl Client {
         }))
     }
 
-    /// `GET /file/list?limit=` — candidate paths for the attachment picker.
+    /// `GET /file/list?limit=` — candidate paths for the attachment / `@`-mention
+    /// picker. The server returns `files` and `dirs` as separate JSON arrays;
+    /// [`merge_file_list`] folds them into a single candidate list where each
+    /// directory carries a trailing `/` (so `path.ends_with('/')` is the
+    /// `is_dir` predicate everywhere in the TUI). The ctrl+f Files overlay
+    /// filters the dir entries back out (see `App::files_loaded`).
     ///
     /// # Errors
     /// Returns an error if the request fails, the server responds with a
@@ -301,16 +306,7 @@ impl Client {
             .json()
             .await
             .context("decoding /file/list")?;
-        let files = json["files"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let truncated = json["truncated"].as_bool().unwrap_or(false);
-        Ok((files, truncated))
+        Ok(merge_file_list(&json))
     }
 
     /// `GET /event` — stream decoded envelopes.
@@ -363,6 +359,29 @@ impl Client {
             .error_for_status()?;
         Ok(())
     }
+}
+
+/// Fold a `/file/list` response into the TUI's flat candidate list. `files`
+/// pass through unchanged; each `dirs` entry gets a trailing `/` appended and
+/// is appended after the files (so files win fuzzy-score ties by original
+/// order). The trailing slash is the `is_dir` marker the picker keys on.
+pub(crate) fn merge_file_list(json: &serde_json::Value) -> (Vec<String>, bool) {
+    let mut out: Vec<String> = json["files"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(dirs) = json["dirs"].as_array() {
+        out.extend(
+            dirs.iter()
+                .filter_map(|v| v.as_str().map(|d| format!("{d}/"))),
+        );
+    }
+    let truncated = json["truncated"].as_bool().unwrap_or(false);
+    (out, truncated)
 }
 
 /// Build the JSON body for `POST /session/{id}/message`. `files` is included
@@ -620,6 +639,34 @@ mod tests {
     fn prompt_body_omits_files_when_empty() {
         let body = build_prompt_body("hi", None, None, &[]);
         assert!(body.get("files").is_none(), "no files key when empty");
+    }
+
+    #[test]
+    fn merge_file_list_appends_dirs_with_trailing_slash() {
+        let json = serde_json::json!({
+            "files": ["src/main.rs", "Cargo.toml"],
+            "dirs": ["src", "crates/otto-tui"],
+            "truncated": true,
+        });
+        let (list, truncated) = merge_file_list(&json);
+        assert_eq!(
+            list,
+            vec![
+                "src/main.rs".to_string(),
+                "Cargo.toml".to_string(),
+                "src/".to_string(),
+                "crates/otto-tui/".to_string(),
+            ]
+        );
+        assert!(truncated);
+    }
+
+    #[test]
+    fn merge_file_list_tolerates_missing_dirs() {
+        let json = serde_json::json!({ "files": ["a.rs"] });
+        let (list, truncated) = merge_file_list(&json);
+        assert_eq!(list, vec!["a.rs".to_string()]);
+        assert!(!truncated);
     }
 
     #[test]

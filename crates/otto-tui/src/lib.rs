@@ -283,10 +283,12 @@ async fn event_loop(
 pub fn route_message(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg: Msg) {
     match msg {
         Msg::Key(k) => {
-            let was_loading_files = matches!(app.overlay, Overlay::Files(ref s) if s.loading);
+            // Fires for the ctrl+f picker AND the `@`-mention pickers (chat +
+            // text-input), all of which flag `loading` when they open.
+            let was_loading_files = app.file_fetch_pending();
             let was_sessions = matches!(app.overlay, Overlay::Sessions);
             let next = app.on_key(k);
-            let now_loading_files = matches!(app.overlay, Overlay::Files(ref s) if s.loading);
+            let now_loading_files = app.file_fetch_pending();
             if now_loading_files && !was_loading_files {
                 let client = client.clone();
                 let tx = tx.clone();
@@ -380,7 +382,9 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
     if let Msg::Submitted(text) = &msg {
         let text = text.clone();
         app.update(Msg::Submitted(text.clone())); // user echo + reset open blocks
-        let files = std::mem::take(&mut app.attachments);
+        // ctrl+f attachments + surviving `@`-mention paths (mentions whose
+        // token was edited back out are dropped by the substring check).
+        let files = app.take_files_for_submit(&text);
         if let Some(id) = app.session_id.clone() {
             let client = client.clone();
             let tx = tx.clone();

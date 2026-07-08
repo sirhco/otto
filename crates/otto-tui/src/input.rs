@@ -105,6 +105,25 @@ impl Editor {
         }
     }
 
+    /// The character immediately before the cursor on the current row, if any.
+    /// Used to gate the `@`-mention trigger to word boundaries (so `foo@bar`
+    /// emails type literally).
+    #[must_use]
+    pub fn prev_char(&self) -> Option<char> {
+        self.lines[self.row][..self.col].chars().next_back()
+    }
+
+    /// Replace `lines[row][start_col..cursor]` with `text`, then place the
+    /// cursor just past the inserted text. Used to swap an `@partial` token for
+    /// the accepted `@path`. `start_col` and the cursor must be char
+    /// boundaries on `row` (the mention layer only ever calls this on the
+    /// cursor's own row, so `col` is valid).
+    pub fn replace_to_cursor(&mut self, row: usize, start_col: usize, text: &str) {
+        self.lines[row].replace_range(start_col..self.col, text);
+        self.row = row;
+        self.col = start_col + text.len();
+    }
+
     #[must_use]
     pub fn text(&self) -> String {
         self.lines.join("\n")
@@ -274,7 +293,19 @@ impl App {
                 return None;
             }
             if matches!(self.overlay, Overlay::TextInput(_)) {
+                let mention_active =
+                    matches!(&self.overlay, Overlay::TextInput(s) if s.mention.is_some());
                 match key.code {
+                    // While a mention is active, ↑↓ move the highlight and
+                    // tab/enter accept it — Enter must NOT fall through to
+                    // `text_input_confirm` and start the workflow. Esc dismisses
+                    // just the mention (a second Esc then closes the overlay).
+                    KeyCode::Up if mention_active => self.text_input_mention_move(-1),
+                    KeyCode::Down if mention_active => self.text_input_mention_move(1),
+                    KeyCode::Tab | KeyCode::Enter if mention_active => {
+                        self.text_input_mention_accept()
+                    }
+                    KeyCode::Esc if mention_active => self.text_input_clear_mention(),
                     KeyCode::Esc => self.close_overlay(),
                     KeyCode::Enter => return self.text_input_confirm(),
                     KeyCode::Backspace => self.text_input_backspace(),
@@ -324,6 +355,48 @@ impl App {
                         self.search_input(c)
                     }
                     _ => {}
+                }
+                return None;
+            }
+            if matches!(self.overlay, Overlay::Mention(_)) {
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Esc => self.close_overlay(),
+                    KeyCode::Up => self.mention_move(-1),
+                    KeyCode::Down => self.mention_move(1),
+                    // shift+enter / ctrl+j: newline in the buffer, dismiss the
+                    // dropdown (a deliberate line break ends the token).
+                    KeyCode::Enter if shift => {
+                        self.input.newline();
+                        self.close_overlay();
+                    }
+                    KeyCode::Char('j') if ctrl => {
+                        self.input.newline();
+                        self.close_overlay();
+                    }
+                    // Enter/Tab accept the highlight; on no match this only
+                    // dismisses — it NEVER submits the message.
+                    KeyCode::Enter | KeyCode::Tab => self.mention_accept(),
+                    KeyCode::Backspace => {
+                        self.input.backspace();
+                        self.mention_after_edit();
+                    }
+                    // A space delimits the token: type it and dismiss.
+                    KeyCode::Char(' ') => {
+                        self.input.insert(' ');
+                        self.close_overlay();
+                    }
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        self.input.insert(c);
+                        self.mention_after_edit();
+                    }
+                    // Any other key dismisses and is swallowed.
+                    _ => self.close_overlay(),
                 }
                 return None;
             }
@@ -419,6 +492,18 @@ impl App {
             KeyCode::PageUp => Some(Msg::ScrollUp),
             KeyCode::PageDown => Some(Msg::ScrollDown),
             KeyCode::End if self.input.is_empty() => Some(Msg::ScrollBottom),
+            // `@` at a word boundary opens inline file/folder completion; a
+            // mid-word `@` (e.g. an email) types literally.
+            KeyCode::Char('@')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && self.input.prev_char().is_none_or(char::is_whitespace) =>
+            {
+                self.input.insert('@');
+                self.open_mention();
+                None
+            }
             KeyCode::Char(c) => {
                 self.input.insert(c);
                 None
@@ -895,5 +980,112 @@ mod tests {
         let out = app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
         assert!(out.is_none()); // handled internally, not submitted
         assert_eq!(app.input.text(), "a\n");
+    }
+
+    // ----- Task D: inline `@` file/folder mention -------------------------
+
+    #[test]
+    fn at_opens_mention_when_empty() {
+        let mut app = App::new();
+        assert!(app.on_key(key(KeyCode::Char('@'))).is_none());
+        assert!(matches!(app.overlay, Overlay::Mention(_)));
+        assert_eq!(app.input.text(), "@");
+    }
+
+    #[test]
+    fn at_after_space_opens_mention() {
+        let mut app = App::new();
+        for c in "hi ".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Char('@')));
+        assert!(matches!(app.overlay, Overlay::Mention(_)));
+        assert_eq!(app.input.text(), "hi @");
+    }
+
+    #[test]
+    fn at_mid_word_is_literal() {
+        let mut app = App::new();
+        for c in "foo".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Char('@'))); // email-style, no boundary
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "mid-word @ is literal"
+        );
+        assert_eq!(app.input.text(), "foo@");
+    }
+
+    #[test]
+    fn mention_enter_accepts_not_submits() {
+        let mut app = App::new();
+        app.session_id = Some("ses_1".into()); // a submit would be possible
+        app.on_key(key(KeyCode::Char('@')));
+        app.files_loaded(vec!["a.rs".into()], false);
+        let msg = app.on_key(key(KeyCode::Enter));
+        assert!(msg.is_none(), "enter inside a mention never submits");
+        assert_eq!(app.input.text(), "@a.rs ");
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn mention_tab_accepts() {
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        app.files_loaded(vec!["a.rs".into()], false);
+        assert!(app.on_key(key(KeyCode::Tab)).is_none());
+        assert_eq!(app.input.text(), "@a.rs ");
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn mention_esc_keeps_typed_text() {
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        for c in "src".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.input.text(), "@src", "typed text survives dismissal");
+    }
+
+    #[test]
+    fn mention_space_dismisses() {
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        for c in "sr".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "space delimits the token"
+        );
+        assert_eq!(app.input.text(), "@sr ");
+    }
+
+    #[test]
+    fn mention_shift_enter_inserts_newline_and_dismisses() {
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        for c in "sr".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.input.text(), "@sr\n");
+    }
+
+    #[test]
+    fn ctrl_c_quits_while_mention_open() {
+        let mut app = App::new();
+        app.on_key(key(KeyCode::Char('@')));
+        let msg = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(
+            matches!(msg, Some(Msg::Quit)),
+            "ctrl+c wins over the overlay"
+        );
     }
 }

@@ -626,6 +626,8 @@ async fn file_list_route_returns_workspace_files() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("one.rs"), "x").unwrap();
     std::fs::write(tmp.path().join("two.txt"), "y").unwrap();
+    std::fs::create_dir_all(tmp.path().join("nested")).unwrap();
+    std::fs::write(tmp.path().join("nested/three.rs"), "z").unwrap();
 
     let (factory, _) = ScriptedRouteFactory::new(vec![]);
     let runtime = Arc::new(
@@ -648,9 +650,14 @@ async fn file_list_route_returns_workspace_files() {
     let files = body["files"].as_array().unwrap();
     let names: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
     assert!(
-        names.contains(&"one.rs") && names.contains(&"two.txt"),
+        names.contains(&"one.rs")
+            && names.contains(&"two.txt")
+            && names.contains(&"nested/three.rs"),
         "files: {body}"
     );
+    let dirs = body["dirs"].as_array().unwrap();
+    let dir_names: Vec<&str> = dirs.iter().filter_map(|v| v.as_str()).collect();
+    assert!(dir_names.contains(&"nested"), "dirs: {body}");
     assert_eq!(body["truncated"], false, "truncated: {body}");
 }
 

@@ -69,6 +69,15 @@ pub(crate) mod testing {
             }
         }
 
+        /// Gate that denies exactly `permission` (approving everything else)
+        /// and records requests.
+        pub fn deny(permission: impl Into<String>) -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                deny: Some(permission.into()),
+            }
+        }
+
         /// Whether any recorded request used `permission`.
         pub fn asked_for(&self, permission: &str) -> bool {
             self.requests
@@ -76,6 +85,17 @@ pub(crate) mod testing {
                 .unwrap()
                 .iter()
                 .any(|r| r.permission == permission)
+        }
+
+        /// All recorded requests for `permission`, in ask order.
+        pub fn requests_for(&self, permission: &str) -> Vec<PermissionRequest> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.permission == permission)
+                .cloned()
+                .collect()
         }
     }
 

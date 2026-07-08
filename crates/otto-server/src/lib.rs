@@ -850,14 +850,19 @@ struct FileListQuery {
     limit: Option<usize>,
 }
 
-/// `GET /file/list?limit=` — enumerate workspace files (repo-relative, capped
-/// at `limit`, clamped to `1..=5000`, default `1000`) for the TUI's `@file`
-/// attachment picker.
+/// `GET /file/list?limit=` — enumerate workspace files and directories
+/// (repo-relative, capped at `limit`, clamped to `1..=5000`, default `1000`)
+/// for the TUI's `@`-mention attachment picker.
+///
+/// `dirs` is a separate key from `files` for backward compatibility (old
+/// clients that only read `files` are unaffected). The TUI client merges
+/// `dirs` into its candidate list as trailing-`/` strings, i.e.
+/// `is_dir == ends_with('/')`.
 async fn file_list(State(state): State<AppState>, Query(q): Query<FileListQuery>) -> Json<Value> {
     let limit = q.limit.unwrap_or(1000).clamp(1, 5000);
-    let files = otto_vcs::find_files(state.runtime.directory(), limit);
-    let truncated = files.len() >= limit;
-    Json(json!({ "files": files, "truncated": truncated }))
+    let (files, dirs) = otto_vcs::find_entries(state.runtime.directory(), limit);
+    let truncated = files.len() >= limit || dirs.len() >= limit;
+    Json(json!({ "files": files, "dirs": dirs, "truncated": truncated }))
 }
 
 // -- worktree ------------------------------------------------------------
@@ -1250,7 +1255,7 @@ async fn doc() -> Json<Value> {
             "/find": { "get": { "summary": "Content search" } },
             "/find/file": { "get": { "summary": "Filename search" } },
             "/file/content": { "get": { "summary": "Read a file" } },
-            "/file/list": { "get": { "summary": "Enumerate workspace files" } },
+            "/file/list": { "get": { "summary": "Enumerate workspace files and directories" } },
             "/doc": { "get": { "summary": "This document" } }
         }
     }))

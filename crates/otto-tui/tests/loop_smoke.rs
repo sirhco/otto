@@ -178,6 +178,48 @@ fn y_key_sets_pending_yank_through_routing() {
     assert_eq!(app.pending_action, Some(LoopAction::Yank));
 }
 
+/// Opening the inline `@`-mention (typing `@` at a word boundary) must trigger
+/// exactly one `/file/list` fetch through `route_message`, mirroring the ctrl+f
+/// picker's fetch trigger. The completed fetch returns as `Msg::FilesLoaded` on
+/// the channel.
+#[tokio::test]
+async fn route_message_fetches_files_when_mention_opens() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let (factory, _) = ScriptedRouteFactory::new(vec![]);
+    let runtime = std::sync::Arc::new(
+        otto_app::Runtime::in_memory(otto_config::Config::default())
+            .await
+            .unwrap()
+            .with_route_factory(factory),
+    );
+    let base = spawn(runtime, no_auth()).await;
+    let client = Client::new(base, None);
+
+    let mut app = App::new();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Msg>();
+
+    otto_tui::route_message(
+        &mut app,
+        &client,
+        &tx,
+        Msg::Key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE)),
+    );
+    assert!(
+        matches!(app.overlay, Overlay::Mention(_)),
+        "typing '@' at a boundary opens the mention picker"
+    );
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("mention open must trigger a /file/list fetch")
+        .expect("channel closed before the fetch returned");
+    assert!(
+        matches!(msg, Msg::FilesLoaded(_, _)),
+        "expected FilesLoaded, got {msg:?}"
+    );
+}
+
 /// Regression for the new-session (ctrl+n) bug: the flow's `Msg::SwitchSession`
 /// arrives on the channel from the spawned `create_session` task — i.e. as a
 /// NON-key message. `event_loop` must route non-key messages through `dispatch`
