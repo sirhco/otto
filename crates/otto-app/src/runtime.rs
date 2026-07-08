@@ -633,13 +633,13 @@ in full prose instead.";
 \"of course\", \"I'd be happy to\"). Keep normal grammar and full sentences."
         }
         TersemodeLevel::Full => {
-            "Answer like a smart tersemode: drop articles (a/an/the), filler \
+            "Answer in a tight, telegraphic style: drop articles (a/an/the), filler \
 (just/really/basically), hedging, and pleasantries. Sentence fragments are fine. \
 Prefer short synonyms (big not extensive, fix not implement-a-solution-for). \
 Pattern: [thing] [action] [reason]. [next step]."
         }
         TersemodeLevel::Ultra => {
-            "Answer in maximally compressed tersemode: telegraphic fragments, one word \
+            "Answer with maximum compression: telegraphic fragments, one word \
 where one word does, heavy abbreviation of common prose words \
 (config/req/res/fn/impl/DB/auth), arrows for causality (X -> Y), strip \
 conjunctions. Never abbreviate technical names, APIs, or error strings."
