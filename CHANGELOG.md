@@ -6,6 +6,19 @@ All notable changes to otto are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Full-auto can no longer block on agent-level `ask` rules.** v0.3.0's
+  ruleset enforcement made the builtin agents' `ask` rules (`doom_loop`,
+  `external_directory`, `.env` reads) outrank the full-auto overlay, so a
+  full-auto session could raise a blocking permission prompt with no timeout —
+  a turn that "just stops" with no error. Permission resolution is now
+  two-phase: a deny gate (agent ruleset + user config + `Always` approvals —
+  agent denies hold in every mode, explicit user statements still outrank the
+  agent) followed by mode-driven interactivity WITHOUT the agent layer, so
+  the mode answers asks (full-auto auto-allows, danger still prompts) and an
+  agent's broad `* allow` defaults no longer bypass approve-each prompting.
+
 ### Added
 
 - **Logging actually works.** `--log-level` / `--print-logs` / config

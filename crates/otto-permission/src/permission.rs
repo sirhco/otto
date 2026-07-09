@@ -209,10 +209,16 @@ impl Permission {
     /// Ask for permission on behalf of `session_id` — port of `ask`
     /// (`index.ts:67`).
     ///
-    /// Each pattern is evaluated against `[mode overlay, configured ruleset,
-    /// session approvals, danger ruleset]`. Any `Deny` rejects immediately; if
-    /// every pattern is `Allow` the call returns `Ok`; otherwise (at least one
-    /// `Ask`) a pending request is registered, an [`Asked`] event is
+    /// Each pattern goes through two phases. A deny gate over `[agent session
+    /// ruleset, configured ruleset, session approvals]` rejects immediately
+    /// (agent constraints hold in every mode; explicit user statements
+    /// outrank the agent). Then interactivity is resolved over `[mode
+    /// overlay, configured ruleset, session approvals, danger ruleset]` —
+    /// deliberately WITHOUT the agent layer, so the permission mode is the
+    /// arbiter of prompting: full-auto answers agent-level `ask` rules
+    /// instead of blocking, and an agent's own `allow` never skips
+    /// approve-each consent. If every pattern is `Allow` the call returns
+    /// `Ok`; otherwise a pending request is registered, an [`Asked`] event is
     /// published, and the call blocks on a oneshot until
     /// [`reply`](Permission::reply) resolves it.
     pub async fn ask(
@@ -229,29 +235,44 @@ impl Permission {
             let mode = resolve_mode(&inner, &session_id, self.default_mode);
             let overlay = mode_overlay(mode);
             let danger = danger_ruleset();
-            // Precedence (last-match-wins, low → high): mode overlay < agent
-            // session ruleset < configured ruleset < session approvals <
-            // danger. So an agent deny (plan's edit-deny) beats the full-auto
-            // overlay, while anything the USER stated explicitly — config
-            // rules or an in-session `Always` — still outranks the agent
-            // (builtin agents carry broad `* allow` defaults that must never
-            // defeat a user config deny). Danger stays on top.
             let session_ruleset = inner
                 .session_rulesets
                 .get(&session_id)
                 .cloned()
                 .unwrap_or_default();
 
+            // Two-phase resolution — a permission MODE answers asks; it must
+            // never override a deny, and an agent granting itself a tool must
+            // never skip user consent:
+            //
+            // 1. Deny gate: `[agent session ruleset, configured ruleset,
+            //    session approvals]`, last-match-wins — the agent's deny
+            //    (plan's edit-deny) holds in every mode, while anything the
+            //    USER stated explicitly (config rules, an in-session `Always`)
+            //    still outranks the agent.
+            // 2. Interactivity: `[mode overlay, configured ruleset, session
+            //    approvals, danger]` — the agent layer is deliberately absent,
+            //    so its broad `* allow` defaults don't bypass approve-each,
+            //    and its `ask` rules (doom_loop, external_directory, `.env`
+            //    reads) are answered by full-auto instead of raising a
+            //    blocking prompt that reads as a silent hang. Danger stays on
+            //    top and prompts in every mode.
             let mut needs_ask = false;
             for pattern in &req.patterns {
+                let denied = evaluate(
+                    &[&session_ruleset, &self.ruleset, &session_approved],
+                    &req.permission,
+                    pattern,
+                )
+                .action
+                    == Action::Deny;
+                if denied {
+                    return Err(PermissionDenied {
+                        permission: req.permission.clone(),
+                    });
+                }
                 let resolved = evaluate(
-                    &[
-                        &overlay,
-                        &session_ruleset,
-                        &self.ruleset,
-                        &session_approved,
-                        &danger,
-                    ],
+                    &[&overlay, &self.ruleset, &session_approved, &danger],
                     &req.permission,
                     pattern,
                 );
@@ -544,6 +565,85 @@ mod tests {
         )
         .await
         .expect("the agent's own allow-list still works");
+    }
+
+    #[tokio::test]
+    async fn full_auto_answers_agent_ask_rules_instead_of_blocking() {
+        // Builtin agent defaults carry `ask` rules (doom_loop,
+        // external_directory, .env reads). In full-auto those must be
+        // ANSWERED by the mode, not raised as blocking prompts — a pending
+        // ask with no reply reads as a silent hang in the TUI.
+        let perm = Permission::new(Ruleset::new());
+        perm.set_mode("ses_1", PermissionMode::FullAuto);
+        perm.set_session_ruleset(
+            "ses_1",
+            Ruleset(vec![
+                Rule {
+                    permission: "*".into(),
+                    pattern: "*".into(),
+                    action: Action::Allow,
+                },
+                Rule {
+                    permission: "doom_loop".into(),
+                    pattern: "*".into(),
+                    action: Action::Ask,
+                },
+                Rule {
+                    permission: "external_directory".into(),
+                    pattern: "*".into(),
+                    action: Action::Ask,
+                },
+            ]),
+        );
+        for permission in ["doom_loop", "external_directory"] {
+            perm.ask(
+                "ses_1",
+                PermissionRequest {
+                    permission: permission.into(),
+                    patterns: vec!["/etc/hosts".into()],
+                    always: vec![],
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await
+            .unwrap_or_else(|_| panic!("full-auto must answer the agent's {permission} ask"));
+        }
+    }
+
+    #[tokio::test]
+    async fn approve_each_still_asks_despite_agent_allow_defaults() {
+        // The agent's broad `* allow` defaults must NOT bypass approve-each:
+        // the mode is the arbiter of prompting, the agent only constrains.
+        let perm = Permission::new(Ruleset::new()); // default mode: ApproveEach
+        perm.set_session_ruleset(
+            "ses_1",
+            Ruleset(vec![Rule {
+                permission: "*".into(),
+                pattern: "*".into(),
+                action: Action::Allow,
+            }]),
+        );
+        let perm = std::sync::Arc::new(perm);
+        let mut rx = perm.subscribe();
+        let p = perm.clone();
+        let h = tokio::spawn(async move {
+            p.ask(
+                "ses_1",
+                PermissionRequest {
+                    permission: "bash".into(),
+                    patterns: vec!["cargo test".into()],
+                    always: vec![],
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await
+        });
+        let asked = rx
+            .recv()
+            .await
+            .expect("approve-each prompts even though the agent allows bash");
+        perm.reply(&asked.request_id, Reply::Once);
+        h.await.unwrap().expect("approved once");
     }
 
     #[tokio::test]
