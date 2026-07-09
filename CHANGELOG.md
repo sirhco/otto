@@ -4,6 +4,20 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [Unreleased]
+
+### Fixed
+
+- **`provider.anthropic.options.baseURL` / `provider.openai.options.baseURL`
+  are honored.** Named providers previously ignored config overrides (only
+  unknown provider ids got a base URL), so otto's native Anthropic Messages
+  protocol could not be pointed at a gateway. Now
+  `provider.anthropic.options.baseURL = http://litellm:4000/v1` +
+  `model = anthropic/github_copilot/claude-opus-4.8` drives litellm's
+  `/v1/messages` endpoint exactly like Anthropic-native clients (model names
+  containing `/` are preserved — the provider is split on the first slash
+  only). `options.apiKey` works as the key fallback for named providers too.
+
 ## [0.3.0] - 2026-07-09
 
 Reliability overhaul: provider retry/streaming robustness against

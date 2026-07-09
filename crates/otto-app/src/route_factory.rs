@@ -147,13 +147,36 @@ impl RouteFactory for AuthRouteFactory {
         let model_id = m.model.0.as_str();
         let key = self.secret_for(provider);
 
+        // A config-supplied override lets the NAMED providers point at a
+        // gateway (litellm, a corporate proxy) while keeping their native wire
+        // protocol — e.g. `provider.anthropic.options.baseURL` →
+        // `{baseURL}/messages` with the Anthropic Messages protocol, exactly
+        // the litellm endpoint Anthropic-native clients use. Previously the
+        // override was honored only for unknown provider ids and silently
+        // ignored here.
+        let override_base = self
+            .providers
+            .get(provider)
+            .map(|ov| ov.base_url.clone())
+            .filter(|u| !u.is_empty());
+        let override_key = self
+            .providers
+            .get(provider)
+            .and_then(|ov| ov.api_key.clone().map(Secret::literal));
+
         let (route, model): (Arc<dyn Route>, Model) = match provider {
             "anthropic" => {
-                let p = Anthropic::new(key, self.transport.clone());
+                let mut p = Anthropic::new(key.or(override_key), self.transport.clone());
+                if let Some(base) = override_base {
+                    p = p.with_base_url(base);
+                }
                 (Arc::from(p.route(model_id)), p.model(model_id))
             }
             "openai" => {
-                let p = OpenAI::new(key, self.transport.clone());
+                let mut p = OpenAI::new(key.or(override_key), self.transport.clone());
+                if let Some(base) = override_base {
+                    p = p.with_base_url(base);
+                }
                 (Arc::from(p.route(model_id)), p.model(model_id))
             }
             "xai" => {
@@ -340,6 +363,41 @@ mod tests {
             factory.providers.get("ollama").map(|o| o.base_url.as_str()),
             Some("http://localhost:11434/v1")
         );
+    }
+
+    /// `provider.anthropic.options.baseURL` must reach the NAMED anthropic
+    /// arm — pointing otto's native Anthropic Messages protocol at a gateway
+    /// (litellm) the way Anthropic-native clients do. It used to be silently
+    /// ignored for named providers. The gateway model name may itself carry a
+    /// slash (`github_copilot/claude-opus-4.8`); `ModelRef::parse` splits on
+    /// the FIRST slash only.
+    #[test]
+    fn config_base_url_reaches_named_anthropic_provider() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderOverride {
+                base_url: "http://litellm:4000/v1".to_string(),
+                api_key: Some("sk-litellm".to_string()),
+                model_limits: HashMap::new(),
+            },
+        );
+        let factory = AuthRouteFactory::new(AuthMap::new(), test_transport(), providers);
+
+        let mref = ModelRef::parse("anthropic/github_copilot/claude-opus-4.8");
+        assert_eq!(mref.provider.0, "anthropic");
+        assert_eq!(mref.model.0, "github_copilot/claude-opus-4.8");
+
+        let (_route, model) = factory.route_for(&mref).expect("route builds");
+        assert_eq!(
+            model.route_id, "anthropic",
+            "named provider keeps its native protocol behind the gateway"
+        );
+
+        // The endpoint join itself: `{baseURL}/messages`.
+        let p = otto_llm::providers::Anthropic::new(None, test_transport())
+            .with_base_url("http://litellm:4000/v1");
+        assert_eq!(p.endpoint().url(), "http://litellm:4000/v1/messages");
     }
 
     /// Pins that a non-empty base URL actually reaches the resolved request
