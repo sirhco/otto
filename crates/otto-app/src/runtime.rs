@@ -517,6 +517,25 @@ impl Runtime {
             .and_then(|r| r.max_total_attempts)
             .unwrap_or(DEFAULT_MAX_TOTAL_RETRIES);
 
+        // Optional wall-clock cap on the whole turn (`retry.turn_timeout_seconds`,
+        // default off): a watchdog cancels the run's abort token at the
+        // deadline, reusing the graceful-interrupt path (partial work is
+        // persisted and the assistant is finalized as aborted).
+        if let Some(secs) = retry_cfg
+            .as_ref()
+            .and_then(|r| r.turn_timeout_seconds)
+            .filter(|s| *s > 0)
+        {
+            let abort = abort.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = tokio::time::sleep(std::time::Duration::from_secs(secs)) => abort.cancel(),
+                    // The turn ended (or was interrupted) first — stand down.
+                    () = abort.cancelled() => {}
+                }
+            });
+        }
+
         // Tersemode brevity directive, resolved before the spawn (borrows
         // `self.config`) and moved into the run.
         let tersemode = tersemode_directive(&self.config);
