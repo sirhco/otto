@@ -1535,6 +1535,7 @@ mod tests {
             attempt: 3,
             max: 5,
             delay_ms: 16000,
+            salvaged: false,
             message: "http error: status 429".into(),
         });
         let text = render(&app);

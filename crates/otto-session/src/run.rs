@@ -316,6 +316,65 @@ async fn finalize_interrupted(
     Ok(())
 }
 
+/// Salvage a failed attempt that already executed tools: keep its completed
+/// tool parts (and streamed narration), drop only the incomplete
+/// pending/running tool parts (they never executed — the model will re-issue
+/// them), and finalize the assistant as a normal `tool-calls` step. The next
+/// outer-loop iteration re-reads history, where `convert` lowers the completed
+/// tool parts into tool results — so the retried request naturally contains
+/// the finished work instead of re-running every read from scratch.
+///
+/// Returns `false` (caller falls back to the purge-and-replay retry) when the
+/// attempt completed no tool work. Provider-executed tools are not counted:
+/// their results live provider-side and a replay is required anyway.
+async fn salvage_completed_tools(
+    store: &Store,
+    session_id: &str,
+    assistant_id: &str,
+) -> Result<bool, StorageError> {
+    let parts = store.list_parts(assistant_id).await?;
+    let mut completed = 0usize;
+    let mut incomplete: Vec<String> = Vec::new();
+    for part in &parts {
+        let PartKind::Tool {
+            metadata, state, ..
+        } = &part.kind
+        else {
+            continue;
+        };
+        let provider_executed = metadata
+            .as_ref()
+            .and_then(|m| m.get("providerExecuted"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        match state {
+            ToolState::Completed { .. } if !provider_executed => completed += 1,
+            ToolState::Pending { .. } | ToolState::Running { .. } => {
+                incomplete.push(part.id.clone());
+            }
+            _ => {}
+        }
+    }
+    if completed == 0 {
+        return Ok(false);
+    }
+    for id in incomplete {
+        store.delete_part(&id).await?;
+    }
+    let Some(mut info) = store.get_message(session_id, assistant_id).await? else {
+        return Ok(false);
+    };
+    if let InfoBody::Assistant(a) = &mut info.body {
+        if a.time.completed.is_none() {
+            a.time.completed = Some(now_ms());
+        }
+        a.finish = Some("tool-calls".to_string());
+        a.error = None;
+        store.update_message(&info).await?;
+    }
+    Ok(true)
+}
+
 /// Accept a truncated assistant response (stream ended without a terminal
 /// finish on every attempt): stamp `time.completed` and a `finish = "unknown"`
 /// so the exit condition sees a terminal turn. The streamed parts are kept.
@@ -605,13 +664,27 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         finalize_failed(&cfg.store, session_id, &assistant_id, &err).await?;
                         return Err(ProcessorError::Llm(err).into());
                     }
+                    // Salvage before retrying: when the failed attempt already
+                    // executed tools, keep that work as a finished tool-call
+                    // step and continue the outer loop from it — instead of
+                    // the purge-and-replay path, which forgets the executed
+                    // tools and makes the model re-run the same reads and
+                    // re-narrate on every retry.
+                    let salvaged =
+                        salvage_completed_tools(&cfg.store, session_id, &assistant_id).await?;
                     let wait = retry::delay(attempt, err.retry_after());
                     if let Some(tx) = &cfg.event_tx {
+                        let message = if salvaged {
+                            format!("{err} — resuming with completed tool calls kept")
+                        } else {
+                            err.to_string()
+                        };
                         let _ = tx.send(otto_events::LLMEvent::Retry {
                             attempt,
                             max: cfg.max_retries,
                             delay_ms: wait.as_millis() as u64,
-                            message: err.to_string(),
+                            message,
+                            salvaged,
                         });
                     }
                     tokio::select! {
@@ -619,6 +692,11 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         // Abort during backoff → graceful interrupt, not a
                         // surfaced error (same rationale as the arm-top check).
                         () = cfg.abort.cancelled() => break ProcessOutcome::Stop,
+                    }
+                    if salvaged {
+                        // The step is finalized as `tool-calls`; the outer loop
+                        // re-reads history and continues from the kept work.
+                        break ProcessOutcome::Continue;
                     }
                 }
                 Err(other) => return Err(other.into()),

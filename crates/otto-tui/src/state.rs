@@ -1557,6 +1557,7 @@ impl App {
                 max,
                 delay_ms,
                 message,
+                salvaged,
             } => {
                 let secs = delay_ms.div_ceil(1000);
                 let label = if is_rate_limit(&message) {
@@ -1574,10 +1575,18 @@ impl App {
                     prefix,
                     expires_tick: self.tick.wrapping_add(wait_ticks),
                 });
-                // The server purged this attempt's parts and will re-stream
-                // the message from scratch — roll the transcript back so the
-                // partial attempt doesn't remain as an orphaned duplicate.
-                if let Some(i) = self.msg_start.take() {
+                if salvaged {
+                    // The failed attempt's completed tool work was KEPT
+                    // server-side and the retry continues from it as a new
+                    // step — the rendered rows are real; do not roll back.
+                    self.msg_start = None;
+                    self.open_text = None;
+                    self.open_reasoning = None;
+                } else if let Some(i) = self.msg_start.take() {
+                    // The server purged this attempt's parts and will
+                    // re-stream the message from scratch — roll the transcript
+                    // back so the partial attempt doesn't remain as an
+                    // orphaned duplicate.
                     self.transcript.truncate(i);
                     self.running_tools.retain(|(_, idx)| *idx < i);
                     self.open_text = None;
@@ -3678,6 +3687,7 @@ mod tests {
             attempt: 2,
             max: 5,
             delay_ms: 8000,
+            salvaged: false,
             message: "http error: status 429: rate limit".into(),
         });
         assert_eq!(app.status, "rate-limited — retrying 2/5 (8s)");
@@ -3691,6 +3701,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 2000,
+            salvaged: false,
             message: "transport error: connection reset".into(),
         });
         assert_eq!(app.status, "retrying 1/5 (2s)");
@@ -3786,6 +3797,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 2000,
+            salvaged: false,
             message: "connection reset".into(),
         });
         // …and attempt 2 re-streams the message from scratch.
@@ -3825,6 +3837,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 4000,
+            salvaged: false,
             message: "http error: status 429: rate limit".into(),
         });
         assert!(app.status.ends_with("(4s)"), "initial: {}", app.status);
@@ -3856,6 +3869,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 8000,
+            salvaged: false,
             message: "overloaded".into(),
         });
         app.update(Msg::PromptEnded);
@@ -3876,6 +3890,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 4000,
+            salvaged: false,
             message: "overloaded".into(),
         });
         // The retried attempt starts streaming: the countdown must stop

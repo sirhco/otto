@@ -271,16 +271,36 @@ impl Processor {
         // Drain the stream, stopping after `needs_compaction` flips
         // (`Stream.takeUntil`, `processor.ts:642`). The result is captured so
         // cleanup can run unconditionally afterwards (`Effect.ensuring`).
+        //
+        // A provider error does NOT stop the drain: the tool-augmented stream
+        // appends the results of already-executed tools AFTER any mid-stream
+        // provider failure (the tail phase of `augment_with_tools`). Bailing
+        // on the first `Err` discarded that completed — possibly
+        // non-idempotent — tool work, forcing every retry to re-run the same
+        // tools from scratch. The first error is kept and returned once the
+        // stream is fully drained.
         let drain: Result<(), ProcessorError> = async {
             let mut stream = stream;
+            let mut stream_err: Option<ProcessorError> = None;
             while let Some(item) = stream.next().await {
-                let event = item.map_err(ProcessorError::Llm)?;
-                self.handle_event(event).await?;
-                if self.needs_compaction {
-                    break;
+                match item {
+                    Ok(event) => {
+                        self.handle_event(event).await?;
+                        if self.needs_compaction {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        if stream_err.is_none() {
+                            stream_err = Some(ProcessorError::Llm(e));
+                        }
+                    }
                 }
             }
-            Ok(())
+            match stream_err {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
         }
         .await;
 

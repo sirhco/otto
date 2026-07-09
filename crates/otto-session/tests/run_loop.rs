@@ -779,6 +779,141 @@ async fn total_retry_budget_binds_across_generous_per_step_budget() {
     );
 }
 
+#[tokio::test]
+async fn retry_salvages_completed_tool_work_instead_of_replaying() {
+    let (store, _user) = seed("please echo").await;
+
+    // Call 0: a tool call streams and EXECUTES, then the stream dies with a
+    // retryable failure (zero backoff). Call 1: the loop continues from the
+    // salvaged step — history already carries the tool result — and finishes.
+    struct ToolThenFailRoute {
+        calls: Arc<AtomicUsize>,
+    }
+    impl Route for ToolThenFailRoute {
+        fn id(&self) -> &str {
+            "tool-then-fail"
+        }
+        fn stream(&self, _req: LLMRequest) -> BoxStream<'static, Result<LLMEvent, LLMError>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                let items: Vec<Result<LLMEvent, LLMError>> = vec![
+                    Ok(step_start()),
+                    Ok(tool_call("call_1", "echo", json!({"text":"salvage me"}))),
+                    Err(LLMError::Http {
+                        status: 429,
+                        message: "rate limit".into(),
+                        retry_after: Some(Duration::from_millis(0)),
+                    }),
+                ];
+                stream::iter(items).boxed()
+            } else {
+                let mut turn = vec![step_start()];
+                turn.extend(text_events("t2", "done after salvage"));
+                turn.push(step_finish(FinishReason::Stop));
+                turn.push(finish(FinishReason::Stop));
+                stream::iter(turn.into_iter().map(Ok)).boxed()
+            }
+        }
+    }
+
+    /// An echo tool that counts executions — salvage must not re-run it.
+    struct CountingEchoTool {
+        runs: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl Tool for CountingEchoTool {
+        fn id(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "echo"
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({ "type": "object", "properties": { "text": { "type": "string" } } })
+        }
+        async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ExecuteResult, ToolError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let text = args
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Ok(ExecuteResult::new("echo", text))
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut cfg = config(
+        store.clone(),
+        Arc::new(ToolThenFailRoute {
+            calls: calls.clone(),
+        }),
+        registry(Arc::new(CountingEchoTool { runs: runs.clone() })),
+        CancellationToken::new(),
+    );
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
+    cfg.event_tx = Some(event_tx);
+
+    run_loop(&cfg, SES).await.expect("run completes");
+
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "tool executed exactly once");
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "two provider calls");
+
+    drop(cfg);
+    let mut salvaged_retry = false;
+    while let Some(ev) = event_rx.recv().await {
+        if let LLMEvent::Retry { salvaged, .. } = ev {
+            salvaged_retry |= salvaged;
+        }
+    }
+    assert!(salvaged_retry, "the retry event is marked salvaged");
+
+    // The failed attempt's assistant is finalized as a tool-calls step and
+    // keeps its completed tool part; the follow-up assistant carries the text.
+    let msgs = store.list_messages(SES).await.expect("messages");
+    let assistants: Vec<_> = msgs.iter().filter(|m| m.is_assistant()).collect();
+    assert_eq!(assistants.len(), 2, "salvaged step + follow-up step");
+    let first = assistants[0].as_assistant().expect("assistant body");
+    assert_eq!(first.finish.as_deref(), Some("tool-calls"));
+    let first_parts = parts_of(&store, &assistants[0].id).await;
+    assert!(
+        first_parts.iter().any(|p| matches!(
+            &p.kind,
+            PartKind::Tool {
+                state: ToolState::Completed { .. },
+                ..
+            }
+        )),
+        "completed tool part kept on the salvaged step"
+    );
+}
+
+#[tokio::test]
+async fn retry_with_no_tool_work_still_purges_and_replays() {
+    // Guard the existing behavior: a failed attempt with NO completed tools
+    // must keep using the purge-and-replay path (idempotent in-place retry).
+    let (store, _user) = seed("hi").await;
+    let mut turn = vec![step_start()];
+    turn.extend(text_events("t2", "FINAL"));
+    turn.push(step_finish(FinishReason::Stop));
+    turn.push(finish(FinishReason::Stop));
+    let route = Arc::new(PartialThenCompleteRoute {
+        calls: AtomicUsize::new(0),
+        success_turn: Mutex::new(Some(turn)),
+    });
+    let cfg = config(
+        store.clone(),
+        route,
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    run_loop(&cfg, SES).await.expect("run completes");
+    let msgs = store.list_messages(SES).await.expect("messages");
+    let assistants: Vec<_> = msgs.iter().filter(|m| m.is_assistant()).collect();
+    assert_eq!(assistants.len(), 1, "in-place retry reuses the assistant");
+}
+
 // NOTE: not `start_paused` — see `retry_emits_retry_event_before_backoff`.
 // `max_retries: 2` keeps each test's real backoff at a single ~4s sleep.
 #[tokio::test]
