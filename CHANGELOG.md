@@ -4,6 +4,20 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [Unreleased]
+
+### Added
+
+- **Logging actually works.** `--log-level` / `--print-logs` / config
+  `logLevel` were parsed but no `tracing` subscriber was ever installed, so a
+  stalled or failed turn left no forensics anywhere. otto now writes a
+  daily-rolling log file under `{data_dir}/otto/logs/otto.log.YYYY-MM-DD`
+  (stderr with `--print-logs`); `OTTO_LOG` accepts full `EnvFilter` directives
+  (e.g. `OTTO_LOG=otto_session=debug,otto_llm=trace`). Default level `warn`.
+  The run loop now logs every retry (attempt, backoff, salvage, error), retry
+  exhaustion, and accepted-truncation decisions, joining the existing
+  skipped-frame warnings from the stream decoder.
+
 ## [0.3.1] - 2026-07-09
 
 ### Fixed

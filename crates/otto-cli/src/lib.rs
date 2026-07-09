@@ -17,6 +17,7 @@
 
 pub mod cli;
 pub mod commands;
+pub mod logging;
 pub mod render;
 pub mod run;
 mod workflow;
@@ -31,6 +32,8 @@ use crate::cli::{AgentCommand, Cli, Commands, McpCommand};
 /// Propagates any handler error (which the binary surfaces as a non-zero exit).
 pub async fn dispatch(cli: Cli) -> Result<()> {
     let cwd = cli.cwd.as_path();
+    logging::init(cli.log_level.as_deref(), cli.print_logs, cwd);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "otto starting");
     match cli.command {
         Commands::Run(args) => run::cmd_run(cwd, args).await,
         Commands::Serve(args) => {

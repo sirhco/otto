@@ -652,6 +652,12 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         // of failing the turn — the parts are intact because
                         // the purge only runs at the top of the NEXT attempt.
                         if exhausted && matches!(err, otto_llm::LLMError::NoTerminalFinish) {
+                            tracing::warn!(
+                                session = session_id,
+                                message = assistant_id.as_str(),
+                                attempts = attempt,
+                                "retry budget exhausted on truncated stream; accepting response as-is"
+                            );
                             finalize_truncated(&cfg.store, session_id, &assistant_id).await?;
                             if let Some(tx) = &cfg.event_tx {
                                 let _ = tx.send(otto_events::LLMEvent::Warning {
@@ -665,6 +671,15 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         // Stamp the failure on the assistant message before
                         // propagating so the turn never leaves an unfinalized
                         // message behind (mirrors `finalize_interrupted`).
+                        tracing::error!(
+                            session = session_id,
+                            message = assistant_id.as_str(),
+                            attempt,
+                            total_retries,
+                            exhausted,
+                            error = %err,
+                            "turn failed: retries exhausted or error not retryable"
+                        );
                         finalize_failed(&cfg.store, session_id, &assistant_id, &err).await?;
                         return Err(ProcessorError::Llm(err).into());
                     }
@@ -677,6 +692,17 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                     let salvaged =
                         salvage_completed_tools(&cfg.store, session_id, &assistant_id).await?;
                     let wait = retry::delay(attempt, err.retry_after());
+                    tracing::warn!(
+                        session = session_id,
+                        message = assistant_id.as_str(),
+                        attempt,
+                        max = cfg.max_retries,
+                        total_retries,
+                        delay_ms = wait.as_millis() as u64,
+                        salvaged,
+                        error = %err,
+                        "retryable provider failure; backing off"
+                    );
                     if let Some(tx) = &cfg.event_tx {
                         let message = if salvaged {
                             format!("{err} — resuming with completed tool calls kept")
