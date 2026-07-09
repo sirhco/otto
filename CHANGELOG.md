@@ -4,7 +4,11 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
-## [Unreleased]
+## [0.3.0] - 2026-07-09
+
+Reliability overhaul: provider retry/streaming robustness against
+OpenAI-compatible gateways (litellm, Ollama, OpenRouter), working workflow
+permission handling, and wrapped-row-accurate TUI scrolling.
 
 ### Fixed
 
