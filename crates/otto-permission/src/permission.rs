@@ -96,8 +96,35 @@ struct Inner {
     approved: HashMap<SessionId, Vec<Rule>>,
     /// In-flight requests awaiting a reply.
     pending: HashMap<RequestId, Pending>,
-    /// Per-session permission mode; absent → `default_mode`.
+    /// Per-session permission mode; absent → walk `parents`, then
+    /// `default_mode`.
     modes: HashMap<SessionId, PermissionMode>,
+    /// Child → parent session links, so a child session (subagent, workflow)
+    /// with no explicit mode inherits the nearest ancestor's mode live.
+    parents: HashMap<SessionId, SessionId>,
+}
+
+/// Upper bound on the parent-chain walk — cheap insurance alongside the
+/// visited-set cycle guard.
+const PARENT_CHAIN_MAX_DEPTH: usize = 64;
+
+/// Resolve the mode for `session_id`: its own entry, else the nearest
+/// ancestor's entry via `parents`, else `default_mode`. An explicit
+/// `set_mode` on a child always shadows the parent.
+fn resolve_mode(inner: &Inner, session_id: &str, default_mode: PermissionMode) -> PermissionMode {
+    let mut current = session_id;
+    let mut seen: Vec<&str> = Vec::new();
+    for _ in 0..PARENT_CHAIN_MAX_DEPTH {
+        if let Some(mode) = inner.modes.get(current) {
+            return *mode;
+        }
+        seen.push(current);
+        match inner.parents.get(current) {
+            Some(parent) if !seen.contains(&parent.as_str()) => current = parent,
+            _ => break,
+        }
+    }
+    default_mode
 }
 
 /// The permission service — port of the `Service` in `permission/index.ts`.
@@ -127,26 +154,34 @@ impl Permission {
                 approved: HashMap::new(),
                 pending: HashMap::new(),
                 modes: HashMap::new(),
+                parents: HashMap::new(),
             }),
             events,
         }
     }
 
-    /// The current mode for `session_id` (falls back to the default).
+    /// The current mode for `session_id` — its own mode, else the nearest
+    /// ancestor's (via [`link_parent`](Permission::link_parent)), else the
+    /// default.
     #[must_use]
     pub fn mode(&self, session_id: &str) -> PermissionMode {
         let inner = self.inner.lock().expect("permission mutex poisoned");
-        inner
-            .modes
-            .get(session_id)
-            .copied()
-            .unwrap_or(self.default_mode)
+        resolve_mode(&inner, session_id, self.default_mode)
     }
 
     /// Set the mode for `session_id` (live; affects subsequent `ask` calls).
     pub fn set_mode(&self, session_id: impl Into<SessionId>, mode: PermissionMode) {
         let mut inner = self.inner.lock().expect("permission mutex poisoned");
         inner.modes.insert(session_id.into(), mode);
+    }
+
+    /// Record `child`'s parent session so mode resolution can walk the chain.
+    /// Inheritance is live: flipping the parent's mode changes what every
+    /// linked descendant resolves on its *next* ask, while an explicit
+    /// `set_mode` on the child still shadows the parent.
+    pub fn link_parent(&self, child: impl Into<SessionId>, parent: impl Into<SessionId>) {
+        let mut inner = self.inner.lock().expect("permission mutex poisoned");
+        inner.parents.insert(child.into(), parent.into());
     }
 
     /// Subscribe to [`Asked`] events. A server/CLI drives the prompt UI from
@@ -176,11 +211,7 @@ impl Permission {
             let mut inner = self.inner.lock().expect("permission mutex poisoned");
             let session_approved =
                 Ruleset(inner.approved.get(&session_id).cloned().unwrap_or_default());
-            let mode = inner
-                .modes
-                .get(&session_id)
-                .copied()
-                .unwrap_or(self.default_mode);
+            let mode = resolve_mode(&inner, &session_id, self.default_mode);
             let overlay = mode_overlay(mode);
             let danger = danger_ruleset();
 
@@ -394,5 +425,54 @@ mod tests {
         perm.set_mode("ses_1", PermissionMode::FullAuto);
         assert_eq!(perm.mode("ses_1"), PermissionMode::FullAuto);
         assert_eq!(perm.mode("ses_2"), PermissionMode::AcceptEdits); // isolated
+    }
+
+    #[test]
+    fn child_inherits_parent_mode_via_chain() {
+        let perm = Permission::new(Ruleset::new());
+        perm.set_mode("ses_root", PermissionMode::FullAuto);
+        // root → workflow → implementer: depth 2, mode set only on the root.
+        perm.link_parent("ses_workflow", "ses_root");
+        perm.link_parent("ses_impl", "ses_workflow");
+        assert_eq!(perm.mode("ses_impl"), PermissionMode::FullAuto);
+        assert_eq!(perm.mode("ses_workflow"), PermissionMode::FullAuto);
+    }
+
+    #[test]
+    fn child_override_beats_parent() {
+        let perm = Permission::new(Ruleset::new());
+        perm.set_mode("ses_root", PermissionMode::FullAuto);
+        perm.link_parent("ses_child", "ses_root");
+        perm.set_mode("ses_child", PermissionMode::ApproveEach);
+        assert_eq!(perm.mode("ses_child"), PermissionMode::ApproveEach);
+        assert_eq!(perm.mode("ses_root"), PermissionMode::FullAuto);
+    }
+
+    #[tokio::test]
+    async fn mid_run_parent_flip_changes_child_ask() {
+        let perm = Permission::new(Ruleset::new());
+        perm.link_parent("ses_child", "ses_root");
+
+        // Parent flips to full-auto AFTER the link: the child's next ask must
+        // auto-allow (live inheritance, not copy-at-spawn).
+        perm.set_mode("ses_root", PermissionMode::FullAuto);
+        let req = PermissionRequest {
+            permission: "bash".into(),
+            patterns: vec!["cargo test".into()],
+            always: vec![],
+            metadata: serde_json::json!({}),
+        };
+        perm.ask("ses_child", req)
+            .await
+            .expect("child ask auto-allows under parent's full-auto");
+    }
+
+    #[test]
+    fn parent_cycle_does_not_hang() {
+        let perm = Permission::with_mode(Ruleset::new(), PermissionMode::AcceptEdits);
+        perm.link_parent("ses_a", "ses_b");
+        perm.link_parent("ses_b", "ses_a");
+        // Neither has a mode: the walk must terminate at the default.
+        assert_eq!(perm.mode("ses_a"), PermissionMode::AcceptEdits);
     }
 }

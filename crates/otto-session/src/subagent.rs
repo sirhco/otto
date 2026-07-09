@@ -201,6 +201,14 @@ impl SubagentSpawner for SessionSubagentSpawner {
             }
         };
 
+        // Link the child into the permission service's parent chain (both the
+        // fresh-create and task_id-resume paths — a resumed child may predate
+        // the in-memory map) so it inherits the ancestor's permission mode
+        // live. Without this a subagent always fell back to the service
+        // default (approve-each), ignoring e.g. the TUI's full-auto.
+        self.permission
+            .link_parent(&child_session_id, &req.parent_session_id);
+
         // 4. Seed the child session with the prompt as a user message
         //    (task.ts:186-198).
         let user_id = new_message_id();

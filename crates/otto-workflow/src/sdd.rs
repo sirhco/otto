@@ -66,6 +66,15 @@ fn parse_task_heading(line: &str) -> Option<(u32, String)> {
 /// return its `TaskStatus`; default to `NeedsContext` when none parses.
 #[must_use]
 pub fn parse_status(text: &str) -> TaskStatus {
+    try_parse_status(text).unwrap_or(TaskStatus::NeedsContext)
+}
+
+/// Like [`parse_status`], but `None` when the text carries no status marker at
+/// all — letting callers distinguish "reported NEEDS_CONTEXT" from "the turn
+/// ended without reporting anything" (e.g. cut short by a rejected permission
+/// ask).
+#[must_use]
+pub fn try_parse_status(text: &str) -> Option<TaskStatus> {
     #[derive(Deserialize)]
     struct StatusOnly {
         status: TaskStatus,
@@ -86,7 +95,7 @@ pub fn parse_status(text: &str) -> TaskStatus {
         }
         i += 1;
     }
-    found.unwrap_or(TaskStatus::NeedsContext)
+    found
 }
 
 /// Index of the `}` matching the `{` at `open`, honoring nesting AND JSON
@@ -236,11 +245,21 @@ impl SddWorkflow {
         // Parse each implementer status; record to the ledger.
         let mut statuses = Vec::with_capacity(self.tasks.len());
         for (t, res) in self.tasks.iter().zip(results) {
-            let status = match res {
-                Ok(text) => parse_status(&text),
-                Err(_) => TaskStatus::Blocked,
+            // Distinguish "the implementer reported a status" from "its output
+            // had no status marker at all" (typical of a turn cut short by a
+            // rejected permission ask) — the old blanket "implemented" note
+            // made those silent failures look like finished work.
+            let (status, note) = match res {
+                Ok(text) => match try_parse_status(&text) {
+                    Some(s) => (s, "implemented"),
+                    None => (
+                        TaskStatus::NeedsContext,
+                        "no status marker in output (possibly a rejected permission ask ended the turn early)",
+                    ),
+                },
+                Err(_) => (TaskStatus::Blocked, "implementer failed to spawn/run"),
             };
-            ledger.record(t.index, status, "implemented").await?;
+            ledger.record(t.index, status, note).await?;
             // Happy-path tasks proceed into the review loop (which re-emits
             // REVIEWING→DONE), so "IMPLEMENTED" is just a phase marker. A task
             // that BLOCKED or NEEDS_CONTEXT skips the review loop below, making

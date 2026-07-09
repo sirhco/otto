@@ -309,6 +309,68 @@ async fn subagent_spawn_end_to_end() {
     );
 }
 
+// -- 1a. spawned child inherits the parent's permission mode ----------------
+
+#[tokio::test]
+async fn spawned_child_inherits_parent_permission_mode() {
+    let store = Store::open_in_memory().await.expect("store");
+    let parent_id = "ses_parent_mode";
+    seed_session(&store, parent_id, "please delegate").await;
+
+    let (child_route, _) = ScriptedRoute::build(vec![text_turn("c1", "child answer")]);
+    let route_for: RouteFor = {
+        let child_route = child_route.clone();
+        Arc::new(move |_agent: &AgentInfo| (child_route.clone(), model()))
+    };
+
+    // Empty configured ruleset + full-auto set ONLY on the parent session.
+    let permission = Arc::new(Permission::new(Ruleset::new()));
+    permission.set_mode(parent_id, otto_permission::PermissionMode::FullAuto);
+    let tools = registry(vec![Arc::new(otto_tools::TaskTool)]);
+
+    let spawner = SessionSubagentSpawner::new(
+        store.clone(),
+        tools.clone(),
+        permission.clone(),
+        Ruleset::new(),
+        json!({}),
+        route_for,
+        std::env::temp_dir(),
+        "prj_1",
+        "1.0.0",
+        None,
+    );
+
+    let child_result = spawner
+        .spawn(otto_tools::SubagentRequest {
+            parent_session_id: parent_id.to_string(),
+            parent_message_id: "msg_x".into(),
+            subagent_type: "general".into(),
+            description: "d".into(),
+            prompt: "do X".into(),
+            task_id: None,
+            command: None,
+            abort: CancellationToken::new(),
+            event_tx: None,
+        })
+        .await
+        .expect("child spawn");
+    assert!(child_result.contains("child answer"));
+
+    // The spawned child session resolves the parent's full-auto mode via the
+    // parent chain — this is what makes TUI auto-mode reach workflow subagents.
+    let sessions = store.list_sessions().await.expect("sessions");
+    let child = sessions
+        .iter()
+        .find(|s| s.parent_id.as_deref() == Some(parent_id))
+        .expect("a child session");
+    assert_eq!(
+        permission.mode(&child.id),
+        otto_permission::PermissionMode::FullAuto,
+        "child inherits parent's mode live"
+    );
+}
+
 // -- 1b. spawn_many dispatches a batch, preserving order + isolation --------
 
 #[tokio::test]

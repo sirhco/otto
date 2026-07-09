@@ -365,6 +365,12 @@ impl Runtime {
     ) -> Result<String> {
         let id = otto_id::ascending(otto_id::Prefix::Session);
         let now = now_ms();
+        // Link the child into the permission service's parent chain so it
+        // inherits the parent's permission mode live (e.g. a workflow session
+        // under a full-auto TUI chat session).
+        if let Some(parent_id) = &parent {
+            self.permission.link_parent(&id, parent_id);
+        }
         self.store
             .create_session(&Session {
                 id: id.clone(),

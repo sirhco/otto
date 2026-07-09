@@ -440,8 +440,9 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         });
         let client = client.clone();
         let tx = tx.clone();
+        let parent = app.session_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = client.workflow(&kind, &arg).await {
+            if let Err(e) = client.workflow(&kind, &arg, parent.as_deref()).await {
                 let _ = tx.send(Msg::Error(format!("workflow {kind} failed to start: {e}")));
             }
             // Progress + completion arrive on the /event pump (already running).
