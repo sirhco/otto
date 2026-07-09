@@ -208,6 +208,11 @@ impl SubagentSpawner for SessionSubagentSpawner {
         // default (approve-each), ignoring e.g. the TUI's full-auto.
         self.permission
             .link_parent(&child_session_id, &req.parent_session_id);
+        // Enforce the derived child ruleset at the gate — the merged
+        // subagent + parent-derived denies were previously only persisted in
+        // session metadata and never evaluated.
+        self.permission
+            .set_session_ruleset(&child_session_id, child_ruleset.clone());
 
         // 4. Seed the child session with the prompt as a user message
         //    (task.ts:186-198).

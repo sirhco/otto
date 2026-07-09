@@ -371,6 +371,11 @@ impl Runtime {
         if let Some(parent_id) = &parent {
             self.permission.link_parent(&id, parent_id);
         }
+        // Enforce the agent's own ruleset at the gate (metadata alone is not
+        // evaluated): e.g. the plan agent's edit-deny outside `.otto/plans/`
+        // holds even in full-auto.
+        self.permission
+            .set_session_ruleset(&id, agent.permission.clone());
         self.store
             .create_session(&Session {
                 id: id.clone(),
