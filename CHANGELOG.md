@@ -4,6 +4,51 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.3.0] - 2026-07-09
+
+Reliability overhaul: provider retry/streaming robustness against
+OpenAI-compatible gateways (litellm, Ollama, OpenRouter), working workflow
+permission handling, and wrapped-row-accurate TUI scrolling.
+
+### Fixed
+
+- **Zero-event provider streams no longer loop forever.** An OpenAI-compatible
+  gateway (litellm etc.) whose stream carried only unrecognized frames used to
+  trigger an immediate, backoff-free re-request loop (up to 1000 iterations,
+  one empty assistant message each). Empty attempts are now a retryable
+  `EmptyStream` error with normal backoff, Retry events, and the retry cap.
+- **Retries keep completed tool work.** A mid-stream failure after tools had
+  executed no longer purges and re-runs them — the finished step is kept and
+  the turn continues from it (no more repeated re-reading/re-narration).
+- **`otto workflow tdd|sdd|plan` no longer deadlocks silently.** The CLI now
+  installs a permission responder (interactive prompt, or `--auto`/`-y` for
+  full-auto) and prints per-task progress.
+- **TUI transcript scrolling.** Wrapped lines are now measured correctly, so
+  the bottom of the transcript is reachable, follow-mode really follows, and
+  resize no longer hides content; PageUp overscroll no longer deadens
+  PageDown; Enter during an in-flight turn no longer interleaves two streams.
+- **Gateway stream tolerance.** Numeric/bare-string error frames decode,
+  undecodable frames are skipped (retryable failure only when they dominate),
+  `delta.reasoning` (OpenRouter/vLLM) maps to reasoning output, and a stream
+  that ends without `finish_reason` is retried as a truncation instead of
+  silently accepted (accepted-with-warning only after the retry budget).
+
+### Changed
+
+- **Permission mode now inherits down the session chain.** Workflow sessions
+  and subagents resolve the nearest ancestor's mode live — full-auto in the
+  TUI finally applies to sdd/tdd/plan runs; flipping mode mid-run affects
+  in-flight subagents' next ask.
+- **Agent permission rulesets are enforced at the gate.** Previously they were
+  only stored in session metadata: e.g. plan mode could edit any file in
+  full-auto. Precedence (low → high): mode overlay < agent ruleset <
+  user config < in-session `Always` approvals < danger rules. If you relied on
+  full-auto bypassing an agent's deny (plan mode editing outside
+  `.otto/plans/`), adjust the agent's `permission` config instead.
+- New config knobs: `retry.max_attempts` (per step, default 5),
+  `retry.max_total_attempts` (per prompt, default 20),
+  `retry.turn_timeout_seconds` (default off).
+
 ## [0.2.2] - 2026-07-08
 
 ### Changed

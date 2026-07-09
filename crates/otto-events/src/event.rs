@@ -362,6 +362,21 @@ pub enum LLMEvent {
         delay_ms: u64,
         /// The failing error's message (the TUI classifies rate-limit from it).
         message: String,
+        /// `true` when the failed attempt's completed tool work was kept and
+        /// the retry continues from it as a new step (salvage), instead of
+        /// purging and re-streaming the attempt from scratch. A UI must NOT
+        /// roll its transcript back for a salvaged retry.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        salvaged: bool,
+    },
+
+    /// `warning` — the run continued despite a quality concern the user should
+    /// see (e.g. a provider that never sends `finish_reason`, whose response
+    /// was accepted as-is after the retry budget ran out). Informational; the
+    /// turn did not fail.
+    Warning {
+        /// Human-readable description of the concern.
+        message: String,
     },
 }
 
@@ -375,6 +390,7 @@ mod tests {
             attempt: 2,
             max: 5,
             delay_ms: 8000,
+            salvaged: false,
             message: "http error: status 429: rate limit".to_string(),
         };
         let json = serde_json::to_value(&ev).unwrap();
@@ -390,6 +406,7 @@ mod tests {
                     attempt: 2,
                     max: 5,
                     delay_ms: 8000,
+            salvaged: false,
                     ..
                 }
             ),

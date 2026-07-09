@@ -5,39 +5,123 @@
 //! `plan` runs the native [`PlanWorkflow`] engine (plan execution + verification
 //! gate) + renders its ledger (Phase 5).
 
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use otto_app::Runtime;
+use otto_permission::PermissionMode;
 use otto_workflow::{
-    AutoRunner, Claim, Ledger, PlanTask, PlanWorkflow, SddWorkflow, TddWorkflow, WfCtx, Workflow,
-    command_for_claim, parse_plan_tasks,
+    AutoRunner, Claim, Ledger, PlanTask, PlanWorkflow, ProgressSink, SddWorkflow, TddWorkflow,
+    WfCtx, Workflow, command_for_claim, parse_plan_tasks,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::cli::WorkflowCommand;
+use crate::run::{TtyResponder, spawn_permission_pump};
 
 pub async fn cmd_workflow(cwd: &Path, command: WorkflowCommand) -> Result<()> {
     match command {
-        WorkflowCommand::Tdd { feature, dry_run } => {
+        WorkflowCommand::Tdd {
+            feature,
+            dry_run,
+            auto,
+        } => {
             if dry_run {
                 print!("{}", render_tdd_dry_run(&feature));
                 return Ok(());
             }
-            run_tdd(cwd, feature).await
+            run_tdd(cwd, feature, auto).await
         }
-        WorkflowCommand::Sdd { plan, dry_run } => {
+        WorkflowCommand::Sdd {
+            plan,
+            dry_run,
+            auto,
+        } => {
             if dry_run {
                 return dry_run_plan_file("sdd", cwd, &plan);
             }
-            run_sdd(cwd, plan).await
+            run_sdd(cwd, plan, auto).await
         }
-        WorkflowCommand::Plan { plan, dry_run } => {
+        WorkflowCommand::Plan {
+            plan,
+            dry_run,
+            auto,
+        } => {
             if dry_run {
                 return dry_run_plan_file("plan", cwd, &plan);
             }
-            run_plan(cwd, plan).await
+            run_plan(cwd, plan, auto).await
         }
+    }
+}
+
+/// The interactive plumbing every non-dry workflow run needs: a permission
+/// responder (so an `Ask` never deadlocks the process — the engine has no
+/// other way to answer) and a progress printer (so the long dispatch phase is
+/// not silent).
+struct WorkflowHarness {
+    abort: CancellationToken,
+    pump: tokio::task::JoinHandle<()>,
+    printer: tokio::task::JoinHandle<()>,
+    /// Hand this to `WfCtx.progress`.
+    progress: ProgressSink,
+}
+
+impl WorkflowHarness {
+    /// Wire the harness onto `runtime` for the workflow session `session_id`.
+    ///
+    /// With `auto`, the session is put in full-auto permission mode (children
+    /// inherit it via the parent chain) and non-interactive asks are allowed;
+    /// otherwise a TTY prompt answers each ask, and a non-TTY stdin rejects
+    /// with a hint to pass `--auto`.
+    fn install(runtime: &Runtime, session_id: &str, auto: bool) -> Self {
+        if auto {
+            runtime
+                .permission()
+                .set_mode(session_id, PermissionMode::FullAuto);
+        }
+        let abort = CancellationToken::new();
+        let pump = spawn_permission_pump(
+            runtime.permission().clone(),
+            Arc::new(TtyResponder {
+                yes: auto,
+                interactive: std::io::stdin().is_terminal(),
+            }),
+            abort.clone(),
+        );
+        let (progress, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<otto_workflow::WfProgress>();
+        let printer = tokio::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                match p.task_index {
+                    Some(i) => println!("task {i}: {} — {}", p.status, p.detail),
+                    None => println!("{} — {}", p.status, p.detail),
+                }
+            }
+        });
+        Self {
+            abort,
+            pump,
+            printer,
+            progress,
+        }
+    }
+
+    /// Tear the harness down after the engine finishes (drop the ctx first so
+    /// the progress channel closes and the printer drains).
+    async fn teardown(self) {
+        let WorkflowHarness {
+            abort,
+            pump,
+            printer,
+            progress,
+        } = self;
+        drop(progress);
+        let _ = printer.await;
+        abort.cancel();
+        let _ = pump.await;
     }
 }
 
@@ -118,7 +202,7 @@ fn render_dry_run(kind: &str, source: &str, tasks: &[PlanTask], verify: &[Vec<St
 }
 
 /// Drive the native TDD cycle for `feature` against a real [`Runtime`].
-async fn run_tdd(cwd: &Path, feature: String) -> Result<()> {
+async fn run_tdd(cwd: &Path, feature: String, auto: bool) -> Result<()> {
     let runtime = Runtime::load(cwd).await.context("failed to load runtime")?;
     let agent = runtime.default_agent().clone();
     let model = runtime.default_model();
@@ -136,6 +220,7 @@ async fn run_tdd(cwd: &Path, feature: String) -> Result<()> {
         .await
         .context("not a git repository")?,
     );
+    let harness = WorkflowHarness::install(&runtime, &session_id, auto);
     let runner = Arc::new(AutoRunner::new(runtime.directory().to_path_buf()));
     let cx = WfCtx {
         spawner,
@@ -145,16 +230,19 @@ async fn run_tdd(cwd: &Path, feature: String) -> Result<()> {
         directory: runtime.directory().to_path_buf(),
         parent_session_id: session_id,
         permission: std::sync::Arc::new(otto_permission::Ruleset::default()),
-        progress: None,
+        progress: Some(harness.progress.clone()),
         subagent: None,
     };
-    let report = TddWorkflow::new(feature).run(&cx).await?;
+    let result = TddWorkflow::new(feature).run(&cx).await;
+    drop(cx);
+    harness.teardown().await;
+    let report = result?;
     println!("TDD complete: {report:?}");
     Ok(())
 }
 
 /// Drive the native SDD engine over the tasks in `plan_path`.
-async fn run_sdd(cwd: &Path, plan_path: String) -> Result<()> {
+async fn run_sdd(cwd: &Path, plan_path: String, auto: bool) -> Result<()> {
     let md = std::fs::read_to_string(&plan_path)
         .with_context(|| format!("failed to read plan {plan_path}"))?;
     let tasks = parse_plan_tasks(&md);
@@ -180,6 +268,7 @@ async fn run_sdd(cwd: &Path, plan_path: String) -> Result<()> {
         .await
         .context("not a git repository")?,
     );
+    let harness = WorkflowHarness::install(&runtime, &session_id, auto);
     let runner = Arc::new(AutoRunner::new(runtime.directory().to_path_buf()));
     let cx = WfCtx {
         spawner,
@@ -189,10 +278,13 @@ async fn run_sdd(cwd: &Path, plan_path: String) -> Result<()> {
         directory: runtime.directory().to_path_buf(),
         parent_session_id: session_id.clone(),
         permission: std::sync::Arc::new(otto_permission::Ruleset::default()),
-        progress: None,
+        progress: Some(harness.progress.clone()),
         subagent: None,
     };
-    let report = SddWorkflow::new(tasks).run(&cx).await?;
+    let result = SddWorkflow::new(tasks).run(&cx).await;
+    drop(cx);
+    harness.teardown().await;
+    let report = result?;
 
     // Render the ledger.
     let led = Ledger::new(runtime.store().clone(), session_id, "sdd");
@@ -208,7 +300,7 @@ async fn run_sdd(cwd: &Path, plan_path: String) -> Result<()> {
 }
 
 /// Drive the native plan-execution engine over the tasks in `plan_path`.
-async fn run_plan(cwd: &Path, plan_path: String) -> Result<()> {
+async fn run_plan(cwd: &Path, plan_path: String, auto: bool) -> Result<()> {
     let md = std::fs::read_to_string(&plan_path)
         .with_context(|| format!("failed to read plan {plan_path}"))?;
     let tasks = parse_plan_tasks(&md);
@@ -234,6 +326,7 @@ async fn run_plan(cwd: &Path, plan_path: String) -> Result<()> {
         .await
         .context("not a git repository")?,
     );
+    let harness = WorkflowHarness::install(&runtime, &session_id, auto);
     let runner = Arc::new(AutoRunner::new(runtime.directory().to_path_buf()));
     let cx = WfCtx {
         spawner,
@@ -243,10 +336,13 @@ async fn run_plan(cwd: &Path, plan_path: String) -> Result<()> {
         directory: runtime.directory().to_path_buf(),
         parent_session_id: session_id.clone(),
         permission: std::sync::Arc::new(otto_permission::Ruleset::default()),
-        progress: None,
+        progress: Some(harness.progress.clone()),
         subagent: None,
     };
-    let report = PlanWorkflow::new(tasks).run(&cx).await?;
+    let result = PlanWorkflow::new(tasks).run(&cx).await;
+    drop(cx);
+    harness.teardown().await;
+    let report = result?;
 
     // Render the ledger.
     let led = Ledger::new(runtime.store().clone(), session_id, "plan");

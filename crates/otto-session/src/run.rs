@@ -45,6 +45,11 @@ pub const DEFAULT_PRESERVE_RECENT_TOKENS: u64 = 20_000;
 pub const DEFAULT_COMPACTION_RESERVED: u64 = 20_000;
 /// Default cap on per-turn retries of a retryable provider failure.
 pub const DEFAULT_MAX_RETRIES: u32 = 5;
+/// Default cap on retries across the *whole prompt* (all steps combined). The
+/// per-step budget ([`DEFAULT_MAX_RETRIES`]) resets on every successful step,
+/// so a long multi-step turn against a flaky provider could otherwise retry
+/// indefinitely; this bounds the total.
+pub const DEFAULT_MAX_TOTAL_RETRIES: u32 = 20;
 
 /// Assistant-role prompt injected on the final allowed step to force a
 /// text-only wrap-up (`prompt.ts:1280`, text from `session/runner/max-steps.ts`).
@@ -97,9 +102,17 @@ pub struct RunConfig {
     /// Whether the auto-compaction pre-check runs (`cfg.compaction.auto`,
     /// `overflow.ts:28`; `prompt.ts:1161`). Defaults to `true`.
     pub auto_compact: bool,
+    /// Trailing tool-output token budget protected from post-turn pruning
+    /// ([`compaction::prune`]). See [`compaction::PRUNE_PROTECT`] for the
+    /// default; config knob `compaction.prune_protect_tokens`.
+    pub prune_protect_tokens: u64,
     /// Cap on per-turn retries of a retryable provider failure
     /// ([`retry::with_retry`]). See [`DEFAULT_MAX_RETRIES`].
     pub max_retries: u32,
+    /// Cap on retries summed across all steps of one prompt. The per-step
+    /// `max_retries` budget resets after each successful step; this bounds the
+    /// run as a whole. See [`DEFAULT_MAX_TOTAL_RETRIES`].
+    pub max_total_retries: u32,
     /// Optional live event tap. When `Some`, a clone of every
     /// [`otto_events::LLMEvent`] flowing through the tool-augmented stream into
     /// the [`Processor`] is forwarded on this channel *without* disturbing the
@@ -307,6 +320,116 @@ async fn finalize_interrupted(
     Ok(())
 }
 
+/// Salvage a failed attempt that already executed tools: keep its completed
+/// tool parts (and streamed narration), drop only the incomplete
+/// pending/running tool parts (they never executed — the model will re-issue
+/// them), and finalize the assistant as a normal `tool-calls` step. The next
+/// outer-loop iteration re-reads history, where `convert` lowers the completed
+/// tool parts into tool results — so the retried request naturally contains
+/// the finished work instead of re-running every read from scratch.
+///
+/// Returns `false` (caller falls back to the purge-and-replay retry) when the
+/// attempt completed no tool work. Provider-executed tools are not counted:
+/// their results live provider-side and a replay is required anyway.
+async fn salvage_completed_tools(
+    store: &Store,
+    session_id: &str,
+    assistant_id: &str,
+) -> Result<bool, StorageError> {
+    let parts = store.list_parts(assistant_id).await?;
+    let mut completed = 0usize;
+    let mut incomplete: Vec<String> = Vec::new();
+    for part in &parts {
+        let PartKind::Tool {
+            metadata, state, ..
+        } = &part.kind
+        else {
+            continue;
+        };
+        let provider_executed = metadata
+            .as_ref()
+            .and_then(|m| m.get("providerExecuted"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        match state {
+            ToolState::Completed { .. } if !provider_executed => completed += 1,
+            ToolState::Pending { .. } | ToolState::Running { .. } => {
+                incomplete.push(part.id.clone());
+            }
+            _ => {}
+        }
+    }
+    if completed == 0 {
+        return Ok(false);
+    }
+    for id in incomplete {
+        store.delete_part(&id).await?;
+    }
+    let Some(mut info) = store.get_message(session_id, assistant_id).await? else {
+        return Ok(false);
+    };
+    if let InfoBody::Assistant(a) = &mut info.body {
+        if a.time.completed.is_none() {
+            a.time.completed = Some(now_ms());
+        }
+        a.finish = Some("tool-calls".to_string());
+        a.error = None;
+        store.update_message(&info).await?;
+    }
+    Ok(true)
+}
+
+/// Accept a truncated assistant response (stream ended without a terminal
+/// finish on every attempt): stamp `time.completed` and a `finish = "unknown"`
+/// so the exit condition sees a terminal turn. The streamed parts are kept.
+async fn finalize_truncated(
+    store: &Store,
+    session_id: &str,
+    assistant_id: &str,
+) -> Result<(), StorageError> {
+    let Some(mut info) = store.get_message(session_id, assistant_id).await? else {
+        return Ok(());
+    };
+    if let InfoBody::Assistant(a) = &mut info.body {
+        if a.time.completed.is_none() {
+            a.time.completed = Some(now_ms());
+        }
+        if a.finish.is_none() {
+            a.finish = Some("unknown".to_string());
+        }
+        store.update_message(&info).await?;
+    }
+    Ok(())
+}
+
+/// Mark an assistant message failed after retry exhaustion (or a non-retryable
+/// provider error): stamp `time.completed` and record the provider error so
+/// the turn never leaves an unfinalized message behind. Companion to
+/// [`finalize_interrupted`], which handles the abort path.
+async fn finalize_failed(
+    store: &Store,
+    session_id: &str,
+    assistant_id: &str,
+    err: &otto_llm::LLMError,
+) -> Result<(), StorageError> {
+    let Some(mut info) = store.get_message(session_id, assistant_id).await? else {
+        return Ok(());
+    };
+    if let InfoBody::Assistant(a) = &mut info.body {
+        if a.time.completed.is_none() {
+            a.time.completed = Some(now_ms());
+        }
+        if a.error.is_none() {
+            a.error = Some(AssistantError::UnknownError {
+                message: err.to_string(),
+                r#ref: None,
+            });
+        }
+        store.update_message(&info).await?;
+    }
+    Ok(())
+}
+
 /// Resolve the message returned by [`run_loop`] — the newest assistant message,
 /// else the newest message (`prompt.ts:1073-1079`, `lastAssistant`).
 async fn last_assistant(store: &Store, session_id: &str) -> Result<Info, RunError> {
@@ -340,6 +463,10 @@ async fn last_assistant(store: &Store, session_id: &str) -> Result<Info, RunErro
 pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunError> {
     let mut step: u32 = 0;
     let mut iterations: u32 = 0;
+    // Retries summed across every step of this prompt. The per-step `attempt`
+    // counter resets each step; without this a flaky provider on a long
+    // multi-step turn gets a fresh 5-attempt budget every step, forever.
+    let mut total_retries: u32 = 0;
 
     loop {
         iterations += 1;
@@ -514,16 +641,54 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         break ProcessOutcome::Stop;
                     }
                     attempt += 1;
-                    if attempt >= cfg.max_retries || !retry::retryable(&err, &provider.0) {
+                    total_retries += 1;
+                    let exhausted =
+                        attempt >= cfg.max_retries || total_retries >= cfg.max_total_retries;
+                    if exhausted || !retry::retryable(&err, &provider.0) {
+                        // A provider that chronically omits `finish_reason`
+                        // (some OpenAI-compatible gateways) truncates every
+                        // attempt the same way. Once the budget is spent,
+                        // accept the streamed content with a warning instead
+                        // of failing the turn — the parts are intact because
+                        // the purge only runs at the top of the NEXT attempt.
+                        if exhausted && matches!(err, otto_llm::LLMError::NoTerminalFinish) {
+                            finalize_truncated(&cfg.store, session_id, &assistant_id).await?;
+                            if let Some(tx) = &cfg.event_tx {
+                                let _ = tx.send(otto_events::LLMEvent::Warning {
+                                    message: format!(
+                                        "provider stream ended without finish_reason on all {attempt} attempts; accepting the response as-is"
+                                    ),
+                                });
+                            }
+                            break ProcessOutcome::Continue;
+                        }
+                        // Stamp the failure on the assistant message before
+                        // propagating so the turn never leaves an unfinalized
+                        // message behind (mirrors `finalize_interrupted`).
+                        finalize_failed(&cfg.store, session_id, &assistant_id, &err).await?;
                         return Err(ProcessorError::Llm(err).into());
                     }
+                    // Salvage before retrying: when the failed attempt already
+                    // executed tools, keep that work as a finished tool-call
+                    // step and continue the outer loop from it — instead of
+                    // the purge-and-replay path, which forgets the executed
+                    // tools and makes the model re-run the same reads and
+                    // re-narrate on every retry.
+                    let salvaged =
+                        salvage_completed_tools(&cfg.store, session_id, &assistant_id).await?;
                     let wait = retry::delay(attempt, err.retry_after());
                     if let Some(tx) = &cfg.event_tx {
+                        let message = if salvaged {
+                            format!("{err} — resuming with completed tool calls kept")
+                        } else {
+                            err.to_string()
+                        };
                         let _ = tx.send(otto_events::LLMEvent::Retry {
                             attempt,
                             max: cfg.max_retries,
                             delay_ms: wait.as_millis() as u64,
-                            message: err.to_string(),
+                            message,
+                            salvaged,
                         });
                     }
                     tokio::select! {
@@ -531,6 +696,11 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         // Abort during backoff → graceful interrupt, not a
                         // surfaced error (same rationale as the arm-top check).
                         () = cfg.abort.cancelled() => break ProcessOutcome::Stop,
+                    }
+                    if salvaged {
+                        // The step is finalized as `tool-calls`; the outer loop
+                        // re-reads history and continues from the kept work.
+                        break ProcessOutcome::Continue;
                     }
                 }
                 Err(other) => return Err(other.into()),

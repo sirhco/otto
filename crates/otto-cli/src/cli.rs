@@ -263,6 +263,10 @@ pub enum WorkflowCommand {
         /// working tree untouched.
         #[arg(long)]
         dry_run: bool,
+        /// Full-auto permission mode: subagent tool calls run without
+        /// prompting (dangerous patterns still ask).
+        #[arg(long, short = 'y')]
+        auto: bool,
     },
     /// Native subagent-driven-development orchestration (Phase 4).
     Sdd {
@@ -273,6 +277,10 @@ pub enum WorkflowCommand {
         /// subagents, leave the working tree untouched.
         #[arg(long)]
         dry_run: bool,
+        /// Full-auto permission mode: subagent tool calls run without
+        /// prompting (dangerous patterns still ask).
+        #[arg(long, short = 'y')]
+        auto: bool,
     },
     /// Plan-execution + verification gate (Phase 5).
     Plan {
@@ -283,6 +291,10 @@ pub enum WorkflowCommand {
         /// verification commands, dispatch no subagents, leave the tree untouched.
         #[arg(long)]
         dry_run: bool,
+        /// Full-auto permission mode: subagent tool calls run without
+        /// prompting (dangerous patterns still ask).
+        #[arg(long, short = 'y')]
+        auto: bool,
     },
 }
 
@@ -308,9 +320,14 @@ mod workflow_cli_tests {
             Cli::try_parse_from(["otto", "workflow", "tdd", "--feature", "add(a,b)"]).unwrap();
         match cli.command {
             Commands::Workflow(a) => match a.command {
-                WorkflowCommand::Tdd { feature, dry_run } => {
+                WorkflowCommand::Tdd {
+                    feature,
+                    dry_run,
+                    auto,
+                } => {
                     assert_eq!(feature, "add(a,b)");
                     assert!(!dry_run);
+                    assert!(!auto);
                 }
                 _ => panic!("expected Tdd"),
             },
@@ -323,9 +340,14 @@ mod workflow_cli_tests {
         let sdd = Cli::try_parse_from(["otto", "workflow", "sdd", "--plan", "p.md"]).unwrap();
         match sdd.command {
             Commands::Workflow(a) => match a.command {
-                WorkflowCommand::Sdd { plan, dry_run } => {
+                WorkflowCommand::Sdd {
+                    plan,
+                    dry_run,
+                    auto,
+                } => {
                     assert_eq!(plan, "p.md");
                     assert!(!dry_run);
+                    assert!(!auto);
                 }
                 _ => panic!("expected Sdd"),
             },
@@ -338,9 +360,14 @@ mod workflow_cli_tests {
         let cli = Cli::try_parse_from(["otto", "workflow", "plan", "--plan", "p.md"]).unwrap();
         match cli.command {
             Commands::Workflow(a) => match a.command {
-                WorkflowCommand::Plan { plan, dry_run } => {
+                WorkflowCommand::Plan {
+                    plan,
+                    dry_run,
+                    auto,
+                } => {
                     assert_eq!(plan, "p.md");
                     assert!(!dry_run);
+                    assert!(!auto);
                 }
                 _ => panic!("expected Plan"),
             },
@@ -364,5 +391,40 @@ mod workflow_cli_tests {
     #[test]
     fn rejects_unknown_workflow_kind() {
         assert!(Cli::try_parse_from(["otto", "workflow", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn workflow_auto_flag_parses_long_and_short() {
+        for args in [
+            vec!["otto", "workflow", "sdd", "--plan", "p.md", "--auto"],
+            vec!["otto", "workflow", "sdd", "--plan", "p.md", "-y"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            match cli.command {
+                Commands::Workflow(a) => match a.command {
+                    WorkflowCommand::Sdd { auto, .. } => assert!(auto),
+                    _ => panic!("expected Sdd"),
+                },
+                _ => panic!("expected Workflow"),
+            }
+        }
+        let tdd =
+            Cli::try_parse_from(["otto", "workflow", "tdd", "--feature", "f", "--auto"]).unwrap();
+        match tdd.command {
+            Commands::Workflow(a) => match a.command {
+                WorkflowCommand::Tdd { auto, .. } => assert!(auto),
+                _ => panic!("expected Tdd"),
+            },
+            _ => panic!("expected Workflow"),
+        }
+        let plan =
+            Cli::try_parse_from(["otto", "workflow", "plan", "--plan", "p.md", "-y"]).unwrap();
+        match plan.command {
+            Commands::Workflow(a) => match a.command {
+                WorkflowCommand::Plan { auto, .. } => assert!(auto),
+                _ => panic!("expected Plan"),
+            },
+            _ => panic!("expected Workflow"),
+        }
     }
 }

@@ -483,3 +483,63 @@ async fn deny_ruleset_blocks_a_tool() {
         other => panic!("expected denied guard error, got {other:?}"),
     }
 }
+
+// -- turn timeout --------------------------------------------------------------
+
+/// A [`Route`] whose stream never yields — the shape of a provider that
+/// accepts the request and then hangs forever.
+struct HangingRoute;
+impl Route for HangingRoute {
+    fn id(&self) -> &str {
+        "hanging"
+    }
+    fn stream(&self, _req: LLMRequest) -> BoxStream<'static, Result<LLMEvent, LLMError>> {
+        stream::pending().boxed()
+    }
+}
+
+struct HangingRouteFactory;
+impl otto_app::RouteFactory for HangingRouteFactory {
+    fn route_for(&self, _m: &ModelRef) -> AppResult<(Arc<dyn Route>, Model)> {
+        Ok((
+            Arc::new(HangingRoute),
+            Model::new("anthropic", "claude-3", "route_hanging"),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn turn_timeout_aborts_a_hung_run() {
+    // `retry.turn_timeout_seconds = 1`: the watchdog must cancel the run's
+    // abort token, ending the turn through the graceful-interrupt path
+    // instead of hanging forever on a silent provider.
+    let config = Config {
+        retry: Some(otto_config::Retry {
+            turn_timeout_seconds: Some(1),
+            ..otto_config::Retry::default()
+        }),
+        ..Config::default()
+    };
+    let rt = Runtime::in_memory(config)
+        .await
+        .expect("runtime")
+        .with_route_factory(Arc::new(HangingRouteFactory));
+
+    let agent = rt.default_agent().clone();
+    let model = rt.default_model();
+    let session = rt
+        .create_session("Timeout", &agent, None)
+        .await
+        .expect("session");
+
+    let handle = rt.run(&session, "hang", &agent, &model, CancellationToken::new());
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(10), handle.join)
+        .await
+        .expect("run must end well before 10s — the 1s turn timeout fires");
+    let info = joined.expect("join").expect("graceful interrupt, not an error");
+    let a = info.as_assistant().expect("assistant");
+    assert!(
+        a.time.completed.is_some(),
+        "aborted assistant is finalized"
+    );
+}

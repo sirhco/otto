@@ -435,6 +435,14 @@ impl App {
                     }
                     return None;
                 }
+                // One prompt stream at a time: submitting mid-turn would spawn
+                // a second concurrent SSE stream whose deltas interleave into
+                // the same transcript (garbled/duplicated blocks). Keep the
+                // typed text in the editor and tell the user why.
+                if self.turn_in_flight() {
+                    self.flash("turn in flight — Esc to interrupt it first");
+                    return None;
+                }
                 Some(Msg::Submitted(self.input.take()))
             }
             // Esc while a turn is streaming interrupts it (keeps the session).

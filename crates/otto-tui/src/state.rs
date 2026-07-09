@@ -302,7 +302,10 @@ pub struct App {
     pub model: Option<String>,
     pub status: String,
     pub should_quit: bool,
-    pub scroll: u16,
+    /// Lines-from-bottom scroll position in WRAPPED rows (0 = follow). u32:
+    /// long sessions exceed u16 rows; the render slices the line list so the
+    /// widget-level u16 scroll offset never overflows.
+    pub scroll: u32,
     /// Selected tool row for per-row expand, as an index into `transcript`.
     /// `None` = no selection (normal follow/scroll). See `select_*_tool`.
     pub(crate) tool_cursor: Option<usize>,
@@ -346,6 +349,11 @@ pub struct App {
     /// Memoized transcript render, keyed by `render_gen` + render width.
     /// `RefCell` because `view::transcript` only holds `&App`.
     pub line_cache: std::cell::RefCell<Option<LineCache>>,
+    /// The scroll bound (`wrap_total - viewport height`) published by the last
+    /// transcript render, so `scroll_up` can clamp instead of building
+    /// invisible overscroll debt. `Cell` because `view::transcript` only holds
+    /// `&App` (same pattern as `line_cache`).
+    pub last_scroll_max: std::cell::Cell<u32>,
     /// Startup splash: ticks remaining before it auto-dismisses (`Some(n)` while
     /// showing, `None` once dismissed). Set at launch by `run`, decremented each
     /// `Msg::Tick`, and cleared immediately by any keypress (`on_key`).
@@ -420,10 +428,17 @@ pub struct LineCache {
     pub(crate) r#gen: u64,
     pub(crate) width: u16,
     pub(crate) lines: Vec<ratatui::text::Line<'static>>,
-    pub(crate) wrap_total: u16,
+    /// Total WRAPPED rows at `width` (u32: long sessions exceed u16 rows).
+    pub(crate) wrap_total: u32,
     /// Assembled-line index at which each `transcript[i]` begins. Content-derived
     /// (same key as `lines`), used to highlight + center the selected tool row.
     pub(crate) item_line_starts: Vec<usize>,
+    /// Wrapped-row index at which each assembled line begins (prefix sums of
+    /// per-line wrap counts; `line_wrap_starts.len() == lines.len()`). Maps
+    /// logical line indices (search matches, item starts) to viewport rows,
+    /// and lets the render slice the line list so `Paragraph::scroll`'s u16
+    /// offset never overflows.
+    pub(crate) line_wrap_starts: Vec<u32>,
     /// Per-item render memo: a rebuild re-renders only items whose fingerprint
     /// changed (during streaming that's just the open block), so cost per delta
     /// is O(open item), not O(whole transcript).
@@ -439,8 +454,9 @@ pub(crate) struct ItemCacheEntry {
     pub(crate) fingerprint: u64,
     /// The item's assembled lines.
     pub(crate) lines: std::sync::Arc<Vec<ratatui::text::Line<'static>>>,
-    /// The item's wrapped line count at the cache's width.
-    pub(crate) wrap: u16,
+    /// Per assembled line, its wrapped row count at the cache's width. The
+    /// item's total is their sum (accumulated into `LineCache::wrap_total`).
+    pub(crate) line_wraps: std::sync::Arc<Vec<u16>>,
 }
 
 /// A transient, auto-fading status confirmation ("copied", "attached", "sent").
@@ -493,6 +509,7 @@ impl App {
             theme: crate::theme::Theme::dark(),
             render_gen: 0,
             line_cache: std::cell::RefCell::new(None),
+            last_scroll_max: std::cell::Cell::new(0),
             splash: None,
             workflow: None,
             permission_mode: "approve-each".to_string(),
@@ -1255,7 +1272,18 @@ impl App {
                 if let Some(r) = &self.retry {
                     let remaining_ticks = r.expires_tick.saturating_sub(self.tick);
                     if remaining_ticks == 0 {
-                        self.status = format!("{} (now)", r.prefix);
+                        // Backoff elapsed but the next attempt hasn't emitted
+                        // an event yet — count UP so a hung reconnect reads as
+                        // "still trying for Ns", not a frozen "(now)".
+                        let overdue = self
+                            .tick
+                            .wrapping_sub(r.expires_tick)
+                            .div_ceil(crate::view::TICKS_PER_SEC.max(1));
+                        if overdue == 0 {
+                            self.status = format!("{} (now)", r.prefix);
+                        } else {
+                            self.status = format!("{} (now +{overdue}s)", r.prefix);
+                        }
                     } else {
                         let secs = remaining_ticks.div_ceil(crate::view::TICKS_PER_SEC);
                         self.status = format!("{} ({secs}s)", r.prefix);
@@ -1300,12 +1328,16 @@ impl App {
         })
     }
 
-    /// Scroll `n` lines toward older content (away from the bottom).
-    pub fn scroll_up(&mut self, n: u16) {
-        self.scroll = self.scroll.saturating_add(n);
+    /// Scroll `n` lines toward older content (away from the bottom), clamped
+    /// to the last rendered scroll bound so PageDown always has visible effect.
+    pub fn scroll_up(&mut self, n: u32) {
+        self.scroll = self
+            .scroll
+            .saturating_add(n)
+            .min(self.last_scroll_max.get());
     }
     /// Scroll `n` lines toward the newest content; 0 = following.
-    pub fn scroll_down(&mut self, n: u16) {
+    pub fn scroll_down(&mut self, n: u32) {
         self.scroll = self.scroll.saturating_sub(n);
     }
     pub fn scroll_to_bottom(&mut self) {
@@ -1547,6 +1579,7 @@ impl App {
                 max,
                 delay_ms,
                 message,
+                salvaged,
             } => {
                 let secs = delay_ms.div_ceil(1000);
                 let label = if is_rate_limit(&message) {
@@ -1564,16 +1597,32 @@ impl App {
                     prefix,
                     expires_tick: self.tick.wrapping_add(wait_ticks),
                 });
-                // The server purged this attempt's parts and will re-stream
-                // the message from scratch — roll the transcript back so the
-                // partial attempt doesn't remain as an orphaned duplicate.
-                if let Some(i) = self.msg_start.take() {
+                if salvaged {
+                    // The failed attempt's completed tool work was KEPT
+                    // server-side and the retry continues from it as a new
+                    // step — the rendered rows are real; do not roll back.
+                    self.msg_start = None;
+                    self.open_text = None;
+                    self.open_reasoning = None;
+                } else if let Some(i) = self.msg_start.take() {
+                    // The server purged this attempt's parts and will
+                    // re-stream the message from scratch — roll the transcript
+                    // back so the partial attempt doesn't remain as an
+                    // orphaned duplicate.
                     self.transcript.truncate(i);
                     self.running_tools.retain(|(_, idx)| *idx < i);
                     self.open_text = None;
                     self.open_reasoning = None;
                     self.bump_render();
                 }
+            }
+            LLMEvent::Warning { message } => {
+                // Non-fatal quality concern (e.g. a response accepted without
+                // finish_reason after retries) — keep it in the scrollback as
+                // a dim system line, not an error.
+                self.transcript
+                    .push(TranscriptItem::Workflow(format!("⚠ {message}")));
+                self.bump_render();
             }
             _ => {}
         }
@@ -1712,6 +1761,11 @@ impl App {
         self.transcript.clear();
         self.running_tools.clear();
         self.msg_start = None;
+        // The open streaming indices point into the transcript we just
+        // cleared; left stale, a reconcile racing a live stream makes the
+        // next delta append into an arbitrary historical item.
+        self.open_text = None;
+        self.open_reasoning = None;
         self.todos = Vec::new();
         self.todos_collapsed = false;
         for row in &rows {
@@ -2244,6 +2298,70 @@ mod tests {
         let g0 = app.render_gen;
         app.update(Msg::Server(td("hi"))); // a streaming text delta
         assert_ne!(app.render_gen, g0, "assembling content changed");
+    }
+
+    /// A history reconcile racing a live stream: the reload must reset the
+    /// open streaming indices, or the next delta appends into an arbitrary
+    /// historical item of the rebuilt transcript.
+    #[test]
+    fn history_reload_resets_open_stream_blocks() {
+        let mut app = App::new();
+        app.update(Msg::Server(td("streamed before reconcile")));
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptItem::Assistant(_))
+        ));
+
+        // Reconcile: history arrives with two finished rows.
+        let rows = vec![
+            serde_json::json!({
+                "info": { "role": "user" },
+                "parts": [{ "type": "text", "text": "old user msg" }]
+            }),
+            serde_json::json!({
+                "info": { "role": "assistant" },
+                "parts": [{ "type": "text", "text": "old answer" }]
+            }),
+        ];
+        app.update(Msg::HistoryLoaded(rows));
+        let len_after_reload = app.transcript.len();
+
+        // The next delta must open a NEW item, not mutate a historical one.
+        app.update(Msg::Server(td("fresh delta")));
+        assert_eq!(app.transcript.len(), len_after_reload + 1);
+        match app.transcript.last() {
+            Some(TranscriptItem::Assistant(s)) => assert_eq!(s, "fresh delta"),
+            other => panic!("expected a fresh assistant item, got {other:?}"),
+        }
+        match &app.transcript[len_after_reload - 1] {
+            TranscriptItem::Assistant(s) => {
+                assert_eq!(s, "old answer", "historical item untouched");
+            }
+            other => panic!("unexpected reloaded item {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_mid_turn_keeps_input_and_flashes() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.session_id = Some("ses_1".into());
+        app.status = "thinking".into(); // turn_in_flight() == true
+        for c in "queued while busy".chars() {
+            app.input.insert(c);
+        }
+        let msg = app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(msg.is_none(), "no second concurrent prompt stream");
+        assert!(
+            !app.input.is_empty(),
+            "typed text stays in the editor for after the turn"
+        );
+        assert!(app.flash.is_some(), "the user is told why nothing happened");
+
+        // Once the turn ends, the same Enter submits.
+        app.status = "ready".into();
+        let msg = app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(msg, Some(Msg::Submitted(_))));
     }
 
     #[test]
@@ -2886,6 +3004,7 @@ mod tests {
     #[test]
     fn scroll_up_moves_away_from_bottom() {
         let mut app = App::new();
+        app.last_scroll_max.set(100); // as published by a render
         assert!(app.is_following()); // scroll == 0
         app.scroll_up(3);
         assert_eq!(app.scroll, 3);
@@ -2895,6 +3014,7 @@ mod tests {
     #[test]
     fn scroll_down_returns_to_follow() {
         let mut app = App::new();
+        app.last_scroll_max.set(100);
         app.scroll_up(5);
         app.scroll_down(2);
         assert_eq!(app.scroll, 3);
@@ -2904,8 +3024,32 @@ mod tests {
     }
 
     #[test]
+    fn scroll_up_clamps_to_last_rendered_max() {
+        let mut app = App::new();
+        app.last_scroll_max.set(7);
+        // Holding PageUp past the top must not build overscroll debt that
+        // PageDown then silently unwinds.
+        for _ in 0..10 {
+            app.scroll_up(3);
+        }
+        assert_eq!(app.scroll, 7, "clamped at the rendered max");
+        app.scroll_down(3);
+        assert_eq!(app.scroll, 4, "PageDown moves immediately");
+    }
+
+    #[test]
+    fn scroll_up_with_no_render_yet_is_inert() {
+        let mut app = App::new();
+        // Nothing rendered yet (last_scroll_max == 0): nothing to scroll to.
+        app.scroll_up(3);
+        assert_eq!(app.scroll, 0);
+        assert!(app.is_following());
+    }
+
+    #[test]
     fn scroll_to_bottom_follows() {
         let mut app = App::new();
+        app.last_scroll_max.set(100);
         app.scroll_up(4);
         app.scroll_to_bottom();
         assert_eq!(app.scroll, 0);
@@ -3565,6 +3709,7 @@ mod tests {
             attempt: 2,
             max: 5,
             delay_ms: 8000,
+            salvaged: false,
             message: "http error: status 429: rate limit".into(),
         });
         assert_eq!(app.status, "rate-limited — retrying 2/5 (8s)");
@@ -3578,6 +3723,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 2000,
+            salvaged: false,
             message: "transport error: connection reset".into(),
         });
         assert_eq!(app.status, "retrying 1/5 (2s)");
@@ -3673,6 +3819,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 2000,
+            salvaged: false,
             message: "connection reset".into(),
         });
         // …and attempt 2 re-streams the message from scratch.
@@ -3712,6 +3859,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 4000,
+            salvaged: false,
             message: "http error: status 429: rate limit".into(),
         });
         assert!(app.status.ends_with("(4s)"), "initial: {}", app.status);
@@ -3725,13 +3873,24 @@ mod tests {
             "status must count down live, got {:?}",
             app.status
         );
-        // Draining the rest of the wait reaches the terminal "now" form.
+        // Draining the rest of the wait reaches the expiry, then counts UP —
+        // a hung reconnect must read as "still trying for Ns", not a frozen
+        // "(now)".
         for _ in 0..40 {
             app.update(Msg::Tick);
         }
         assert!(
-            app.status.ends_with("(now)"),
-            "exhausted countdown shows (now), got {:?}",
+            app.status.ends_with("(now +2s)"),
+            "overdue countdown counts up, got {:?}",
+            app.status
+        );
+        assert!(app.is_busy(), "overdue retry still animates the spinner");
+        for _ in 0..8 {
+            app.update(Msg::Tick);
+        }
+        assert!(
+            app.status.ends_with("(now +3s)"),
+            "keeps counting up, got {:?}",
             app.status
         );
     }
@@ -3743,6 +3902,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 8000,
+            salvaged: false,
             message: "overloaded".into(),
         });
         app.update(Msg::PromptEnded);
@@ -3763,6 +3923,7 @@ mod tests {
             attempt: 1,
             max: 5,
             delay_ms: 4000,
+            salvaged: false,
             message: "overloaded".into(),
         });
         // The retried attempt starts streaming: the countdown must stop

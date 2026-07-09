@@ -83,31 +83,12 @@ pub async fn run_session<W: Write + Send>(
     };
 
     // Answer permission asks off-thread. Subscribe *before* the run so no ask
-    // is missed. Each ask is resolved on a blocking thread (the TTY responder
-    // reads stdin), so asks are handled one at a time.
-    let permission = runtime.permission().clone();
-    let mut asks = permission.subscribe();
-    let responder = responder.clone();
-    let perm_abort = abort.clone();
-    let perm_task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                () = perm_abort.cancelled() => break,
-                received = asks.recv() => match received {
-                    Ok(asked) => {
-                        let request_id = asked.request_id.clone();
-                        let responder = responder.clone();
-                        let reply = tokio::task::spawn_blocking(move || responder.respond(&asked))
-                            .await
-                            .unwrap_or(Reply::Reject { message: None });
-                        permission.reply(&request_id, reply);
-                    }
-                    Err(RecvError::Closed) => break,
-                    Err(RecvError::Lagged(_)) => continue,
-                },
-            }
-        }
-    });
+    // is missed.
+    let perm_task = spawn_permission_pump(
+        runtime.permission().clone(),
+        responder.clone(),
+        abort.clone(),
+    );
 
     // Drive the turn and render the live event stream.
     let RunHandle { mut events, join } =
@@ -128,6 +109,41 @@ pub async fn run_session<W: Write + Send>(
         Ok(Err(run_err)) => Err(anyhow::anyhow!(run_err.to_string())).context("run failed"),
         Err(join_err) => bail!("run task panicked: {join_err}"),
     }
+}
+
+/// Spawn the background task that answers permission [`Asked`] events via
+/// `responder` until `abort` is cancelled or the service closes.
+///
+/// Subscribes **before** returning so no ask published after this call can be
+/// missed; each ask is resolved on a blocking thread (the TTY responder reads
+/// stdin), so asks are handled one at a time. Every driver that runs a session
+/// or workflow in-process must install one of these — without it the first
+/// `Ask`-mode tool call blocks its oneshot forever and the run silently hangs.
+pub fn spawn_permission_pump(
+    permission: Arc<otto_permission::Permission>,
+    responder: Arc<dyn PermissionResponder>,
+    abort: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let mut asks = permission.subscribe();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = abort.cancelled() => break,
+                received = asks.recv() => match received {
+                    Ok(asked) => {
+                        let request_id = asked.request_id.clone();
+                        let responder = responder.clone();
+                        let reply = tokio::task::spawn_blocking(move || responder.respond(&asked))
+                            .await
+                            .unwrap_or(Reply::Reject { message: None });
+                        permission.reply(&request_id, reply);
+                    }
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(_)) => continue,
+                },
+            }
+        }
+    })
 }
 
 /// A short session title derived from the first line of the prompt.

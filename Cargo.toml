@@ -23,7 +23,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.2.2"
+version = "0.3.0"
 license = "Apache-2.0"
 repository = "https://github.com/sirhco/otto"
 rust-version = "1.95"
@@ -37,6 +37,7 @@ rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures = "0.3"
 async-stream = "0.3"
+tracing = "0.1"
 bytes = "1"
 otto-events = { path = "crates/otto-events" }
 otto-id = { path = "crates/otto-id" }

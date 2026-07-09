@@ -233,7 +233,9 @@ fn config(
         preserve_recent_tokens: 20_000,
         compaction_reserved: 20_000,
         auto_compact: true,
+        prune_protect_tokens: 40_000,
         max_retries: 5,
+        max_total_retries: 20,
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
@@ -675,6 +677,346 @@ async fn non_retryable_error_emits_no_retry_event() {
         }
     }
     assert!(!saw_retry, "a non-retryable failure must not emit Retry");
+}
+
+// NOTE: not `start_paused` — see `retry_emits_retry_event_before_backoff`.
+// `max_retries: 2` keeps the single real backoff sleep at ~4s.
+#[tokio::test]
+async fn empty_stream_retries_with_backoff_then_errors() {
+    let (store, _user) = seed("hi").await;
+
+    // Every `stream()` call yields zero events: the shape of an
+    // OpenAI-compatible gateway emitting only unrecognized frames. Before the
+    // EmptyStream fix this looped to the 1000-iteration cap with no backoff,
+    // inserting a fresh empty assistant message per pass.
+    let (route, calls) = ScriptedRoute::build(vec![]);
+    let mut cfg = config(
+        store.clone(),
+        route,
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    cfg.max_retries = 2;
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
+    cfg.event_tx = Some(event_tx);
+
+    let result = run_loop(&cfg, SES).await;
+    assert!(result.is_err(), "an always-empty stream must fail the run");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "initial attempt + 1 retry under max_retries=2, not 1000 iterations"
+    );
+
+    drop(cfg);
+    let mut saw_retry = false;
+    while let Some(ev) = event_rx.recv().await {
+        if matches!(ev, LLMEvent::Retry { .. }) {
+            saw_retry = true;
+        }
+    }
+    assert!(saw_retry, "empty attempts must surface Retry events");
+
+    // Exactly one assistant message (retries reuse the id — no pile-up), and
+    // it is finalized with the provider error.
+    let msgs = store.list_messages(SES).await.expect("messages");
+    let assistants: Vec<_> = msgs.iter().filter(|m| m.is_assistant()).collect();
+    assert_eq!(assistants.len(), 1, "no empty-assistant pile-up");
+    let a = assistants[0].as_assistant().expect("assistant body");
+    assert!(
+        a.error.is_some(),
+        "exhausted retries must finalize the assistant with an error"
+    );
+    assert!(
+        a.time.completed.is_some(),
+        "exhausted retries must stamp time.completed"
+    );
+}
+
+#[tokio::test]
+async fn total_retry_budget_binds_across_generous_per_step_budget() {
+    let (store, _user) = seed("hi").await;
+
+    // Always fails retryably with a zero Retry-After (no real sleeps). The
+    // per-step budget (10) would allow many more attempts; the run-level
+    // total budget (3) must bind first.
+    struct AlwaysRateLimitedRoute {
+        calls: Arc<AtomicUsize>,
+    }
+    impl Route for AlwaysRateLimitedRoute {
+        fn id(&self) -> &str {
+            "always-429"
+        }
+        fn stream(&self, _req: LLMRequest) -> BoxStream<'static, Result<LLMEvent, LLMError>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            stream::iter(vec![Err(LLMError::Http {
+                status: 429,
+                message: "rate limit".into(),
+                retry_after: Some(Duration::from_millis(0)),
+            })])
+            .boxed()
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut cfg = config(
+        store.clone(),
+        Arc::new(AlwaysRateLimitedRoute {
+            calls: calls.clone(),
+        }),
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    cfg.max_retries = 10;
+    cfg.max_total_retries = 3;
+
+    let result = run_loop(&cfg, SES).await;
+    assert!(result.is_err(), "total retry budget exhausts the run");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "3 attempts total: the run budget binds before the per-step budget"
+    );
+}
+
+#[tokio::test]
+async fn retry_salvages_completed_tool_work_instead_of_replaying() {
+    let (store, _user) = seed("please echo").await;
+
+    // Call 0: a tool call streams and EXECUTES, then the stream dies with a
+    // retryable failure (zero backoff). Call 1: the loop continues from the
+    // salvaged step — history already carries the tool result — and finishes.
+    struct ToolThenFailRoute {
+        calls: Arc<AtomicUsize>,
+    }
+    impl Route for ToolThenFailRoute {
+        fn id(&self) -> &str {
+            "tool-then-fail"
+        }
+        fn stream(&self, _req: LLMRequest) -> BoxStream<'static, Result<LLMEvent, LLMError>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                let items: Vec<Result<LLMEvent, LLMError>> = vec![
+                    Ok(step_start()),
+                    Ok(tool_call("call_1", "echo", json!({"text":"salvage me"}))),
+                    Err(LLMError::Http {
+                        status: 429,
+                        message: "rate limit".into(),
+                        retry_after: Some(Duration::from_millis(0)),
+                    }),
+                ];
+                stream::iter(items).boxed()
+            } else {
+                let mut turn = vec![step_start()];
+                turn.extend(text_events("t2", "done after salvage"));
+                turn.push(step_finish(FinishReason::Stop));
+                turn.push(finish(FinishReason::Stop));
+                stream::iter(turn.into_iter().map(Ok)).boxed()
+            }
+        }
+    }
+
+    /// An echo tool that counts executions — salvage must not re-run it.
+    struct CountingEchoTool {
+        runs: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl Tool for CountingEchoTool {
+        fn id(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "echo"
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({ "type": "object", "properties": { "text": { "type": "string" } } })
+        }
+        async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ExecuteResult, ToolError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let text = args
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Ok(ExecuteResult::new("echo", text))
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut cfg = config(
+        store.clone(),
+        Arc::new(ToolThenFailRoute {
+            calls: calls.clone(),
+        }),
+        registry(Arc::new(CountingEchoTool { runs: runs.clone() })),
+        CancellationToken::new(),
+    );
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
+    cfg.event_tx = Some(event_tx);
+
+    run_loop(&cfg, SES).await.expect("run completes");
+
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "tool executed exactly once");
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "two provider calls");
+
+    drop(cfg);
+    let mut salvaged_retry = false;
+    while let Some(ev) = event_rx.recv().await {
+        if let LLMEvent::Retry { salvaged, .. } = ev {
+            salvaged_retry |= salvaged;
+        }
+    }
+    assert!(salvaged_retry, "the retry event is marked salvaged");
+
+    // The failed attempt's assistant is finalized as a tool-calls step and
+    // keeps its completed tool part; the follow-up assistant carries the text.
+    let msgs = store.list_messages(SES).await.expect("messages");
+    let assistants: Vec<_> = msgs.iter().filter(|m| m.is_assistant()).collect();
+    assert_eq!(assistants.len(), 2, "salvaged step + follow-up step");
+    let first = assistants[0].as_assistant().expect("assistant body");
+    assert_eq!(first.finish.as_deref(), Some("tool-calls"));
+    let first_parts = parts_of(&store, &assistants[0].id).await;
+    assert!(
+        first_parts.iter().any(|p| matches!(
+            &p.kind,
+            PartKind::Tool {
+                state: ToolState::Completed { .. },
+                ..
+            }
+        )),
+        "completed tool part kept on the salvaged step"
+    );
+}
+
+#[tokio::test]
+async fn retry_with_no_tool_work_still_purges_and_replays() {
+    // Guard the existing behavior: a failed attempt with NO completed tools
+    // must keep using the purge-and-replay path (idempotent in-place retry).
+    let (store, _user) = seed("hi").await;
+    let mut turn = vec![step_start()];
+    turn.extend(text_events("t2", "FINAL"));
+    turn.push(step_finish(FinishReason::Stop));
+    turn.push(finish(FinishReason::Stop));
+    let route = Arc::new(PartialThenCompleteRoute {
+        calls: AtomicUsize::new(0),
+        success_turn: Mutex::new(Some(turn)),
+    });
+    let cfg = config(
+        store.clone(),
+        route,
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    run_loop(&cfg, SES).await.expect("run completes");
+    let msgs = store.list_messages(SES).await.expect("messages");
+    let assistants: Vec<_> = msgs.iter().filter(|m| m.is_assistant()).collect();
+    assert_eq!(assistants.len(), 1, "in-place retry reuses the assistant");
+}
+
+// NOTE: not `start_paused` — see `retry_emits_retry_event_before_backoff`.
+// `max_retries: 2` keeps each test's real backoff at a single ~4s sleep.
+#[tokio::test]
+async fn truncated_stream_is_retried_then_succeeds() {
+    let (store, _user) = seed("hi").await;
+
+    // Turn 1: text but NO terminal finish (early close / truncation).
+    // Turn 2: a complete turn. The truncation must be retried transparently.
+    let mut truncated = vec![step_start()];
+    truncated.extend(text_events("t1", "PARTIAL"));
+    let mut complete = vec![step_start()];
+    complete.extend(text_events("t2", "FULL ANSWER"));
+    complete.push(step_finish(FinishReason::Stop));
+    complete.push(finish(FinishReason::Stop));
+
+    let (route, calls) = ScriptedRoute::build(vec![truncated, complete]);
+    let mut cfg = config(
+        store.clone(),
+        route,
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    cfg.max_retries = 2;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
+    cfg.event_tx = Some(event_tx);
+
+    run_loop(&cfg, SES).await.expect("run recovers");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    drop(cfg);
+    let (mut saw_retry, mut saw_warning) = (false, false);
+    while let Some(ev) = event_rx.recv().await {
+        match ev {
+            LLMEvent::Retry { .. } => saw_retry = true,
+            LLMEvent::Warning { .. } => saw_warning = true,
+            _ => {}
+        }
+    }
+    assert!(saw_retry, "truncation retried");
+    assert!(!saw_warning, "no warning when the retry succeeds");
+}
+
+#[tokio::test]
+async fn chronic_truncation_accepts_content_with_warning() {
+    let (store, _user) = seed("hi").await;
+
+    // EVERY attempt streams content then closes without finish_reason — the
+    // shape of a gateway that never sends one. After the budget is spent the
+    // run must accept the content with a Warning, not fail the turn.
+    struct AlwaysTruncatedRoute;
+    impl Route for AlwaysTruncatedRoute {
+        fn id(&self) -> &str {
+            "always-truncated"
+        }
+        fn stream(&self, _req: LLMRequest) -> BoxStream<'static, Result<LLMEvent, LLMError>> {
+            let mut events = vec![step_start()];
+            events.extend(text_events("t1", "TRUNCATED ANSWER"));
+            stream::iter(events.into_iter().map(Ok)).boxed()
+        }
+    }
+
+    let mut cfg = config(
+        store.clone(),
+        Arc::new(AlwaysTruncatedRoute),
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    cfg.max_retries = 2;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
+    cfg.event_tx = Some(event_tx);
+
+    run_loop(&cfg, SES)
+        .await
+        .expect("chronic truncation must not fail the run");
+
+    drop(cfg);
+    let mut saw_warning = false;
+    while let Some(ev) = event_rx.recv().await {
+        if matches!(ev, LLMEvent::Warning { .. }) {
+            saw_warning = true;
+        }
+    }
+    assert!(saw_warning, "acceptance is surfaced as a Warning");
+
+    // The accepted assistant carries the streamed text and a terminal finish.
+    let msgs = store.list_messages(SES).await.expect("messages");
+    let assistant = msgs
+        .iter()
+        .rev()
+        .find(|m| m.is_assistant())
+        .expect("assistant");
+    let a = assistant.as_assistant().expect("assistant body");
+    assert_eq!(a.finish.as_deref(), Some("unknown"));
+    let parts = parts_of(&store, &assistant.id).await;
+    let text: String = parts
+        .iter()
+        .filter_map(|p| match &p.kind {
+            PartKind::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("TRUNCATED ANSWER"), "content kept: {text:?}");
 }
 
 /// A [`Route`] whose first `stream()` call persists partial text then fails

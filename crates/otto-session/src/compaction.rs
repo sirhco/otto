@@ -43,6 +43,10 @@ pub const PRUNE_PROTECT: u64 = 40_000;
 /// Tools whose outputs are never pruned (`PRUNE_PROTECTED_TOOLS`,
 /// `compaction.ts:31`).
 const PRUNE_PROTECTED_TOOLS: &[&str] = &["skill"];
+/// Cap on distinct file paths whose newest `read` output is exempt from
+/// pruning — keeps long sessions from re-reading the same files after every
+/// prune, without letting a 400-file sweep hold its whole history.
+const PRUNE_READ_PATH_EXEMPT_MAX: usize = 30;
 /// How many trailing turns [`select`] considers keeping (`DEFAULT_TAIL_TURNS`,
 /// `compaction.ts:32`).
 const DEFAULT_TAIL_TURNS: usize = 2;
@@ -503,6 +507,7 @@ pub async fn prune(cfg: &RunConfig, session_id: &str) -> Result<(), CompactionEr
     let mut pruned: u64 = 0;
     let mut to_prune: Vec<Part> = Vec::new();
     let mut turns: usize = 0;
+    let mut seen_read_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     'outer: for msg in msgs.iter().rev() {
         if msg.info.is_user() {
@@ -523,7 +528,10 @@ pub async fn prune(cfg: &RunConfig, session_id: &str) -> Result<(), CompactionEr
         for part in msg.parts.iter().rev() {
             let PartKind::Tool {
                 tool,
-                state: ToolState::Completed { output, time, .. },
+                state:
+                    ToolState::Completed {
+                        input, output, time, ..
+                    },
                 ..
             } = &part.kind
             else {
@@ -535,9 +543,21 @@ pub async fn prune(cfg: &RunConfig, session_id: &str) -> Result<(), CompactionEr
             if time.compacted.is_some() {
                 break 'outer;
             }
+            // Keep the NEWEST read of each file path (walk is newest-first),
+            // bounded so a session that touched hundreds of files still frees
+            // memory. Pruning every old read forces the agent to re-read the
+            // same files over and over in long sessions — the "re-exploration
+            // loop". Exempt reads don't consume the protect budget.
+            if tool == "read"
+                && seen_read_paths.len() < PRUNE_READ_PATH_EXEMPT_MAX
+                && let Some(path) = input.get("filePath").and_then(|v| v.as_str())
+                && seen_read_paths.insert(path.to_string())
+            {
+                continue;
+            }
             let est = estimate_tokens(output);
             total += est;
-            if total <= PRUNE_PROTECT {
+            if total <= cfg.prune_protect_tokens {
                 continue;
             }
             pruned += est;

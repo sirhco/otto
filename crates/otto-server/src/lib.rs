@@ -948,6 +948,12 @@ fn workflow_envelope(kind_type: &str, props: Value) -> String {
 #[derive(Debug, Deserialize)]
 struct WorkflowBody {
     arg: String,
+    /// Optional parent session (e.g. the TUI chat session that launched the
+    /// workflow). Parenting links the workflow session into the permission
+    /// service's chain so it — and every subagent under it — inherits the
+    /// parent's permission mode (full-auto, accept-edits, …) live.
+    #[serde(default)]
+    parent: Option<String>,
 }
 
 /// `POST /workflow/{kind}` — run a native dev-loop workflow (`tdd`/`sdd`/`plan`)
@@ -969,7 +975,7 @@ async fn workflow_run(
     let agent = rt.default_agent().clone();
     let model = rt.default_model();
     let session_id = rt
-        .create_session(format!("workflow {kind}"), &agent, None)
+        .create_session(format!("workflow {kind}"), &agent, body.parent.clone())
         .await?;
     let spawner = rt
         .subagent_spawner(&agent, &model)

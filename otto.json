@@ -1,0 +1,13 @@
+{
+  "provider": {
+    "ollama": {
+      "options": { "baseURL": "http://localhost:11434/v1" },
+      "models": {
+        "gemma4:26b-mlx": { "limits": { "context": 32768, "output": 8192 } }
+      }
+    }
+  },
+  "model": "ollama/gemma4:26b-mlx",
+  "rtk": { "enabled": true },
+  "tersemode": { "enabled": true, "level": "full" }
+}

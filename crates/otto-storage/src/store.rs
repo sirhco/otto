@@ -520,6 +520,20 @@ impl Store {
         Ok(())
     }
 
+    /// Deletes a single part by id. Used by the retry salvage path to drop a
+    /// failed attempt's incomplete (pending/running) tool parts while keeping
+    /// its completed tool work.
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] on SQLite failure.
+    pub async fn delete_part(&self, part_id: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM part WHERE id = ?")
+            .bind(part_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Returns a session's messages, each with its ordered parts — the Rust
     /// analog of `hydrate()` (`message-v2.ts:98-123`).
     ///

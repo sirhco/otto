@@ -67,6 +67,10 @@ pub fn retryable(err: &LLMError, _provider: &str) -> bool {
         // A truncated / halted stream (clean EOF, no terminal finish) is worth
         // a fresh attempt.
         LLMError::NoTerminalFinish => true,
+        // A stream that produced zero recognized events (gateway emitted
+        // nothing decodable) — retry with backoff rather than hammering the
+        // provider with immediate re-requests.
+        LLMError::EmptyStream => true,
         // Deterministic failures — retrying cannot change the outcome.
         LLMError::Authentication { .. }
         | LLMError::Validation(_)
@@ -186,6 +190,9 @@ mod tests {
         ));
         // A truncated / halted stream is retryable (Fix 4).
         assert!(retryable(&LLMError::NoTerminalFinish, p));
+        // An empty stream (zero recognized events) is retryable — the
+        // alternative is an immediate, backoff-free re-request loop.
+        assert!(retryable(&LLMError::EmptyStream, p));
 
         assert!(!retryable(
             &LLMError::Http {

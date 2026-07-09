@@ -96,8 +96,39 @@ struct Inner {
     approved: HashMap<SessionId, Vec<Rule>>,
     /// In-flight requests awaiting a reply.
     pending: HashMap<RequestId, Pending>,
-    /// Per-session permission mode; absent → `default_mode`.
+    /// Per-session permission mode; absent → walk `parents`, then
+    /// `default_mode`.
     modes: HashMap<SessionId, PermissionMode>,
+    /// Child → parent session links, so a child session (subagent, workflow)
+    /// with no explicit mode inherits the nearest ancestor's mode live.
+    parents: HashMap<SessionId, SessionId>,
+    /// Per-session agent ruleset (e.g. the plan agent's edit-deny), evaluated
+    /// ABOVE the mode overlay / config / session approvals so an agent's deny
+    /// holds even in full-auto — the danger ruleset alone outranks it.
+    session_rulesets: HashMap<SessionId, Ruleset>,
+}
+
+/// Upper bound on the parent-chain walk — cheap insurance alongside the
+/// visited-set cycle guard.
+const PARENT_CHAIN_MAX_DEPTH: usize = 64;
+
+/// Resolve the mode for `session_id`: its own entry, else the nearest
+/// ancestor's entry via `parents`, else `default_mode`. An explicit
+/// `set_mode` on a child always shadows the parent.
+fn resolve_mode(inner: &Inner, session_id: &str, default_mode: PermissionMode) -> PermissionMode {
+    let mut current = session_id;
+    let mut seen: Vec<&str> = Vec::new();
+    for _ in 0..PARENT_CHAIN_MAX_DEPTH {
+        if let Some(mode) = inner.modes.get(current) {
+            return *mode;
+        }
+        seen.push(current);
+        match inner.parents.get(current) {
+            Some(parent) if !seen.contains(&parent.as_str()) => current = parent,
+            _ => break,
+        }
+    }
+    default_mode
 }
 
 /// The permission service — port of the `Service` in `permission/index.ts`.
@@ -127,26 +158,45 @@ impl Permission {
                 approved: HashMap::new(),
                 pending: HashMap::new(),
                 modes: HashMap::new(),
+                parents: HashMap::new(),
+                session_rulesets: HashMap::new(),
             }),
             events,
         }
     }
 
-    /// The current mode for `session_id` (falls back to the default).
+    /// The current mode for `session_id` — its own mode, else the nearest
+    /// ancestor's (via [`link_parent`](Permission::link_parent)), else the
+    /// default.
     #[must_use]
     pub fn mode(&self, session_id: &str) -> PermissionMode {
         let inner = self.inner.lock().expect("permission mutex poisoned");
-        inner
-            .modes
-            .get(session_id)
-            .copied()
-            .unwrap_or(self.default_mode)
+        resolve_mode(&inner, session_id, self.default_mode)
     }
 
     /// Set the mode for `session_id` (live; affects subsequent `ask` calls).
     pub fn set_mode(&self, session_id: impl Into<SessionId>, mode: PermissionMode) {
         let mut inner = self.inner.lock().expect("permission mutex poisoned");
         inner.modes.insert(session_id.into(), mode);
+    }
+
+    /// Register the agent ruleset enforced for `session_id`'s asks. Evaluated
+    /// above the mode overlay, configured ruleset, and session approvals
+    /// (last-match-wins), so an agent-level deny — e.g. the plan agent's
+    /// edit-deny outside `.otto/plans/` — holds even in full-auto; only the
+    /// danger ruleset outranks it.
+    pub fn set_session_ruleset(&self, session_id: impl Into<SessionId>, ruleset: Ruleset) {
+        let mut inner = self.inner.lock().expect("permission mutex poisoned");
+        inner.session_rulesets.insert(session_id.into(), ruleset);
+    }
+
+    /// Record `child`'s parent session so mode resolution can walk the chain.
+    /// Inheritance is live: flipping the parent's mode changes what every
+    /// linked descendant resolves on its *next* ask, while an explicit
+    /// `set_mode` on the child still shadows the parent.
+    pub fn link_parent(&self, child: impl Into<SessionId>, parent: impl Into<SessionId>) {
+        let mut inner = self.inner.lock().expect("permission mutex poisoned");
+        inner.parents.insert(child.into(), parent.into());
     }
 
     /// Subscribe to [`Asked`] events. A server/CLI drives the prompt UI from
@@ -176,18 +226,32 @@ impl Permission {
             let mut inner = self.inner.lock().expect("permission mutex poisoned");
             let session_approved =
                 Ruleset(inner.approved.get(&session_id).cloned().unwrap_or_default());
-            let mode = inner
-                .modes
-                .get(&session_id)
-                .copied()
-                .unwrap_or(self.default_mode);
+            let mode = resolve_mode(&inner, &session_id, self.default_mode);
             let overlay = mode_overlay(mode);
             let danger = danger_ruleset();
+            // Precedence (last-match-wins, low → high): mode overlay < agent
+            // session ruleset < configured ruleset < session approvals <
+            // danger. So an agent deny (plan's edit-deny) beats the full-auto
+            // overlay, while anything the USER stated explicitly — config
+            // rules or an in-session `Always` — still outranks the agent
+            // (builtin agents carry broad `* allow` defaults that must never
+            // defeat a user config deny). Danger stays on top.
+            let session_ruleset = inner
+                .session_rulesets
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_default();
 
             let mut needs_ask = false;
             for pattern in &req.patterns {
                 let resolved = evaluate(
-                    &[&overlay, &self.ruleset, &session_approved, &danger],
+                    &[
+                        &overlay,
+                        &session_ruleset,
+                        &self.ruleset,
+                        &session_approved,
+                        &danger,
+                    ],
                     &req.permission,
                     pattern,
                 );
@@ -394,5 +458,198 @@ mod tests {
         perm.set_mode("ses_1", PermissionMode::FullAuto);
         assert_eq!(perm.mode("ses_1"), PermissionMode::FullAuto);
         assert_eq!(perm.mode("ses_2"), PermissionMode::AcceptEdits); // isolated
+    }
+
+    #[test]
+    fn child_inherits_parent_mode_via_chain() {
+        let perm = Permission::new(Ruleset::new());
+        perm.set_mode("ses_root", PermissionMode::FullAuto);
+        // root → workflow → implementer: depth 2, mode set only on the root.
+        perm.link_parent("ses_workflow", "ses_root");
+        perm.link_parent("ses_impl", "ses_workflow");
+        assert_eq!(perm.mode("ses_impl"), PermissionMode::FullAuto);
+        assert_eq!(perm.mode("ses_workflow"), PermissionMode::FullAuto);
+    }
+
+    #[test]
+    fn child_override_beats_parent() {
+        let perm = Permission::new(Ruleset::new());
+        perm.set_mode("ses_root", PermissionMode::FullAuto);
+        perm.link_parent("ses_child", "ses_root");
+        perm.set_mode("ses_child", PermissionMode::ApproveEach);
+        assert_eq!(perm.mode("ses_child"), PermissionMode::ApproveEach);
+        assert_eq!(perm.mode("ses_root"), PermissionMode::FullAuto);
+    }
+
+    #[tokio::test]
+    async fn mid_run_parent_flip_changes_child_ask() {
+        let perm = Permission::new(Ruleset::new());
+        perm.link_parent("ses_child", "ses_root");
+
+        // Parent flips to full-auto AFTER the link: the child's next ask must
+        // auto-allow (live inheritance, not copy-at-spawn).
+        perm.set_mode("ses_root", PermissionMode::FullAuto);
+        let req = PermissionRequest {
+            permission: "bash".into(),
+            patterns: vec!["cargo test".into()],
+            always: vec![],
+            metadata: serde_json::json!({}),
+        };
+        perm.ask("ses_child", req)
+            .await
+            .expect("child ask auto-allows under parent's full-auto");
+    }
+
+    #[tokio::test]
+    async fn session_ruleset_deny_beats_full_auto_overlay() {
+        let perm = Permission::new(Ruleset::new());
+        perm.set_mode("ses_plan", PermissionMode::FullAuto);
+        // The plan agent's gate: deny edits everywhere except .otto/plans/.
+        perm.set_session_ruleset(
+            "ses_plan",
+            Ruleset(vec![
+                Rule {
+                    permission: "edit".into(),
+                    pattern: "*".into(),
+                    action: Action::Deny,
+                },
+                Rule {
+                    permission: "edit".into(),
+                    pattern: ".otto/plans/*".into(),
+                    action: Action::Allow,
+                },
+            ]),
+        );
+        let denied = perm
+            .ask(
+                "ses_plan",
+                PermissionRequest {
+                    permission: "edit".into(),
+                    patterns: vec!["src/main.rs".into()],
+                    always: vec![],
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await;
+        assert!(denied.is_err(), "agent deny holds even in full-auto");
+
+        perm.ask(
+            "ses_plan",
+            PermissionRequest {
+                permission: "edit".into(),
+                patterns: vec![".otto/plans/x.md".into()],
+                always: vec![],
+                metadata: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("the agent's own allow-list still works");
+    }
+
+    #[tokio::test]
+    async fn user_config_deny_outranks_agent_allow() {
+        // Builtin agents carry broad `* allow` defaults; a user's explicit
+        // config deny must still win.
+        let perm = Permission::new(Ruleset(vec![Rule {
+            permission: "danger".into(),
+            pattern: "*".into(),
+            action: Action::Deny,
+        }]));
+        perm.set_session_ruleset(
+            "ses_1",
+            Ruleset(vec![Rule {
+                permission: "*".into(),
+                pattern: "*".into(),
+                action: Action::Allow,
+            }]),
+        );
+        let denied = perm
+            .ask(
+                "ses_1",
+                PermissionRequest {
+                    permission: "danger".into(),
+                    patterns: vec!["x".into()],
+                    always: vec![],
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await;
+        assert!(denied.is_err(), "config deny beats agent allow defaults");
+    }
+
+    #[tokio::test]
+    async fn explicit_always_approval_overrides_agent_deny() {
+        // A user's in-session `Always` grant is an explicit statement and
+        // outranks the agent's own deny scoping.
+        let perm = Permission::new(Ruleset::new());
+        perm.set_session_ruleset(
+            "ses_1",
+            Ruleset(vec![Rule {
+                permission: "edit".into(),
+                pattern: "src/*".into(),
+                action: Action::Deny,
+            }]),
+        );
+        {
+            let mut inner = perm.inner.lock().unwrap();
+            inner.approved.entry("ses_1".into()).or_default().push(Rule {
+                permission: "edit".into(),
+                pattern: "src/*".into(),
+                action: Action::Allow,
+            });
+        }
+        perm.ask(
+            "ses_1",
+            PermissionRequest {
+                permission: "edit".into(),
+                patterns: vec!["src/lib.rs".into()],
+                always: vec![],
+                metadata: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("explicit user approval wins over agent deny");
+    }
+
+    #[tokio::test]
+    async fn danger_still_asks_over_session_ruleset_allow() {
+        let perm = Permission::new(Ruleset::new());
+        perm.set_mode("ses_1", PermissionMode::FullAuto);
+        // An over-broad agent allow must not neutralize the danger rules.
+        perm.set_session_ruleset(
+            "ses_1",
+            Ruleset(vec![Rule {
+                permission: "bash".into(),
+                pattern: "*".into(),
+                action: Action::Allow,
+            }]),
+        );
+        let perm = std::sync::Arc::new(perm);
+        let mut rx = perm.subscribe();
+        let p = perm.clone();
+        let h = tokio::spawn(async move {
+            p.ask(
+                "ses_1",
+                PermissionRequest {
+                    permission: "bash".into(),
+                    patterns: vec!["rm -rf build".into()],
+                    always: vec![],
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await
+        });
+        let asked = rx.recv().await.expect("danger op still asks");
+        perm.reply(&asked.request_id, Reply::Once);
+        h.await.unwrap().expect("approved once");
+    }
+
+    #[test]
+    fn parent_cycle_does_not_hang() {
+        let perm = Permission::with_mode(Ruleset::new(), PermissionMode::AcceptEdits);
+        perm.link_parent("ses_a", "ses_b");
+        perm.link_parent("ses_b", "ses_a");
+        // Neither has a mode: the walk must terminate at the default.
+        assert_eq!(perm.mode("ses_a"), PermissionMode::AcceptEdits);
     }
 }

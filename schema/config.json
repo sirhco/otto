@@ -140,6 +140,17 @@
     "provider": {
       "description": "`provider` map (`config.ts:107-109`) — permissive."
     },
+    "retry": {
+      "description": "`retry` — provider retry/backoff knobs (otto extension).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Retry"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "rtk": {
       "description": "`rtk` — optional RTK (Rust Token Killer) shell-command wrapping. Otto-only (no opencode analogue). When enabled and `rtk` is on `PATH`, the `bash` tool's commands are routed through `rtk` to compact their output.",
       "anyOf": [
@@ -262,6 +273,15 @@
             "null"
           ]
         },
+        "prune_protect_tokens": {
+          "description": "Trailing tool-output token budget protected from post-turn pruning (otto extension; default 40000).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "reserved": {
           "type": [
             "integer",
@@ -301,6 +321,39 @@
         "WARN",
         "ERROR"
       ]
+    },
+    "Retry": {
+      "description": "`retry` — provider retry/backoff knobs (otto extension, no opencode analog). All fields optional; unset falls back to the session defaults (`otto-session`'s `DEFAULT_MAX_RETRIES` / `DEFAULT_MAX_TOTAL_RETRIES`).",
+      "type": "object",
+      "properties": {
+        "max_attempts": {
+          "description": "Cap on retries of one step (one provider request). Default 5.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max_total_attempts": {
+          "description": "Cap on retries summed across all steps of one prompt. Default 20.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "turn_timeout_seconds": {
+          "description": "Wall-clock cap on one prompt turn, in seconds. Unset = no timeout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
     },
     "Rtk": {
       "description": "`rtk` config block. Off unless `enabled` is set.",

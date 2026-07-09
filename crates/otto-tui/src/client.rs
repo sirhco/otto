@@ -153,8 +153,11 @@ impl Client {
     /// # Errors
     /// Returns an error if the request fails, the server responds with a
     /// non-success status, or the body cannot be decoded.
-    pub async fn workflow(&self, kind: &str, arg: &str) -> Result<String> {
-        let body = serde_json::json!({ "arg": arg });
+    pub async fn workflow(&self, kind: &str, arg: &str, parent: Option<&str>) -> Result<String> {
+        // Parenting the workflow session under the chat session makes it (and
+        // its subagents) inherit the chat session's permission mode live —
+        // full-auto in the TUI applies to the whole workflow run.
+        let body = serde_json::json!({ "arg": arg, "parent": parent });
         let v: serde_json::Value = self
             .post(&format!("/workflow/{kind}"))
             .json(&body)
