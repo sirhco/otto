@@ -297,6 +297,10 @@ fn transcript(app: &App, frame: &mut Frame, area: Rect) -> bool {
     // invalidation).
     let mut lines = cached.lines.clone();
     let total = cached.wrap_total;
+    // Publish the current scroll bound so `App::scroll_up` can clamp —
+    // without this, holding PageUp builds invisible overscroll debt that
+    // PageDown then silently unwinds with no visible movement.
+    app.last_scroll_max.set(scroll_max(total, area.height));
 
     // While a search is active with at least one match, jump-scroll to
     // center the current match instead of following `app.scroll`, and
@@ -461,7 +465,14 @@ fn rebuild_line_cache(app: &App, width: u16, prev: Option<&LineCache>) -> LineCa
             Some(e) if e.fingerprint == fingerprint => e.clone(),
             _ => {
                 let rendered = render_item(item, &app.theme);
-                let wrap = Paragraph::new(rendered.clone()).line_count(width) as u16;
+                // `.wrap(...)` must match the render-time wrapping: without it
+                // `line_count` returns the LOGICAL line count, so every wrapped
+                // line undercounts the total, scroll_max comes up short, and
+                // the bottom of the transcript becomes unreachable (worse the
+                // narrower the terminal).
+                let wrap = Paragraph::new(rendered.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(width) as u16;
                 crate::state::ItemCacheEntry {
                     fingerprint,
                     lines: std::sync::Arc::new(rendered),
@@ -1353,6 +1364,44 @@ mod tests {
         app.transcript
             .push(TranscriptItem::Assistant("hello world".into()));
         assert!(render(&app).contains("hello world"));
+    }
+
+    /// The transcript renders with `Wrap {trim:false}`, so the cache's line
+    /// counts must be measured the same way. Measured unwrapped, a long line
+    /// counts as 1 instead of its wrapped rows, `scroll_max` comes up short,
+    /// and the bottom of the transcript is unreachable. This test fails when
+    /// the measuring `Paragraph` loses its `.wrap(...)`.
+    #[test]
+    fn wrap_total_counts_wrapped_rows_not_logical_lines() {
+        let mut app = App::new();
+        // One unbroken ~600-char line: 1 logical line, many wrapped rows at
+        // width 100.
+        app.transcript
+            .push(TranscriptItem::Assistant("x".repeat(600)));
+        let _ = render(&app);
+        let c = app.line_cache.borrow();
+        let c = c.as_ref().unwrap();
+        assert!(
+            c.wrap_total >= 6,
+            "600 chars at width ~100 must count >= 6 wrapped rows, got {}",
+            c.wrap_total
+        );
+    }
+
+    /// A render must publish the scroll bound so `App::scroll_up` clamps
+    /// against real geometry.
+    #[test]
+    fn render_publishes_scroll_max() {
+        let mut app = App::new();
+        for i in 0..80 {
+            app.transcript
+                .push(TranscriptItem::Assistant(format!("line {i}")));
+        }
+        let _ = render(&app);
+        assert!(
+            app.last_scroll_max.get() > 0,
+            "80 items in a 20-row viewport must publish a positive scroll max"
+        );
     }
 
     #[test]

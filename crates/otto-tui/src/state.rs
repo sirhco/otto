@@ -346,6 +346,11 @@ pub struct App {
     /// Memoized transcript render, keyed by `render_gen` + render width.
     /// `RefCell` because `view::transcript` only holds `&App`.
     pub line_cache: std::cell::RefCell<Option<LineCache>>,
+    /// The scroll bound (`wrap_total - viewport height`) published by the last
+    /// transcript render, so `scroll_up` can clamp instead of building
+    /// invisible overscroll debt. `Cell` because `view::transcript` only holds
+    /// `&App` (same pattern as `line_cache`).
+    pub last_scroll_max: std::cell::Cell<u16>,
     /// Startup splash: ticks remaining before it auto-dismisses (`Some(n)` while
     /// showing, `None` once dismissed). Set at launch by `run`, decremented each
     /// `Msg::Tick`, and cleared immediately by any keypress (`on_key`).
@@ -493,6 +498,7 @@ impl App {
             theme: crate::theme::Theme::dark(),
             render_gen: 0,
             line_cache: std::cell::RefCell::new(None),
+            last_scroll_max: std::cell::Cell::new(0),
             splash: None,
             workflow: None,
             permission_mode: "approve-each".to_string(),
@@ -1300,9 +1306,13 @@ impl App {
         })
     }
 
-    /// Scroll `n` lines toward older content (away from the bottom).
+    /// Scroll `n` lines toward older content (away from the bottom), clamped
+    /// to the last rendered scroll bound so PageDown always has visible effect.
     pub fn scroll_up(&mut self, n: u16) {
-        self.scroll = self.scroll.saturating_add(n);
+        self.scroll = self
+            .scroll
+            .saturating_add(n)
+            .min(self.last_scroll_max.get());
     }
     /// Scroll `n` lines toward the newest content; 0 = following.
     pub fn scroll_down(&mut self, n: u16) {
@@ -1712,6 +1722,11 @@ impl App {
         self.transcript.clear();
         self.running_tools.clear();
         self.msg_start = None;
+        // The open streaming indices point into the transcript we just
+        // cleared; left stale, a reconcile racing a live stream makes the
+        // next delta append into an arbitrary historical item.
+        self.open_text = None;
+        self.open_reasoning = None;
         self.todos = Vec::new();
         self.todos_collapsed = false;
         for row in &rows {
@@ -2244,6 +2259,70 @@ mod tests {
         let g0 = app.render_gen;
         app.update(Msg::Server(td("hi"))); // a streaming text delta
         assert_ne!(app.render_gen, g0, "assembling content changed");
+    }
+
+    /// A history reconcile racing a live stream: the reload must reset the
+    /// open streaming indices, or the next delta appends into an arbitrary
+    /// historical item of the rebuilt transcript.
+    #[test]
+    fn history_reload_resets_open_stream_blocks() {
+        let mut app = App::new();
+        app.update(Msg::Server(td("streamed before reconcile")));
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptItem::Assistant(_))
+        ));
+
+        // Reconcile: history arrives with two finished rows.
+        let rows = vec![
+            serde_json::json!({
+                "info": { "role": "user" },
+                "parts": [{ "type": "text", "text": "old user msg" }]
+            }),
+            serde_json::json!({
+                "info": { "role": "assistant" },
+                "parts": [{ "type": "text", "text": "old answer" }]
+            }),
+        ];
+        app.update(Msg::HistoryLoaded(rows));
+        let len_after_reload = app.transcript.len();
+
+        // The next delta must open a NEW item, not mutate a historical one.
+        app.update(Msg::Server(td("fresh delta")));
+        assert_eq!(app.transcript.len(), len_after_reload + 1);
+        match app.transcript.last() {
+            Some(TranscriptItem::Assistant(s)) => assert_eq!(s, "fresh delta"),
+            other => panic!("expected a fresh assistant item, got {other:?}"),
+        }
+        match &app.transcript[len_after_reload - 1] {
+            TranscriptItem::Assistant(s) => {
+                assert_eq!(s, "old answer", "historical item untouched");
+            }
+            other => panic!("unexpected reloaded item {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_mid_turn_keeps_input_and_flashes() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App::new();
+        app.session_id = Some("ses_1".into());
+        app.status = "thinking".into(); // turn_in_flight() == true
+        for c in "queued while busy".chars() {
+            app.input.insert(c);
+        }
+        let msg = app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(msg.is_none(), "no second concurrent prompt stream");
+        assert!(
+            !app.input.is_empty(),
+            "typed text stays in the editor for after the turn"
+        );
+        assert!(app.flash.is_some(), "the user is told why nothing happened");
+
+        // Once the turn ends, the same Enter submits.
+        app.status = "ready".into();
+        let msg = app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(msg, Some(Msg::Submitted(_))));
     }
 
     #[test]
@@ -2886,6 +2965,7 @@ mod tests {
     #[test]
     fn scroll_up_moves_away_from_bottom() {
         let mut app = App::new();
+        app.last_scroll_max.set(100); // as published by a render
         assert!(app.is_following()); // scroll == 0
         app.scroll_up(3);
         assert_eq!(app.scroll, 3);
@@ -2895,6 +2975,7 @@ mod tests {
     #[test]
     fn scroll_down_returns_to_follow() {
         let mut app = App::new();
+        app.last_scroll_max.set(100);
         app.scroll_up(5);
         app.scroll_down(2);
         assert_eq!(app.scroll, 3);
@@ -2904,8 +2985,32 @@ mod tests {
     }
 
     #[test]
+    fn scroll_up_clamps_to_last_rendered_max() {
+        let mut app = App::new();
+        app.last_scroll_max.set(7);
+        // Holding PageUp past the top must not build overscroll debt that
+        // PageDown then silently unwinds.
+        for _ in 0..10 {
+            app.scroll_up(3);
+        }
+        assert_eq!(app.scroll, 7, "clamped at the rendered max");
+        app.scroll_down(3);
+        assert_eq!(app.scroll, 4, "PageDown moves immediately");
+    }
+
+    #[test]
+    fn scroll_up_with_no_render_yet_is_inert() {
+        let mut app = App::new();
+        // Nothing rendered yet (last_scroll_max == 0): nothing to scroll to.
+        app.scroll_up(3);
+        assert_eq!(app.scroll, 0);
+        assert!(app.is_following());
+    }
+
+    #[test]
     fn scroll_to_bottom_follows() {
         let mut app = App::new();
+        app.last_scroll_max.set(100);
         app.scroll_up(4);
         app.scroll_to_bottom();
         assert_eq!(app.scroll, 0);
