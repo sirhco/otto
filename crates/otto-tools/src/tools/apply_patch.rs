@@ -401,6 +401,7 @@ mod tests {
             ) -> Result<(), crate::tool::PermissionDenied> {
                 Err(crate::tool::PermissionDenied {
                     permission: req.permission,
+                    by_user: true,
                 })
             }
         }

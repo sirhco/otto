@@ -4,6 +4,20 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [Unreleased]
+
+### Fixed
+
+- **A ruleset deny no longer kills the whole turn.** The `general` agent's
+  builtin `todowrite: deny` (enforced since v0.3.0) made every sdd implementer
+  hard-stop on its very first tool call — all tasks came back `NEEDS_CONTEXT`
+  with no status marker. `PermissionDenied` now distinguishes a human
+  rejecting an ask (turn stops, as before) from a policy rule denying a call
+  (the tool fails with an error the model can adapt to, and the turn
+  continues).
+- The plan agent's suggested command now includes the required `--plan` flag
+  (`otto workflow sdd --plan .otto/plans/<name>.md --auto`).
+
 ## [0.3.2] - 2026-07-09
 
 ### Fixed

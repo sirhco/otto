@@ -107,6 +107,7 @@ pub(crate) mod testing {
             if deny {
                 return Err(PermissionDenied {
                     permission: req.permission,
+                    by_user: true,
                 });
             }
             Ok(())

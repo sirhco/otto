@@ -310,6 +310,126 @@ async fn subagent_spawn_end_to_end() {
     );
 }
 
+// -- 0. a policy deny fails the tool call, not the whole turn ----------------
+
+/// A tool that asks the gate for the `todowrite` permission, mirroring the
+/// builtin todo tool an sdd implementer calls first thing.
+struct TodoLikeTool;
+
+#[async_trait]
+impl Tool for TodoLikeTool {
+    fn id(&self) -> &str {
+        "todowrite"
+    }
+    fn description(&self) -> &str {
+        "asks for the todowrite permission"
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    async fn execute(
+        &self,
+        _args: Value,
+        ctx: &otto_tools::ToolContext,
+    ) -> Result<ExecuteResult, ToolError> {
+        ctx.permission
+            .ask(PermissionRequest {
+                permission: "todowrite".into(),
+                patterns: vec!["*".into()],
+                always: vec![],
+                metadata: json!({}),
+            })
+            .await?;
+        Ok(ExecuteResult::new("todowrite", "ok"))
+    }
+}
+
+/// The v0.3.x sdd failure: the `general` agent's ruleset denies `todowrite`,
+/// every implementer calls it first, and the policy denial used to read as a
+/// user rejection — hard-stopping the turn, so all 13 tasks came back
+/// NEEDS_CONTEXT with no status marker. A ruleset deny must fail the TOOL
+/// (with an error the model can adapt to) and let the turn continue.
+#[tokio::test]
+async fn ruleset_deny_fails_tool_but_turn_continues() {
+    let store = Store::open_in_memory().await.expect("store");
+    let ses = "ses_policy_deny";
+    seed_session(&store, ses, "do the task").await;
+
+    let permission = Arc::new(Permission::new(Ruleset::new()));
+    permission.set_mode(ses, otto_permission::PermissionMode::FullAuto);
+    // The general agent's `todowrite: deny` (with its broad allow default).
+    permission.set_session_ruleset(
+        ses,
+        Ruleset::from_config(&json!({ "*": "allow", "todowrite": "deny" })),
+    );
+
+    // Turn 1: the model calls todowrite; turn 2: it adapts and reports the
+    // status marker — exactly what an sdd implementer must still get to do.
+    let mut turn1 = vec![step_start()];
+    turn1.push(tool_call("call_1", "todowrite", json!({})));
+    turn1.push(step_finish(FinishReason::ToolCalls));
+    turn1.push(finish(FinishReason::ToolCalls));
+    let (route, calls) =
+        ScriptedRoute::build(vec![turn1, text_turn("t2", r#"{"status":"DONE"}"#)]);
+
+    let cfg = RunConfig {
+        store: store.clone(),
+        route,
+        tools: registry(vec![Arc::new(TodoLikeTool)]),
+        permission: Arc::new(SessionGate::new(permission.clone(), ses)),
+        model: model(),
+        agent: "general".into(),
+        agent_prompt: Some("SYSTEM".into()),
+        directory: std::env::temp_dir(),
+        max_steps: None,
+        abort: CancellationToken::new(),
+        subagent: None,
+        preserve_recent_tokens: 20_000,
+        compaction_reserved: 20_000,
+        auto_compact: true,
+        prune_protect_tokens: 40_000,
+        max_retries: 5,
+        max_total_retries: 20,
+        event_tx: None,
+        system_cache: None,
+        tersemode_directive: None,
+    };
+
+    let last = run_loop(&cfg, ses).await.expect("run completes");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the turn continued past the denied tool"
+    );
+    // The denied call is recorded as a tool error whose message avoids the
+    // turn-stopping rejection keywords.
+    let state = tool_state(&store, ses, "todowrite")
+        .await
+        .expect("todowrite part");
+    match state {
+        ToolState::Error { error, .. } => {
+            let lowered = error.to_ascii_lowercase();
+            assert!(
+                !lowered.contains("denied") && !lowered.contains("rejected"),
+                "policy denial must not read as a user rejection: {error}"
+            );
+            assert!(error.contains("todowrite"), "names the permission: {error}");
+        }
+        other => panic!("expected an errored tool, got {other:?}"),
+    }
+    // The final assistant carries the status marker the sdd ledger parses.
+    let parts = store.list_parts(last.id()).await.expect("parts");
+    let text: String = parts
+        .iter()
+        .filter_map(|p| match &p.kind {
+            PartKind::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains(r#"{"status":"DONE"}"#), "got {text:?}");
+}
+
 // -- 1a. spawned child inherits the parent's permission mode ----------------
 
 #[tokio::test]

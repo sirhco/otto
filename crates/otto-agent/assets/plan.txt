@@ -27,7 +27,7 @@ When your plan is ready, you MUST persist it:
    Number tasks sequentially. Each task should be independently executable and
    verifiable; include concrete file paths and acceptance criteria in the body.
 3. End your reply with the plan's file path and the command to execute it:
-   `otto workflow sdd .otto/plans/<name>.md`.
+   `otto workflow sdd --plan .otto/plans/<name>.md --auto`.
 
 Do not skip step 1 — a plan that only exists in chat scrollback is lost when
 the session ends.

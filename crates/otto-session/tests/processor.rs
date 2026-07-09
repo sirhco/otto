@@ -122,7 +122,11 @@ impl PermissionGate for RecordingGate {
         let permission = req.permission.clone();
         self.asked.lock().unwrap().push(req);
         if self.deny {
-            Err(PermissionDenied { permission })
+            // Simulates a human rejecting the ask (the turn-stopping form).
+            Err(PermissionDenied {
+                permission,
+                by_user: true,
+            })
         } else {
             Ok(())
         }

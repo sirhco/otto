@@ -267,8 +267,11 @@ impl Permission {
                 .action
                     == Action::Deny;
                 if denied {
+                    // Policy deny (agent/config ruleset) — not a human saying
+                    // no: the tool errors and the turn continues.
                     return Err(PermissionDenied {
                         permission: req.permission.clone(),
+                        by_user: false,
                     });
                 }
                 let resolved = evaluate(
@@ -280,6 +283,7 @@ impl Permission {
                     Action::Deny => {
                         return Err(PermissionDenied {
                             permission: req.permission.clone(),
+                            by_user: false,
                         });
                     }
                     Action::Allow => {}
@@ -322,8 +326,11 @@ impl Permission {
             Ok(Outcome::Approved) => Ok(()),
             // Rejected, or the service dropped (finalizer semantics from
             // `index.ts:57` — pending requests fail on teardown).
+            // A human answered "reject" (or the service tore down mid-ask) —
+            // the turn-stopping form of denial.
             Ok(Outcome::Rejected) | Err(_) => Err(PermissionDenied {
                 permission: req.permission,
+                by_user: true,
             }),
         }
     }

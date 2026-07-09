@@ -73,12 +73,39 @@ impl ExecuteResult {
 
 /// Raised when a caller (usually the LLM) supplies a permission that the gate
 /// rejects. Ported from opencode's permission denial path.
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("permission '{permission}' denied")]
+#[derive(Debug, Clone)]
 pub struct PermissionDenied {
     /// The permission that was rejected.
     pub permission: String,
+    /// `true` when a human answered an ask with "reject" — the agent loop
+    /// treats that as "stop the turn" (the user said no to the whole
+    /// direction). `false` when a ruleset rule denied the call outright
+    /// (agent/config policy): the tool fails with an error the model can
+    /// adapt to, and the turn continues.
+    pub by_user: bool,
 }
+
+impl std::fmt::Display for PermissionDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.by_user {
+            // "denied" is load-bearing: the processor's rejection check
+            // matches it and stops the turn (a human said no).
+            write!(f, "permission '{}' denied", self.permission)
+        } else {
+            // Deliberately avoids the "denied"/"rejected" keywords so a
+            // policy deny reads as an ordinary tool failure the model can
+            // route around (e.g. a subagent whose ruleset forbids todowrite)
+            // instead of hard-stopping the turn.
+            write!(
+                f,
+                "the '{}' permission is not granted to this agent; use a different approach",
+                self.permission
+            )
+        }
+    }
+}
+
+impl std::error::Error for PermissionDenied {}
 
 /// A permission ask — the fields of opencode's `PermissionV1.Request` that a
 /// tool controls (`tool.ts:45`, minus the host-managed `id`/`sessionID`/`tool`).
