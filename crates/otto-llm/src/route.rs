@@ -134,9 +134,33 @@ where
         let frames = transport.frames(prepared);
         futures::pin_mut!(frames);
 
+        // Gateways (litellm, proxies, HTML error pages) sometimes interleave
+        // frames the protocol cannot decode. One bad frame used to abort the
+        // whole turn with a non-retryable `EventDecode`; instead skip it with
+        // a warning, and only fail — retryably — when the garbage dominates:
+        // too many skips, or a stream that ends with skips and zero decoded
+        // frames (which would otherwise surface as an empty attempt).
+        const MAX_SKIPPED_FRAMES: u32 = 20;
+        let mut skipped: u32 = 0;
+        let mut decoded: u64 = 0;
+
         while let Some(frame) = frames.next().await {
             let frame = frame?;
-            let event = protocol.decode_event(&frame)?;
+            let event = match protocol.decode_event(&frame) {
+                Ok(event) => event,
+                Err(e) => {
+                    skipped += 1;
+                    let preview: String = frame.chars().take(120).collect();
+                    tracing::warn!(skipped, error = %e, frame = %preview, "skipping undecodable stream frame");
+                    if skipped >= MAX_SKIPPED_FRAMES {
+                        Err(LLMError::ProviderRetryable(format!(
+                            "{skipped} undecodable stream frames (last: {e})"
+                        )))?;
+                    }
+                    continue;
+                }
+            };
+            decoded += 1;
             let is_terminal = protocol.terminal(&event);
             for out in protocol.step(&mut state, event)? {
                 yield out;
@@ -144,6 +168,12 @@ where
             if is_terminal {
                 break;
             }
+        }
+
+        if skipped > 0 && decoded == 0 {
+            Err(LLMError::ProviderRetryable(format!(
+                "stream carried only undecodable frames ({skipped} skipped)"
+            )))?;
         }
 
         // Flush any dangling state (stream.onHalt).

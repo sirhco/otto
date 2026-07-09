@@ -779,6 +779,110 @@ async fn total_retry_budget_binds_across_generous_per_step_budget() {
     );
 }
 
+// NOTE: not `start_paused` — see `retry_emits_retry_event_before_backoff`.
+// `max_retries: 2` keeps each test's real backoff at a single ~4s sleep.
+#[tokio::test]
+async fn truncated_stream_is_retried_then_succeeds() {
+    let (store, _user) = seed("hi").await;
+
+    // Turn 1: text but NO terminal finish (early close / truncation).
+    // Turn 2: a complete turn. The truncation must be retried transparently.
+    let mut truncated = vec![step_start()];
+    truncated.extend(text_events("t1", "PARTIAL"));
+    let mut complete = vec![step_start()];
+    complete.extend(text_events("t2", "FULL ANSWER"));
+    complete.push(step_finish(FinishReason::Stop));
+    complete.push(finish(FinishReason::Stop));
+
+    let (route, calls) = ScriptedRoute::build(vec![truncated, complete]);
+    let mut cfg = config(
+        store.clone(),
+        route,
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    cfg.max_retries = 2;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
+    cfg.event_tx = Some(event_tx);
+
+    run_loop(&cfg, SES).await.expect("run recovers");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    drop(cfg);
+    let (mut saw_retry, mut saw_warning) = (false, false);
+    while let Some(ev) = event_rx.recv().await {
+        match ev {
+            LLMEvent::Retry { .. } => saw_retry = true,
+            LLMEvent::Warning { .. } => saw_warning = true,
+            _ => {}
+        }
+    }
+    assert!(saw_retry, "truncation retried");
+    assert!(!saw_warning, "no warning when the retry succeeds");
+}
+
+#[tokio::test]
+async fn chronic_truncation_accepts_content_with_warning() {
+    let (store, _user) = seed("hi").await;
+
+    // EVERY attempt streams content then closes without finish_reason — the
+    // shape of a gateway that never sends one. After the budget is spent the
+    // run must accept the content with a Warning, not fail the turn.
+    struct AlwaysTruncatedRoute;
+    impl Route for AlwaysTruncatedRoute {
+        fn id(&self) -> &str {
+            "always-truncated"
+        }
+        fn stream(&self, _req: LLMRequest) -> BoxStream<'static, Result<LLMEvent, LLMError>> {
+            let mut events = vec![step_start()];
+            events.extend(text_events("t1", "TRUNCATED ANSWER"));
+            stream::iter(events.into_iter().map(Ok)).boxed()
+        }
+    }
+
+    let mut cfg = config(
+        store.clone(),
+        Arc::new(AlwaysTruncatedRoute),
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    cfg.max_retries = 2;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
+    cfg.event_tx = Some(event_tx);
+
+    run_loop(&cfg, SES)
+        .await
+        .expect("chronic truncation must not fail the run");
+
+    drop(cfg);
+    let mut saw_warning = false;
+    while let Some(ev) = event_rx.recv().await {
+        if matches!(ev, LLMEvent::Warning { .. }) {
+            saw_warning = true;
+        }
+    }
+    assert!(saw_warning, "acceptance is surfaced as a Warning");
+
+    // The accepted assistant carries the streamed text and a terminal finish.
+    let msgs = store.list_messages(SES).await.expect("messages");
+    let assistant = msgs
+        .iter()
+        .rev()
+        .find(|m| m.is_assistant())
+        .expect("assistant");
+    let a = assistant.as_assistant().expect("assistant body");
+    assert_eq!(a.finish.as_deref(), Some("unknown"));
+    let parts = parts_of(&store, &assistant.id).await;
+    let text: String = parts
+        .iter()
+        .filter_map(|p| match &p.kind {
+            PartKind::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("TRUNCATED ANSWER"), "content kept: {text:?}");
+}
+
 /// A [`Route`] whose first `stream()` call persists partial text then fails
 /// mid-stream with a retryable 429 (zero backoff), and whose second call
 /// streams a complete turn — for exercising the retry loop's part-purge (Fix 5).

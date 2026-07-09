@@ -1499,6 +1499,7 @@ mod tests {
                 LLMEvent::Finish { .. } => "finish",
                 LLMEvent::ProviderError { .. } => "provider-error",
                 LLMEvent::Retry { .. } => "retry",
+                LLMEvent::Warning { .. } => "warning",
             })
             .collect()
     }

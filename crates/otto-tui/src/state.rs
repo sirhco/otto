@@ -1585,6 +1585,14 @@ impl App {
                     self.bump_render();
                 }
             }
+            LLMEvent::Warning { message } => {
+                // Non-fatal quality concern (e.g. a response accepted without
+                // finish_reason after retries) — keep it in the scrollback as
+                // a dim system line, not an error.
+                self.transcript
+                    .push(TranscriptItem::Workflow(format!("⚠ {message}")));
+                self.bump_render();
+            }
             _ => {}
         }
     }

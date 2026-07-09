@@ -316,6 +316,29 @@ async fn finalize_interrupted(
     Ok(())
 }
 
+/// Accept a truncated assistant response (stream ended without a terminal
+/// finish on every attempt): stamp `time.completed` and a `finish = "unknown"`
+/// so the exit condition sees a terminal turn. The streamed parts are kept.
+async fn finalize_truncated(
+    store: &Store,
+    session_id: &str,
+    assistant_id: &str,
+) -> Result<(), StorageError> {
+    let Some(mut info) = store.get_message(session_id, assistant_id).await? else {
+        return Ok(());
+    };
+    if let InfoBody::Assistant(a) = &mut info.body {
+        if a.time.completed.is_none() {
+            a.time.completed = Some(now_ms());
+        }
+        if a.finish.is_none() {
+            a.finish = Some("unknown".to_string());
+        }
+        store.update_message(&info).await?;
+    }
+    Ok(())
+}
+
 /// Mark an assistant message failed after retry exhaustion (or a non-retryable
 /// provider error): stamp `time.completed` and record the provider error so
 /// the turn never leaves an unfinalized message behind. Companion to
@@ -556,10 +579,26 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                     }
                     attempt += 1;
                     total_retries += 1;
-                    if attempt >= cfg.max_retries
-                        || total_retries >= cfg.max_total_retries
-                        || !retry::retryable(&err, &provider.0)
-                    {
+                    let exhausted =
+                        attempt >= cfg.max_retries || total_retries >= cfg.max_total_retries;
+                    if exhausted || !retry::retryable(&err, &provider.0) {
+                        // A provider that chronically omits `finish_reason`
+                        // (some OpenAI-compatible gateways) truncates every
+                        // attempt the same way. Once the budget is spent,
+                        // accept the streamed content with a warning instead
+                        // of failing the turn — the parts are intact because
+                        // the purge only runs at the top of the NEXT attempt.
+                        if exhausted && matches!(err, otto_llm::LLMError::NoTerminalFinish) {
+                            finalize_truncated(&cfg.store, session_id, &assistant_id).await?;
+                            if let Some(tx) = &cfg.event_tx {
+                                let _ = tx.send(otto_events::LLMEvent::Warning {
+                                    message: format!(
+                                        "provider stream ended without finish_reason on all {attempt} attempts; accepting the response as-is"
+                                    ),
+                                });
+                            }
+                            break ProcessOutcome::Continue;
+                        }
                         // Stamp the failure on the assistant message before
                         // propagating so the turn never leaves an unfinalized
                         // message behind (mirrors `finalize_interrupted`).

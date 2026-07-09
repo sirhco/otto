@@ -428,7 +428,8 @@ impl Processor {
                 self.saw_finish = true;
                 Ok(())
             }
-            LLMEvent::Retry { .. } => Ok(()),
+            // Informational side-channel events for a UI; nothing to persist.
+            LLMEvent::Retry { .. } | LLMEvent::Warning { .. } => Ok(()),
         }
     }
 

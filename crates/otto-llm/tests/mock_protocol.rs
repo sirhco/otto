@@ -183,3 +183,39 @@ async fn generate_errors_without_terminal_finish() {
     let err = client(frames).generate(request()).await.unwrap_err();
     assert!(matches!(err, LLMError::NoTerminalFinish));
 }
+
+#[tokio::test]
+async fn undecodable_frames_are_skipped_not_fatal() {
+    // A gateway interleaving garbage (an HTML error page fragment, a comment
+    // frame that leaked through) with valid frames: the good events must
+    // survive and the turn completes.
+    let frames = vec![
+        r#"{"type":"text","id":"t1","text":"Hello"}"#.to_string(),
+        "<html>502 Bad Gateway</html>".to_string(),
+        r#"{"type":"text","id":"t1","text":" world"}"#.to_string(),
+        r#"{"type":"finish"}"#.to_string(),
+    ];
+    let response = client(frames).generate(request()).await.expect("generate");
+    assert_eq!(
+        response.message.content,
+        vec![ContentPart::Text {
+            text: "Hello world".into(),
+            cache: None
+        }]
+    );
+}
+
+#[tokio::test]
+async fn all_garbage_stream_fails_retryably() {
+    // Zero decodable frames must fail as ProviderRetryable (retry with
+    // backoff), not as a fatal EventDecode and not as a silent empty attempt.
+    let frames = vec![
+        "<html>502</html>".to_string(),
+        "not json either".to_string(),
+    ];
+    let err = client(frames).generate(request()).await.unwrap_err();
+    assert!(
+        matches!(err, LLMError::ProviderRetryable(_)),
+        "got {err:?}"
+    );
+}

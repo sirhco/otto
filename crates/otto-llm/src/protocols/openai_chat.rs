@@ -305,6 +305,11 @@ pub struct Delta {
     /// Reasoning text delta (DeepSeek-style).
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    /// Reasoning text delta in the OpenRouter/vLLM encoding (`delta.reasoning`)
+    /// — mapped identically to `reasoning_content` so those gateways' thinking
+    /// output isn't silently dropped.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     /// Tool-call deltas.
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
@@ -332,7 +337,50 @@ pub struct OpenAIChatError {
     #[serde(default, rename = "type")]
     pub error_type: Option<String>,
     #[serde(default)]
-    pub code: Option<String>,
+    pub code: Option<ErrorCode>,
+}
+
+/// An error `code` that gateways send as either a string ("`rate_limited`",
+/// "`429`") or a bare number (`429`). litellm/OpenRouter commonly use the
+/// numeric form, which used to fail strict decoding and turn the whole frame
+/// into a fatal `EventDecode`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ErrorCode {
+    /// Numeric code (often the upstream HTTP status).
+    Num(i64),
+    /// String code.
+    Str(String),
+}
+
+impl ErrorCode {
+    /// The code as an HTTP status when it plausibly is one (400..=599).
+    #[must_use]
+    pub fn as_http_status(&self) -> Option<u16> {
+        let n = match self {
+            ErrorCode::Num(n) => *n,
+            ErrorCode::Str(s) => s.parse().ok()?,
+        };
+        u16::try_from(n).ok().filter(|s| (400..=599).contains(s))
+    }
+
+    fn display(&self) -> String {
+        match self {
+            ErrorCode::Num(n) => n.to_string(),
+            ErrorCode::Str(s) => s.clone(),
+        }
+    }
+}
+
+/// The `error` field of a frame: OpenAI's `{"error": {...}}` object, or the
+/// bare-string form (`{"error": "boom"}`) some gateways emit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ErrorField {
+    /// Structured error object.
+    Struct(OpenAIChatError),
+    /// Bare string message.
+    Text(String),
 }
 
 /// One decoded SSE event (`OpenAIChatEvent`, `openai-chat.ts:156-160`).
@@ -346,7 +394,7 @@ pub struct OpenAIChatEvent {
     pub usage: Option<OpenAIChatUsage>,
     /// An inline provider error frame, surfaced rather than swallowed.
     #[serde(default)]
-    pub error: Option<OpenAIChatError>,
+    pub error: Option<ErrorField>,
 }
 
 // =============================================================================
@@ -880,8 +928,26 @@ impl crate::protocol::Protocol for OpenAIChat {
         // A mid-stream provider error frame must surface, not be swallowed into an
         // empty event (which would leave the turn with no terminal finish).
         if let Some(err) = event.error {
+            let err = match err {
+                ErrorField::Struct(e) => e,
+                ErrorField::Text(msg) => OpenAIChatError {
+                    message: Some(msg),
+                    ..OpenAIChatError::default()
+                },
+            };
             let msg = err.message.unwrap_or_else(|| "unknown error".to_string());
-            let detail = match (err.error_type, err.code) {
+            // When the code reads as an HTTP status (429/5xx from litellm and
+            // similar gateways), surface it as `Http` so the retry policy's
+            // status-based classification applies instead of relying on
+            // rate-limit phrase matching in the message text.
+            if let Some(status) = err.code.as_ref().and_then(ErrorCode::as_http_status) {
+                return Err(LLMError::Http {
+                    status,
+                    message: format!("openai: {msg}"),
+                    retry_after: None,
+                });
+            }
+            let detail = match (err.error_type, err.code.map(|c| c.display())) {
                 (Some(t), Some(c)) => format!(" ({t}/{c})"),
                 (Some(t), None) => format!(" ({t})"),
                 (None, Some(c)) => format!(" ({c})"),
@@ -909,7 +975,12 @@ impl crate::protocol::Protocol for OpenAIChat {
             // reasoning_content → reasoning-0 (truthy: skip empty strings).
             // opencode's `reasoningDelta` starts the step internally; otto's
             // lifecycle keeps that explicit, so emit `step-start` first.
-            if let Some(reasoning) = delta.reasoning_content.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(reasoning) = delta
+                .reasoning_content
+                .as_deref()
+                .or(delta.reasoning.as_deref())
+                .filter(|s| !s.is_empty())
+            {
                 events.extend(state.lifecycle.step_start(0));
                 events.extend(state.lifecycle.reasoning_delta("reasoning-0", reasoning));
             }
@@ -961,11 +1032,21 @@ impl crate::protocol::Protocol for OpenAIChat {
         if state.finish_reason.is_none() && !has_tool_calls && !state.lifecycle.is_started() {
             return Vec::new();
         }
+        // A STARTED stream that ended without a finish_reason and without tool
+        // calls is a truncated response (early close / gateway hiccup).
+        // Fabricating `Finish(Unknown)` here silently accepted the partial
+        // answer; instead close the open blocks and emit NO finish, so the
+        // processor surfaces the retryable `NoTerminalFinish` and the run loop
+        // retries (accept-with-warning happens there once the budget runs out).
+        if state.finish_reason.is_none() && !has_tool_calls {
+            let mut events = state.lifecycle.reasoning_end("reasoning-0");
+            events.extend(state.lifecycle.text_end("text-0"));
+            return events;
+        }
         let mut events: Vec<LLMEvent> = Vec::new();
         // Coerce stop → tool-calls when the model actually emitted tool calls;
-        // fall back to `Unknown` when a started stream ended without a
-        // finish_reason (early close / provider hiccup) so the agent loop always
-        // sees a turn boundary instead of spinning forever on "…thinking".
+        // fall back to `Unknown` when tool calls were buffered but the stream
+        // closed before the finish frame arrived.
         let reason = match state.finish_reason {
             Some(FinishReason::Stop) if has_tool_calls => FinishReason::ToolCalls,
             Some(other) => other,
@@ -1086,23 +1167,115 @@ mod tests {
     }
 
     #[test]
-    fn stream_without_finish_reason_still_terminates() {
+    fn stream_without_finish_reason_closes_blocks_without_finish() {
         // A stream that opens a step (streams content) but whose HTTP frames end
-        // WITHOUT any `finish_reason` chunk — e.g. an early connection close or a
-        // mid-stream provider hiccup. The reducer must still emit a terminal
-        // `finish` so the agent loop sees a turn boundary instead of spinning
-        // forever on "…thinking".
+        // WITHOUT any `finish_reason` chunk — an early connection close or a
+        // mid-stream provider hiccup, i.e. a TRUNCATED response. Fabricating a
+        // terminal `Finish(Unknown)` here silently accepted the partial answer;
+        // instead the reducer closes the open blocks and emits NO finish, so
+        // the processor's truncation gate surfaces retryable NoTerminalFinish
+        // and the run loop retries (accepting-with-warning only once the retry
+        // budget runs out).
         let frames = vec![json!({"choices":[{"delta":{"content":"partial"}}]})];
         let events = drive(&frames);
         let tys = types(&events);
         assert!(
-            tys.contains(&"finish"),
-            "a started stream that ends with no finish_reason must still emit a terminal finish; got {tys:?}"
+            !tys.contains(&"finish"),
+            "a truncated stream must not fabricate a terminal finish; got {tys:?}"
         );
-        match events.last().unwrap() {
-            LLMEvent::Finish { reason, .. } => assert_eq!(*reason, FinishReason::Unknown),
-            other => panic!("expected trailing Finish, got {other:?}"),
+        assert!(
+            tys.contains(&"text-end"),
+            "open text block must still be closed; got {tys:?}"
+        );
+    }
+
+    #[test]
+    fn stream_with_buffered_tool_calls_but_no_finish_still_terminates() {
+        // Tool calls were fully streamed but the finish frame never arrived
+        // (early close). The buffered tool calls are legitimate work — coerce
+        // to a tool-calls turn boundary rather than discarding them.
+        let frames = vec![json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"call_1","function":{"name":"echo","arguments":"{}"}}
+        ]},"finish_reason":"tool_calls"}]})];
+        let events = drive(&frames);
+        let tys = types(&events);
+        assert!(tys.contains(&"tool-call"));
+        assert!(tys.contains(&"finish"));
+    }
+
+    #[test]
+    fn numeric_error_code_maps_to_http_status() {
+        // litellm/OpenRouter send numeric codes (`"code": 429`); this used to
+        // fail strict decoding and kill the turn with a fatal EventDecode.
+        let protocol = OpenAIChat;
+        let req = request();
+        let mut state = protocol.initial(&req);
+        let event: OpenAIChatEvent = serde_json::from_value(json!({
+            "error": {"message": "rate limited", "code": 429}
+        }))
+        .expect("numeric code decodes");
+        let err = protocol.step(&mut state, event).unwrap_err();
+        match err {
+            LLMError::Http { status, .. } => assert_eq!(status, 429),
+            other => panic!("expected Http {{429}}, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn string_http_error_code_maps_to_http_status() {
+        let protocol = OpenAIChat;
+        let req = request();
+        let mut state = protocol.initial(&req);
+        let event: OpenAIChatEvent = serde_json::from_value(json!({
+            "error": {"message": "upstream overloaded", "code": "503"}
+        }))
+        .expect("string code decodes");
+        let err = protocol.step(&mut state, event).unwrap_err();
+        assert!(matches!(err, LLMError::Http { status: 503, .. }));
+    }
+
+    #[test]
+    fn bare_string_error_frame_decodes_and_surfaces() {
+        // Some gateways emit `{"error": "boom"}` — a bare string, not the
+        // OpenAI object shape.
+        let protocol = OpenAIChat;
+        let req = request();
+        let mut state = protocol.initial(&req);
+        let event: OpenAIChatEvent =
+            serde_json::from_value(json!({"error": "boom"})).expect("bare-string error decodes");
+        let err = protocol.step(&mut state, event).unwrap_err();
+        match err {
+            LLMError::Stream(msg) => assert!(msg.contains("boom"), "got {msg}"),
+            other => panic!("expected Stream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_http_error_code_stays_stream_error() {
+        let protocol = OpenAIChat;
+        let req = request();
+        let mut state = protocol.initial(&req);
+        let event: OpenAIChatEvent = serde_json::from_value(json!({
+            "error": {"message": "bad schema", "type": "invalid_request_error", "code": "invalid_function"}
+        }))
+        .expect("decodes");
+        let err = protocol.step(&mut state, event).unwrap_err();
+        assert!(matches!(err, LLMError::Stream(_)));
+    }
+
+    #[test]
+    fn openrouter_reasoning_delta_maps_like_reasoning_content() {
+        // OpenRouter/vLLM stream thinking as `delta.reasoning`.
+        let frames = vec![
+            json!({"choices":[{"delta":{"reasoning":"thinking…"}}]}),
+            json!({"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}),
+        ];
+        let events = drive(&frames);
+        let tys = types(&events);
+        assert!(
+            tys.contains(&"reasoning-delta"),
+            "delta.reasoning must map to reasoning events; got {tys:?}"
+        );
     }
 
     #[test]

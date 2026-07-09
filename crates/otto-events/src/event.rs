@@ -363,6 +363,15 @@ pub enum LLMEvent {
         /// The failing error's message (the TUI classifies rate-limit from it).
         message: String,
     },
+
+    /// `warning` — the run continued despite a quality concern the user should
+    /// see (e.g. a provider that never sends `finish_reason`, whose response
+    /// was accepted as-is after the retry budget ran out). Informational; the
+    /// turn did not fail.
+    Warning {
+        /// Human-readable description of the concern.
+        message: String,
+    },
 }
 
 #[cfg(test)]
