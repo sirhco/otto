@@ -4,7 +4,7 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
-## [Unreleased]
+## [0.3.2] - 2026-07-09
 
 ### Fixed
 
