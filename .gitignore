@@ -28,3 +28,6 @@ HANDOFF.md
 # Claude Code local config / instructions (never commit)
 .claude/
 CLAUDE.md
+
+# Machine-local project config (provider endpoints, model pins)
+/otto.json
