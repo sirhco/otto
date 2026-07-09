@@ -234,6 +234,7 @@ fn config(
         compaction_reserved: 20_000,
         auto_compact: true,
         max_retries: 5,
+        max_total_retries: 20,
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
@@ -675,6 +676,107 @@ async fn non_retryable_error_emits_no_retry_event() {
         }
     }
     assert!(!saw_retry, "a non-retryable failure must not emit Retry");
+}
+
+// NOTE: not `start_paused` — see `retry_emits_retry_event_before_backoff`.
+// `max_retries: 2` keeps the single real backoff sleep at ~4s.
+#[tokio::test]
+async fn empty_stream_retries_with_backoff_then_errors() {
+    let (store, _user) = seed("hi").await;
+
+    // Every `stream()` call yields zero events: the shape of an
+    // OpenAI-compatible gateway emitting only unrecognized frames. Before the
+    // EmptyStream fix this looped to the 1000-iteration cap with no backoff,
+    // inserting a fresh empty assistant message per pass.
+    let (route, calls) = ScriptedRoute::build(vec![]);
+    let mut cfg = config(
+        store.clone(),
+        route,
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    cfg.max_retries = 2;
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
+    cfg.event_tx = Some(event_tx);
+
+    let result = run_loop(&cfg, SES).await;
+    assert!(result.is_err(), "an always-empty stream must fail the run");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "initial attempt + 1 retry under max_retries=2, not 1000 iterations"
+    );
+
+    drop(cfg);
+    let mut saw_retry = false;
+    while let Some(ev) = event_rx.recv().await {
+        if matches!(ev, LLMEvent::Retry { .. }) {
+            saw_retry = true;
+        }
+    }
+    assert!(saw_retry, "empty attempts must surface Retry events");
+
+    // Exactly one assistant message (retries reuse the id — no pile-up), and
+    // it is finalized with the provider error.
+    let msgs = store.list_messages(SES).await.expect("messages");
+    let assistants: Vec<_> = msgs.iter().filter(|m| m.is_assistant()).collect();
+    assert_eq!(assistants.len(), 1, "no empty-assistant pile-up");
+    let a = assistants[0].as_assistant().expect("assistant body");
+    assert!(
+        a.error.is_some(),
+        "exhausted retries must finalize the assistant with an error"
+    );
+    assert!(
+        a.time.completed.is_some(),
+        "exhausted retries must stamp time.completed"
+    );
+}
+
+#[tokio::test]
+async fn total_retry_budget_binds_across_generous_per_step_budget() {
+    let (store, _user) = seed("hi").await;
+
+    // Always fails retryably with a zero Retry-After (no real sleeps). The
+    // per-step budget (10) would allow many more attempts; the run-level
+    // total budget (3) must bind first.
+    struct AlwaysRateLimitedRoute {
+        calls: Arc<AtomicUsize>,
+    }
+    impl Route for AlwaysRateLimitedRoute {
+        fn id(&self) -> &str {
+            "always-429"
+        }
+        fn stream(&self, _req: LLMRequest) -> BoxStream<'static, Result<LLMEvent, LLMError>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            stream::iter(vec![Err(LLMError::Http {
+                status: 429,
+                message: "rate limit".into(),
+                retry_after: Some(Duration::from_millis(0)),
+            })])
+            .boxed()
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut cfg = config(
+        store.clone(),
+        Arc::new(AlwaysRateLimitedRoute {
+            calls: calls.clone(),
+        }),
+        registry(Arc::new(EchoTool)),
+        CancellationToken::new(),
+    );
+    cfg.max_retries = 10;
+    cfg.max_total_retries = 3;
+
+    let result = run_loop(&cfg, SES).await;
+    assert!(result.is_err(), "total retry budget exhausts the run");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "3 attempts total: the run budget binds before the per-step budget"
+    );
 }
 
 /// A [`Route`] whose first `stream()` call persists partial text then fails

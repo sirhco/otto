@@ -275,6 +275,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
             compaction_reserved: crate::run::DEFAULT_COMPACTION_RESERVED,
             auto_compact: true,
             max_retries: crate::run::DEFAULT_MAX_RETRIES,
+            max_total_retries: crate::run::DEFAULT_MAX_TOTAL_RETRIES,
             // Forward the request's optional event tap into the child run. `None`
             // (the default for the `task` tool + tests) leaves the child
             // untapped, byte-identical to the prior hard-coded behavior; `Some`

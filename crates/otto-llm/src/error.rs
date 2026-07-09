@@ -66,6 +66,14 @@ pub enum LLMError {
     #[error("provider stream ended without terminal finish")]
     NoTerminalFinish,
 
+    /// The provider stream completed without producing a single recognized
+    /// event — no content, no finish, no error. Typical of OpenAI-compatible
+    /// gateways emitting frames in a shape the protocol decoder ignores.
+    /// Retryable: distinct from [`LLMError::NoTerminalFinish`] (which implies
+    /// content was seen) so the two show up separately in logs and metrics.
+    #[error("provider stream produced no recognized events")]
+    EmptyStream,
+
     /// A mid-stream provider error the provider (or its rate-limit signal)
     /// marked as transient — surfaced from a `provider-error` event and always
     /// retried, unlike a plain [`LLMError`] with no retry signal.

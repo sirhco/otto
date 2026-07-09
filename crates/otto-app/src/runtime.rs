@@ -13,7 +13,8 @@ use otto_llm::HttpTransport;
 use otto_mcp::{McpClient, McpServerConfig};
 use otto_permission::{Permission, PermissionMode, Ruleset, SessionGate};
 use otto_session::run::{
-    DEFAULT_COMPACTION_RESERVED, DEFAULT_MAX_RETRIES, DEFAULT_PRESERVE_RECENT_TOKENS,
+    DEFAULT_COMPACTION_RESERVED, DEFAULT_MAX_RETRIES, DEFAULT_MAX_TOTAL_RETRIES,
+    DEFAULT_PRESERVE_RECENT_TOKENS,
 };
 use otto_session::{RouteFor, RunConfig, SessionSubagentSpawner, run_loop};
 use otto_storage::model::{
@@ -490,6 +491,17 @@ impl Runtime {
             .and_then(|c| c.reserved)
             .unwrap_or(DEFAULT_COMPACTION_RESERVED);
 
+        // Retry knobs (`config.retry`), falling back to the session defaults.
+        let retry_cfg = self.config.retry.clone();
+        let max_retries_cfg = retry_cfg
+            .as_ref()
+            .and_then(|r| r.max_attempts)
+            .unwrap_or(DEFAULT_MAX_RETRIES);
+        let max_total_retries_cfg = retry_cfg
+            .as_ref()
+            .and_then(|r| r.max_total_attempts)
+            .unwrap_or(DEFAULT_MAX_TOTAL_RETRIES);
+
         // Tersemode brevity directive, resolved before the spawn (borrows
         // `self.config`) and moved into the run.
         let tersemode = tersemode_directive(&self.config);
@@ -602,7 +614,8 @@ impl Runtime {
                 preserve_recent_tokens,
                 compaction_reserved,
                 auto_compact,
-                max_retries: DEFAULT_MAX_RETRIES,
+                max_retries: max_retries_cfg,
+                max_total_retries: max_total_retries_cfg,
                 event_tx: Some(event_tx),
                 system_cache: None,
                 tersemode_directive: tersemode,

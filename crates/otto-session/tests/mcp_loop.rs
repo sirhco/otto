@@ -260,6 +260,7 @@ fn config(store: Store, route: Arc<dyn Route>, tools: ToolRegistry) -> RunConfig
         compaction_reserved: 20_000,
         auto_compact: true,
         max_retries: 5,
+        max_total_retries: 20,
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,

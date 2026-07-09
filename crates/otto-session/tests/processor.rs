@@ -743,20 +743,37 @@ async fn content_with_terminal_finish_continues() {
 }
 
 #[tokio::test]
-async fn empty_stream_without_content_is_not_no_terminal_finish() {
+async fn empty_stream_is_retryable_empty_stream_error() {
     let store = store_with_message().await;
     let gate: Arc<dyn PermissionGate> = Arc::new(RecordingGate::default());
     let mut proc = Processor::new(store.clone(), SES, MSG, model(), "build", gate);
 
-    // A step frame but no real content and no Finish: must NOT be misclassified
-    // as a truncated response.
+    // A step frame but no real content and no Finish. Returning `Continue`
+    // here made the run loop re-request immediately with no backoff, forever
+    // (the zero-event loop against OpenAI-compatible gateways). It must
+    // surface as `EmptyStream` — retryable with backoff — and stay distinct
+    // from `NoTerminalFinish` (which implies content was streamed).
     let events = vec![LLMEvent::StepStart { index: 0 }];
 
-    let outcome = proc.process(ok_stream(events)).await.expect("process");
-    assert_eq!(
-        outcome,
-        ProcessOutcome::Continue,
-        "no content ⇒ not a spurious NoTerminalFinish"
+    let err = proc.process(ok_stream(events)).await.unwrap_err();
+    assert!(
+        matches!(err, otto_session::ProcessorError::Llm(LLMError::EmptyStream)),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn truly_empty_stream_is_also_empty_stream_error() {
+    let store = store_with_message().await;
+    let gate: Arc<dyn PermissionGate> = Arc::new(RecordingGate::default());
+    let mut proc = Processor::new(store.clone(), SES, MSG, model(), "build", gate);
+
+    // Zero events at all — not even a step frame (gateway returned 200 and
+    // closed, or every frame was in an unrecognized shape).
+    let err = proc.process(ok_stream(vec![])).await.unwrap_err();
+    assert!(
+        matches!(err, otto_session::ProcessorError::Llm(LLMError::EmptyStream)),
+        "got {err:?}"
     );
 }
 

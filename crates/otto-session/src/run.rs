@@ -45,6 +45,11 @@ pub const DEFAULT_PRESERVE_RECENT_TOKENS: u64 = 20_000;
 pub const DEFAULT_COMPACTION_RESERVED: u64 = 20_000;
 /// Default cap on per-turn retries of a retryable provider failure.
 pub const DEFAULT_MAX_RETRIES: u32 = 5;
+/// Default cap on retries across the *whole prompt* (all steps combined). The
+/// per-step budget ([`DEFAULT_MAX_RETRIES`]) resets on every successful step,
+/// so a long multi-step turn against a flaky provider could otherwise retry
+/// indefinitely; this bounds the total.
+pub const DEFAULT_MAX_TOTAL_RETRIES: u32 = 20;
 
 /// Assistant-role prompt injected on the final allowed step to force a
 /// text-only wrap-up (`prompt.ts:1280`, text from `session/runner/max-steps.ts`).
@@ -100,6 +105,10 @@ pub struct RunConfig {
     /// Cap on per-turn retries of a retryable provider failure
     /// ([`retry::with_retry`]). See [`DEFAULT_MAX_RETRIES`].
     pub max_retries: u32,
+    /// Cap on retries summed across all steps of one prompt. The per-step
+    /// `max_retries` budget resets after each successful step; this bounds the
+    /// run as a whole. See [`DEFAULT_MAX_TOTAL_RETRIES`].
+    pub max_total_retries: u32,
     /// Optional live event tap. When `Some`, a clone of every
     /// [`otto_events::LLMEvent`] flowing through the tool-augmented stream into
     /// the [`Processor`] is forwarded on this channel *without* disturbing the
@@ -307,6 +316,34 @@ async fn finalize_interrupted(
     Ok(())
 }
 
+/// Mark an assistant message failed after retry exhaustion (or a non-retryable
+/// provider error): stamp `time.completed` and record the provider error so
+/// the turn never leaves an unfinalized message behind. Companion to
+/// [`finalize_interrupted`], which handles the abort path.
+async fn finalize_failed(
+    store: &Store,
+    session_id: &str,
+    assistant_id: &str,
+    err: &otto_llm::LLMError,
+) -> Result<(), StorageError> {
+    let Some(mut info) = store.get_message(session_id, assistant_id).await? else {
+        return Ok(());
+    };
+    if let InfoBody::Assistant(a) = &mut info.body {
+        if a.time.completed.is_none() {
+            a.time.completed = Some(now_ms());
+        }
+        if a.error.is_none() {
+            a.error = Some(AssistantError::UnknownError {
+                message: err.to_string(),
+                r#ref: None,
+            });
+        }
+        store.update_message(&info).await?;
+    }
+    Ok(())
+}
+
 /// Resolve the message returned by [`run_loop`] — the newest assistant message,
 /// else the newest message (`prompt.ts:1073-1079`, `lastAssistant`).
 async fn last_assistant(store: &Store, session_id: &str) -> Result<Info, RunError> {
@@ -340,6 +377,10 @@ async fn last_assistant(store: &Store, session_id: &str) -> Result<Info, RunErro
 pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunError> {
     let mut step: u32 = 0;
     let mut iterations: u32 = 0;
+    // Retries summed across every step of this prompt. The per-step `attempt`
+    // counter resets each step; without this a flaky provider on a long
+    // multi-step turn gets a fresh 5-attempt budget every step, forever.
+    let mut total_retries: u32 = 0;
 
     loop {
         iterations += 1;
@@ -514,7 +555,15 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         break ProcessOutcome::Stop;
                     }
                     attempt += 1;
-                    if attempt >= cfg.max_retries || !retry::retryable(&err, &provider.0) {
+                    total_retries += 1;
+                    if attempt >= cfg.max_retries
+                        || total_retries >= cfg.max_total_retries
+                        || !retry::retryable(&err, &provider.0)
+                    {
+                        // Stamp the failure on the assistant message before
+                        // propagating so the turn never leaves an unfinalized
+                        // message behind (mirrors `finalize_interrupted`).
+                        finalize_failed(&cfg.store, session_id, &assistant_id, &err).await?;
                         return Err(ProcessorError::Llm(err).into());
                     }
                     let wait = retry::delay(attempt, err.retry_after());

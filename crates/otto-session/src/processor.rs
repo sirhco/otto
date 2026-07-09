@@ -289,17 +289,23 @@ impl Processor {
         drain?;
         clean?;
 
-        // A clean EOF with real content but no terminal `Finish` is a truncated /
-        // halted response — surface it as a retryable error so the run loop
-        // retries. Gated so compaction / blocked / error / empty turns are not
+        // A clean EOF without a terminal `Finish` is never a healthy turn:
+        // with content it's a truncated / halted response, without content it's
+        // an empty stream (gateway emitted nothing we recognize). Both surface
+        // as retryable errors so the run loop backs off and retries — returning
+        // `Continue` for an empty stream would re-request immediately with no
+        // backoff, forever. Gated so compaction / blocked / error turns are not
         // misclassified; placed after cleanup so cleanup still ran (Fix 4).
         if !self.saw_finish
-            && self.saw_content
             && !self.needs_compaction
             && !self.blocked
             && !self.assistant().map(|a| a.error.is_some()).unwrap_or(false)
         {
-            return Err(ProcessorError::Llm(LLMError::NoTerminalFinish));
+            return Err(ProcessorError::Llm(if self.saw_content {
+                LLMError::NoTerminalFinish
+            } else {
+                LLMError::EmptyStream
+            }));
         }
 
         // Compute outcome (`processor.ts:677-679`).

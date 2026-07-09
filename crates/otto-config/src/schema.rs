@@ -87,6 +87,22 @@ pub struct Compaction {
     pub reserved: Option<u64>,
 }
 
+/// `retry` — provider retry/backoff knobs (otto extension, no opencode
+/// analog). All fields optional; unset falls back to the session defaults
+/// (`otto-session`'s `DEFAULT_MAX_RETRIES` / `DEFAULT_MAX_TOTAL_RETRIES`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Retry {
+    /// Cap on retries of one step (one provider request). Default 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// Cap on retries summed across all steps of one prompt. Default 20.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_attempts: Option<u32>,
+    /// Wall-clock cap on one prompt turn, in seconds. Unset = no timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_timeout_seconds: Option<u64>,
+}
+
 /// Port of opencode `ConfigV1.Info` (`config.ts:32-189`).
 ///
 /// Extra / unknown keys parse without error but are dropped on re-serialize.
@@ -211,6 +227,10 @@ pub struct Config {
     /// `compaction` (`config.ts:146`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<Compaction>,
+
+    /// `retry` — provider retry/backoff knobs (otto extension).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<Retry>,
 
     /// `experimental` (`config.ts:166`) — permissive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
