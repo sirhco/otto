@@ -311,10 +311,15 @@ fn transcript(app: &App, frame: &mut Frame, area: Rect) -> bool {
             let idx = s.current.min(matches.len() - 1);
             let current_line = matches[idx];
             highlight_search(&mut lines, &s.query, Some(current_line), t);
-            let mi = current_line as u16;
-            let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+            // Map the LOGICAL match line to its wrapped ROW — using the
+            // logical index as a row offset drifts as soon as anything wraps.
+            let mi = cached
+                .line_wrap_starts
+                .get(current_line)
+                .copied()
+                .unwrap_or(0);
             let offset = search_offset(mi, total, area.height);
-            frame.render_widget(para.scroll((offset, 0)), area);
+            render_scrolled(frame, area, lines, &cached.line_wrap_starts, offset);
             // Searching overrides the normal "▼ more" hint; keeping this
             // `false` is simplest (the search bar itself already shows
             // position via the `i/count` ordinal).
@@ -339,17 +344,17 @@ fn transcript(app: &App, frame: &mut Frame, area: Rect) -> bool {
                     }
                 }
             }
-            let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-            let offset = search_offset(start as u16, total, area.height);
-            frame.render_widget(para.scroll((offset, 0)), area);
+            // Logical item-start line → wrapped row (same mapping as search).
+            let row = cached.line_wrap_starts.get(start).copied().unwrap_or(0);
+            let offset = search_offset(row, total, area.height);
+            render_scrolled(frame, area, lines, &cached.line_wrap_starts, offset);
             return offset < scroll_max(total, area.height);
         }
     }
 
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-    // `app.scroll` is lines-from-bottom (0 = following the newest content).
+    // `app.scroll` is wrapped-rows-from-bottom (0 = following newest content).
     let (offset, clamped_scroll) = scroll_offset(app.scroll, total, area.height);
-    frame.render_widget(para.scroll((offset, 0)), area);
+    render_scrolled(frame, area, lines, &cached.line_wrap_starts, offset);
     // Show the indicator for ANY scrolled-up position, including fully at
     // the top (where `clamped_scroll == max`, so `clamped_scroll < max`
     // would wrongly go false right when the most content is hidden below).
@@ -458,6 +463,7 @@ fn rebuild_line_cache(app: &App, width: u16, prev: Option<&LineCache>) -> LineCa
     let mut items = Vec::with_capacity(app.transcript.len());
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut starts: Vec<usize> = Vec::with_capacity(app.transcript.len());
+    let mut line_wrap_starts: Vec<u32> = Vec::new();
     let mut wrap_total: u32 = 0;
     for (i, item) in app.transcript.iter().enumerate() {
         let fingerprint = item_fingerprint(item);
@@ -465,23 +471,33 @@ fn rebuild_line_cache(app: &App, width: u16, prev: Option<&LineCache>) -> LineCa
             Some(e) if e.fingerprint == fingerprint => e.clone(),
             _ => {
                 let rendered = render_item(item, &app.theme);
-                // `.wrap(...)` must match the render-time wrapping: without it
-                // `line_count` returns the LOGICAL line count, so every wrapped
-                // line undercounts the total, scroll_max comes up short, and
-                // the bottom of the transcript becomes unreachable (worse the
-                // narrower the terminal).
-                let wrap = Paragraph::new(rendered.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(width) as u16;
+                // Measure each line WRAPPED — `line_count` without `.wrap(...)`
+                // returns the LOGICAL count, which undercounts the total,
+                // shortens scroll_max, and makes the bottom of the transcript
+                // unreachable (worse the narrower the terminal). Per-line
+                // counts also feed `line_wrap_starts`, which maps logical line
+                // indices to viewport rows for jump-scroll/search and the
+                // sliced render.
+                let line_wraps: Vec<u16> = rendered
+                    .iter()
+                    .map(|l| {
+                        Paragraph::new(l.clone())
+                            .wrap(Wrap { trim: false })
+                            .line_count(width) as u16
+                    })
+                    .collect();
                 crate::state::ItemCacheEntry {
                     fingerprint,
                     lines: std::sync::Arc::new(rendered),
-                    wrap,
+                    line_wraps: std::sync::Arc::new(line_wraps),
                 }
             }
         };
         starts.push(lines.len());
-        wrap_total += u32::from(entry.wrap);
+        for w in entry.line_wraps.iter() {
+            line_wrap_starts.push(wrap_total);
+            wrap_total += u32::from(*w);
+        }
         lines.extend(entry.lines.iter().cloned());
         items.push(entry);
     }
@@ -489,8 +505,9 @@ fn rebuild_line_cache(app: &App, width: u16, prev: Option<&LineCache>) -> LineCa
         r#gen: app.render_gen,
         width,
         lines,
-        wrap_total: u16::try_from(wrap_total).unwrap_or(u16::MAX),
+        wrap_total,
         item_line_starts: starts,
+        line_wrap_starts,
         items,
     }
 }
@@ -514,30 +531,53 @@ fn search_matches(lines: &[Line], pattern: &str) -> Vec<usize> {
         .collect()
 }
 
-/// The top-of-viewport offset that would show the very bottom of a
-/// `total`-line paragraph in a `height`-row viewport. Shared by
+/// The top-of-viewport offset (in wrapped rows) that would show the very
+/// bottom of a `total`-row paragraph in a `height`-row viewport. Shared by
 /// `scroll_offset` (normal follow/scroll-back) and `search_offset`
 /// (jump-to-match) so both clamp against the same bound.
-fn scroll_max(total: u16, height: u16) -> u16 {
-    total.saturating_sub(height)
+fn scroll_max(total: u32, height: u16) -> u32 {
+    total.saturating_sub(u32::from(height))
 }
 
-/// Convert `scroll` (lines-from-bottom; 0 = following the newest content)
-/// into a top-of-viewport offset. `scroll == 0` maps to `offset == max`
-/// (showing the bottom); larger `scroll` walks the offset back toward the
-/// top, clamped so it can't underflow. Returns `(offset, clamped_scroll)` —
-/// the latter lets the caller detect "scrolled up at all".
-fn scroll_offset(scroll: u16, total: u16, height: u16) -> (u16, u16) {
+/// Convert `scroll` (wrapped rows from the bottom; 0 = following the newest
+/// content) into a top-of-viewport row offset. `scroll == 0` maps to
+/// `offset == max` (showing the bottom); larger `scroll` walks the offset
+/// back toward the top, clamped so it can't underflow. Returns
+/// `(offset, clamped_scroll)` — the latter lets the caller detect "scrolled
+/// up at all".
+fn scroll_offset(scroll: u32, total: u32, height: u16) -> (u32, u32) {
     let max = scroll_max(total, height);
     let clamped_scroll = scroll.min(max);
     (max.saturating_sub(clamped_scroll), clamped_scroll)
 }
 
-/// The top-of-viewport offset that centers line `mi` (the current search
-/// match) within a `height`-row viewport over `total` lines.
-fn search_offset(mi: u16, total: u16, height: u16) -> u16 {
+/// The top-of-viewport row offset that centers wrapped row `mi` (the current
+/// search match / selected item start) within a `height`-row viewport over
+/// `total` wrapped rows.
+fn search_offset(mi: u32, total: u32, height: u16) -> u32 {
     let max = scroll_max(total, height);
-    mi.saturating_sub(height / 2).min(max)
+    mi.saturating_sub(u32::from(height / 2)).min(max)
+}
+
+/// Render `lines` scrolled down by `offset` wrapped rows. `Paragraph::scroll`
+/// takes a u16, so instead of passing a potentially huge offset, slice the
+/// line list at the logical line containing the target row (via the
+/// `line_wrap_starts` prefix sums) and hand the widget only the small
+/// residual within that line.
+fn render_scrolled(
+    frame: &mut Frame,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+    line_wrap_starts: &[u32],
+    offset: u32,
+) {
+    // Last logical line starting at or before the target row.
+    let idx = line_wrap_starts
+        .partition_point(|&s| s <= offset)
+        .saturating_sub(1);
+    let residual = offset.saturating_sub(line_wrap_starts.get(idx).copied().unwrap_or(0));
+    let para = Paragraph::new(lines[idx.min(lines.len())..].to_vec()).wrap(Wrap { trim: false });
+    frame.render_widget(para.scroll((residual.min(u32::from(u16::MAX)) as u16, 0)), area);
 }
 
 /// Restyle the matched substrings of an active search in place. For each line,
@@ -1385,6 +1425,37 @@ mod tests {
             c.wrap_total >= 6,
             "600 chars at width ~100 must count >= 6 wrapped rows, got {}",
             c.wrap_total
+        );
+    }
+
+    /// `line_wrap_starts` must map logical line indices to WRAPPED rows —
+    /// jump-scroll and search center on these; with logical indices they
+    /// drift as soon as any earlier line wraps.
+    #[test]
+    fn line_wrap_starts_account_for_earlier_wrapping() {
+        let mut app = App::new();
+        app.transcript
+            .push(TranscriptItem::Assistant("x".repeat(600))); // wraps ~6+ rows
+        app.transcript
+            .push(TranscriptItem::Assistant("TARGET".into()));
+        let _ = render(&app);
+        let c = app.line_cache.borrow();
+        let c = c.as_ref().unwrap();
+        let target_logical = c.item_line_starts[1];
+        let target_row = c.line_wrap_starts[target_logical];
+        assert!(
+            target_row > target_logical as u32,
+            "wrapped row ({target_row}) must exceed the logical index \
+             ({target_logical}) when an earlier line wraps"
+        );
+        assert_eq!(
+            c.line_wrap_starts.len(),
+            c.lines.len(),
+            "one start per assembled line"
+        );
+        assert!(
+            c.wrap_total >= target_row,
+            "total covers every line's rows"
         );
     }
 

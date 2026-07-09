@@ -302,7 +302,10 @@ pub struct App {
     pub model: Option<String>,
     pub status: String,
     pub should_quit: bool,
-    pub scroll: u16,
+    /// Lines-from-bottom scroll position in WRAPPED rows (0 = follow). u32:
+    /// long sessions exceed u16 rows; the render slices the line list so the
+    /// widget-level u16 scroll offset never overflows.
+    pub scroll: u32,
     /// Selected tool row for per-row expand, as an index into `transcript`.
     /// `None` = no selection (normal follow/scroll). See `select_*_tool`.
     pub(crate) tool_cursor: Option<usize>,
@@ -350,7 +353,7 @@ pub struct App {
     /// transcript render, so `scroll_up` can clamp instead of building
     /// invisible overscroll debt. `Cell` because `view::transcript` only holds
     /// `&App` (same pattern as `line_cache`).
-    pub last_scroll_max: std::cell::Cell<u16>,
+    pub last_scroll_max: std::cell::Cell<u32>,
     /// Startup splash: ticks remaining before it auto-dismisses (`Some(n)` while
     /// showing, `None` once dismissed). Set at launch by `run`, decremented each
     /// `Msg::Tick`, and cleared immediately by any keypress (`on_key`).
@@ -425,10 +428,17 @@ pub struct LineCache {
     pub(crate) r#gen: u64,
     pub(crate) width: u16,
     pub(crate) lines: Vec<ratatui::text::Line<'static>>,
-    pub(crate) wrap_total: u16,
+    /// Total WRAPPED rows at `width` (u32: long sessions exceed u16 rows).
+    pub(crate) wrap_total: u32,
     /// Assembled-line index at which each `transcript[i]` begins. Content-derived
     /// (same key as `lines`), used to highlight + center the selected tool row.
     pub(crate) item_line_starts: Vec<usize>,
+    /// Wrapped-row index at which each assembled line begins (prefix sums of
+    /// per-line wrap counts; `line_wrap_starts.len() == lines.len()`). Maps
+    /// logical line indices (search matches, item starts) to viewport rows,
+    /// and lets the render slice the line list so `Paragraph::scroll`'s u16
+    /// offset never overflows.
+    pub(crate) line_wrap_starts: Vec<u32>,
     /// Per-item render memo: a rebuild re-renders only items whose fingerprint
     /// changed (during streaming that's just the open block), so cost per delta
     /// is O(open item), not O(whole transcript).
@@ -444,8 +454,9 @@ pub(crate) struct ItemCacheEntry {
     pub(crate) fingerprint: u64,
     /// The item's assembled lines.
     pub(crate) lines: std::sync::Arc<Vec<ratatui::text::Line<'static>>>,
-    /// The item's wrapped line count at the cache's width.
-    pub(crate) wrap: u16,
+    /// Per assembled line, its wrapped row count at the cache's width. The
+    /// item's total is their sum (accumulated into `LineCache::wrap_total`).
+    pub(crate) line_wraps: std::sync::Arc<Vec<u16>>,
 }
 
 /// A transient, auto-fading status confirmation ("copied", "attached", "sent").
@@ -1261,7 +1272,18 @@ impl App {
                 if let Some(r) = &self.retry {
                     let remaining_ticks = r.expires_tick.saturating_sub(self.tick);
                     if remaining_ticks == 0 {
-                        self.status = format!("{} (now)", r.prefix);
+                        // Backoff elapsed but the next attempt hasn't emitted
+                        // an event yet — count UP so a hung reconnect reads as
+                        // "still trying for Ns", not a frozen "(now)".
+                        let overdue = self
+                            .tick
+                            .wrapping_sub(r.expires_tick)
+                            .div_ceil(crate::view::TICKS_PER_SEC.max(1));
+                        if overdue == 0 {
+                            self.status = format!("{} (now)", r.prefix);
+                        } else {
+                            self.status = format!("{} (now +{overdue}s)", r.prefix);
+                        }
                     } else {
                         let secs = remaining_ticks.div_ceil(crate::view::TICKS_PER_SEC);
                         self.status = format!("{} ({secs}s)", r.prefix);
@@ -1308,14 +1330,14 @@ impl App {
 
     /// Scroll `n` lines toward older content (away from the bottom), clamped
     /// to the last rendered scroll bound so PageDown always has visible effect.
-    pub fn scroll_up(&mut self, n: u16) {
+    pub fn scroll_up(&mut self, n: u32) {
         self.scroll = self
             .scroll
             .saturating_add(n)
             .min(self.last_scroll_max.get());
     }
     /// Scroll `n` lines toward the newest content; 0 = following.
-    pub fn scroll_down(&mut self, n: u16) {
+    pub fn scroll_down(&mut self, n: u32) {
         self.scroll = self.scroll.saturating_sub(n);
     }
     pub fn scroll_to_bottom(&mut self) {
@@ -3851,13 +3873,24 @@ mod tests {
             "status must count down live, got {:?}",
             app.status
         );
-        // Draining the rest of the wait reaches the terminal "now" form.
+        // Draining the rest of the wait reaches the expiry, then counts UP —
+        // a hung reconnect must read as "still trying for Ns", not a frozen
+        // "(now)".
         for _ in 0..40 {
             app.update(Msg::Tick);
         }
         assert!(
-            app.status.ends_with("(now)"),
-            "exhausted countdown shows (now), got {:?}",
+            app.status.ends_with("(now +2s)"),
+            "overdue countdown counts up, got {:?}",
+            app.status
+        );
+        assert!(app.is_busy(), "overdue retry still animates the spinner");
+        for _ in 0..8 {
+            app.update(Msg::Tick);
+        }
+        assert!(
+            app.status.ends_with("(now +3s)"),
+            "keeps counting up, got {:?}",
             app.status
         );
     }

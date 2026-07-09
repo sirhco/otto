@@ -85,6 +85,10 @@ pub struct Compaction {
     pub preserve_recent_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reserved: Option<u64>,
+    /// Trailing tool-output token budget protected from post-turn pruning
+    /// (otto extension; default 40000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prune_protect_tokens: Option<u64>,
 }
 
 /// `retry` — provider retry/backoff knobs (otto extension, no opencode

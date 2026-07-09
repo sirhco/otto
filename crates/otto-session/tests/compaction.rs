@@ -285,6 +285,7 @@ fn config(store: Store, route: Arc<dyn Route>, model: Model) -> RunConfig {
         preserve_recent_tokens: 20_000,
         compaction_reserved: 0,
         auto_compact: true,
+        prune_protect_tokens: 40_000,
         max_retries: 5,
         max_total_retries: 20,
         event_tx: None,
@@ -541,5 +542,92 @@ async fn prune_erases_old_tool_outputs() {
     assert!(
         !compacted(tool_state(&store, &a3, "grep").await),
         "protected by PRUNE_PROTECT budget"
+    );
+}
+
+/// Insert a completed `read` tool part whose input records the file path.
+async fn insert_read_part(store: &Store, ses: &str, msg_id: &str, path: &str, output: &str) {
+    store
+        .insert_part(&Part {
+            id: new_part_id(),
+            session_id: ses.into(),
+            message_id: msg_id.into(),
+            kind: PartKind::Tool {
+                call_id: new_part_id(),
+                tool: "read".into(),
+                metadata: None,
+                state: ToolState::Completed {
+                    input: json!({ "filePath": path }),
+                    output: output.into(),
+                    title: path.into(),
+                    metadata: json!({}),
+                    time: CompletedTime {
+                        start: 1,
+                        end: 2,
+                        compacted: None,
+                    },
+                    attachments: None,
+                },
+            },
+        })
+        .await
+        .expect("read part");
+}
+
+#[tokio::test]
+async fn prune_keeps_newest_read_per_path() {
+    let ses = "ses_prune_reads";
+    let store = open_session(ses).await;
+    let big = "y".repeat(100_000); // ~25k tokens
+
+    // t1: an OLD read of /x (superseded — prunable) and a big grep.
+    let u1 = insert_user(&store, ses, "t1").await;
+    let a1 = insert_assistant(&store, ses, &u1, "", zero_tokens()).await;
+    insert_read_part(&store, ses, &a1, "/x", &big).await;
+    insert_tool_part(&store, ses, &a1, "grep", &big).await;
+
+    // t2: the NEWEST reads of /x and /y — both must survive pruning so the
+    // agent doesn't re-read the same files after every prune.
+    let u2 = insert_user(&store, ses, "t2").await;
+    let a2 = insert_assistant(&store, ses, &u2, "", zero_tokens()).await;
+    insert_read_part(&store, ses, &a2, "/x", &big).await;
+    insert_read_part(&store, ses, &a2, "/y", &big).await;
+
+    // t3: a grep inside the protect budget (exempt reads don't consume it).
+    let u3 = insert_user(&store, ses, "t3").await;
+    let a3 = insert_assistant(&store, ses, &u3, "", zero_tokens()).await;
+    insert_tool_part(&store, ses, &a3, "grep", &big).await;
+
+    // t4 + t5: the protected last two turns.
+    let u4 = insert_user(&store, ses, "t4").await;
+    insert_assistant(&store, ses, &u4, "no tools", zero_tokens()).await;
+    let u5 = insert_user(&store, ses, "t5").await;
+    insert_assistant(&store, ses, &u5, "no tools", zero_tokens()).await;
+
+    let (route, _) = ScriptedRoute::build(vec![]);
+    let cfg = config(store.clone(), route, model_with_context(None));
+
+    compaction::prune(&cfg, ses).await.expect("prune");
+
+    let compacted = |state: Option<ToolState>| match state {
+        Some(ToolState::Completed { time, .. }) => time.compacted.is_some(),
+        other => panic!("expected completed tool, got {other:?}"),
+    };
+
+    assert!(
+        !compacted(tool_state(&store, &a2, "read").await),
+        "newest read of each path survives pruning"
+    );
+    assert!(
+        compacted(tool_state(&store, &a1, "read").await),
+        "superseded older read of the same path is pruned"
+    );
+    assert!(
+        compacted(tool_state(&store, &a1, "grep").await),
+        "old non-read output past the budget is pruned"
+    );
+    assert!(
+        !compacted(tool_state(&store, &a3, "grep").await),
+        "protect budget unaffected by exempt reads"
     );
 }

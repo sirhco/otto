@@ -233,6 +233,7 @@ fn config(
         preserve_recent_tokens: 20_000,
         compaction_reserved: 20_000,
         auto_compact: true,
+        prune_protect_tokens: 40_000,
         max_retries: 5,
         max_total_retries: 20,
         event_tx: None,

@@ -91,7 +91,7 @@ pub fn build() -> AgentInfo {
         variant: None,
         prompt: None,
         options: empty_options(),
-        steps: None,
+        steps: Some(200),
     }
 }
 
@@ -125,7 +125,7 @@ pub fn plan() -> AgentInfo {
         variant: None,
         prompt: Some(PROMPT_PLAN.into()),
         options: empty_options(),
-        steps: None,
+        steps: Some(200),
     }
 }
 
@@ -152,7 +152,7 @@ pub fn general() -> AgentInfo {
         variant: None,
         prompt: None,
         options: empty_options(),
-        steps: None,
+        steps: Some(200),
     }
 }
 
@@ -194,7 +194,7 @@ pub fn explore() -> AgentInfo {
         variant: None,
         prompt: Some(PROMPT_EXPLORE.into()),
         options: empty_options(),
-        steps: None,
+        steps: Some(100),
     }
 }
 
@@ -233,7 +233,7 @@ fn hidden_internal(name: &str, prompt: &str, temperature: Option<f64>) -> AgentI
         variant: None,
         prompt: Some(prompt.into()),
         options: empty_options(),
-        steps: None,
+        steps: Some(4),
     }
 }
 

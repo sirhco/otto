@@ -287,6 +287,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
             preserve_recent_tokens: crate::run::DEFAULT_PRESERVE_RECENT_TOKENS,
             compaction_reserved: crate::run::DEFAULT_COMPACTION_RESERVED,
             auto_compact: true,
+            prune_protect_tokens: crate::compaction::PRUNE_PROTECT,
             max_retries: crate::run::DEFAULT_MAX_RETRIES,
             max_total_retries: crate::run::DEFAULT_MAX_TOTAL_RETRIES,
             // Forward the request's optional event tap into the child run. `None`

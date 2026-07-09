@@ -102,6 +102,10 @@ pub struct RunConfig {
     /// Whether the auto-compaction pre-check runs (`cfg.compaction.auto`,
     /// `overflow.ts:28`; `prompt.ts:1161`). Defaults to `true`.
     pub auto_compact: bool,
+    /// Trailing tool-output token budget protected from post-turn pruning
+    /// ([`compaction::prune`]). See [`compaction::PRUNE_PROTECT`] for the
+    /// default; config knob `compaction.prune_protect_tokens`.
+    pub prune_protect_tokens: u64,
     /// Cap on per-turn retries of a retryable provider failure
     /// ([`retry::with_retry`]). See [`DEFAULT_MAX_RETRIES`].
     pub max_retries: u32,

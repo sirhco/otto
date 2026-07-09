@@ -501,6 +501,10 @@ impl Runtime {
             .as_ref()
             .and_then(|c| c.reserved)
             .unwrap_or(DEFAULT_COMPACTION_RESERVED);
+        let prune_protect_tokens = compaction
+            .as_ref()
+            .and_then(|c| c.prune_protect_tokens)
+            .unwrap_or(otto_session::compaction::PRUNE_PROTECT);
 
         // Retry knobs (`config.retry`), falling back to the session defaults.
         let retry_cfg = self.config.retry.clone();
@@ -625,6 +629,7 @@ impl Runtime {
                 preserve_recent_tokens,
                 compaction_reserved,
                 auto_compact,
+                prune_protect_tokens,
                 max_retries: max_retries_cfg,
                 max_total_retries: max_total_retries_cfg,
                 event_tx: Some(event_tx),
