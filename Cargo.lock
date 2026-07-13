@@ -1680,6 +1680,7 @@ dependencies = [
  "otto-auth",
  "otto-config",
  "otto-events",
+ "otto-hooks",
  "otto-id",
  "otto-llm",
  "otto-lsp",
