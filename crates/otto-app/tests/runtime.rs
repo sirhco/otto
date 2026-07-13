@@ -246,6 +246,50 @@ async fn assembles_in_memory() {
 }
 
 #[tokio::test]
+async fn config_hooks_reach_the_tool_registry_and_block_a_matching_call() {
+    // `bash` is a real built-in `Runtime::in_memory` registers by default (no
+    // `.with_tools()` override — that would bypass the very Config -> Runtime
+    // -> registry hook wiring this test exists to prove). Denying it via
+    // `PreToolUse` is safe: the command is never actually executed.
+    let config = Config {
+        hooks: Some(otto_hooks::HooksConfig {
+            pre_tool_use: vec![otto_hooks::HookMatcherGroup {
+                matcher: Some("bash".to_string()),
+                hooks: vec![otto_hooks::HookCommand {
+                    command: "echo '{\"decision\":\"deny\",\"reason\":\"blocked in test\"}'"
+                        .to_string(),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let runtime = Runtime::in_memory(config).await.unwrap();
+
+    let ctx = ToolContext::builder(std::env::temp_dir()).build();
+    let err = runtime
+        .tools()
+        .execute("bash", json!({ "command": "echo hi" }), &ctx)
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), "blocked in test");
+}
+
+#[tokio::test]
+async fn config_without_hooks_leaves_tool_calls_unaffected() {
+    let config = Config::default();
+    let runtime = Runtime::in_memory(config).await.unwrap();
+
+    let ctx = ToolContext::builder(std::env::temp_dir()).build();
+    let res = runtime
+        .tools()
+        .execute("bash", json!({ "command": "true" }), &ctx)
+        .await;
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
 async fn run_yields_events_and_persists_info() {
     let (factory, calls) = ScriptedRouteFactory::new(vec![text_turn("t1", "done")]);
     let rt = Runtime::in_memory(Config::default())
