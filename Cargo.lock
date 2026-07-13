@@ -1753,6 +1753,7 @@ version = "0.3.3"
 dependencies = [
  "dirs",
  "jsonc-parser",
+ "otto-hooks",
  "schemars 0.8.22",
  "serde",
  "serde_json",
