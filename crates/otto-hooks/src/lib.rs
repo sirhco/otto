@@ -5,6 +5,8 @@
 
 mod config;
 mod event;
+mod runner;
 
 pub use config::{HookCommand, HookMatcherGroup, HooksConfig};
 pub use event::{CompactTrigger, Decision, HookEvent, HookKind, HookVerdict, SessionStartSource};
+pub use runner::{DEFAULT_TIMEOUT_MS, HookRunner};
