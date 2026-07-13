@@ -19,6 +19,8 @@ enum HookError {
     Io(#[from] std::io::Error),
     #[error("decoding hook stdout as JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("hook exited nonzero (code {code:?}) with no output")]
+    NonzeroExit { code: Option<i32> },
 }
 
 /// Fires configured lifecycle hooks and resolves the combined verdict.
@@ -99,12 +101,18 @@ impl HookRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(&payload).await?;
         }
         let output = child.wait_with_output().await?;
         if output.stdout.is_empty() {
+            if !output.status.success() {
+                return Err(HookError::NonzeroExit {
+                    code: output.status.code(),
+                });
+            }
             return Ok(HookVerdict::default());
         }
         Ok(serde_json::from_slice(&output.stdout)?)
@@ -231,5 +239,31 @@ mod tests {
         ]);
         let verdict = HookRunner::new(cfg).fire(pre_tool_use_event()).await;
         assert_eq!(verdict.reason.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_process_quickly() {
+        let cfg = cfg_with_pre_tool_use(vec![HookCommand {
+            command: "sleep 30".to_string(),
+            timeout_ms: Some(50),
+        }]);
+        let start = std::time::Instant::now();
+        let verdict = HookRunner::new(cfg).fire(pre_tool_use_event()).await;
+        let elapsed = start.elapsed();
+        assert_eq!(verdict.decision, Decision::Allow);
+        // Should return quickly (well under the 30s sleep), proving the process was killed
+        assert!(elapsed.as_secs() < 5, "timeout should return quickly, got {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_with_valid_json_stdout_is_honored() {
+        let cfg = cfg_with_pre_tool_use(vec![HookCommand {
+            command: "echo '{\"decision\":\"deny\",\"reason\":\"hook failed\"}'; exit 1".to_string(),
+            timeout_ms: None,
+        }]);
+        let verdict = HookRunner::new(cfg).fire(pre_tool_use_event()).await;
+        // Even though exit code is 1, the JSON on stdout should be honored
+        assert_eq!(verdict.decision, Decision::Deny);
+        assert_eq!(verdict.reason.as_deref(), Some("hook failed"));
     }
 }
