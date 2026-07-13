@@ -1,6 +1,3 @@
-   Compiling otto-config v0.3.3 (/Users/chrisolson/development/github/otto/crates/otto-config)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.64s
-     Running `target/debug/examples/gen_schema`
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Config",
