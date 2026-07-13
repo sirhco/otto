@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/otto-id",
+    "crates/otto-hooks",
     "crates/otto-events",
     "crates/otto-llm",
     "crates/otto-tools",
@@ -43,6 +44,7 @@ tracing-appender = "0.2"
 bytes = "1"
 otto-events = { path = "crates/otto-events" }
 otto-id = { path = "crates/otto-id" }
+otto-hooks = { path = "crates/otto-hooks" }
 otto-llm = { path = "crates/otto-llm" }
 otto-tools = { path = "crates/otto-tools" }
 otto-storage = { path = "crates/otto-storage" }
@@ -70,6 +72,7 @@ wiremock = "0.6"
 dirs = "5"
 jsonc-parser = "0.26"
 schemars = "0.8"
+regex = "1"
 base64 = "0.22"
 sha2 = "0.10"
 hmac = "0.12"

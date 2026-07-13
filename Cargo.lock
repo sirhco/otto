@@ -1770,6 +1770,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-hooks"
+version = "0.3.3"
+dependencies = [
+ "otto-id",
+ "regex",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-id"
 version = "0.3.3"
 dependencies = [
