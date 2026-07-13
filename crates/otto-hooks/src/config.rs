@@ -5,6 +5,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::event::HookKind;
+
 /// One `HookMatcherGroup` list per lifecycle event otto supports.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct HooksConfig {
@@ -46,6 +48,37 @@ pub struct HookCommand {
     pub timeout_ms: Option<u64>,
 }
 
+impl HookMatcherGroup {
+    /// Whether this group's hooks should run for `tool_id`. `None` (either
+    /// the group's `matcher` is absent, or `tool_id` is `None` because the
+    /// firing event isn't tool-scoped) always matches. An invalid regex
+    /// never matches, rather than panicking or matching everything.
+    #[must_use]
+    pub fn matches(&self, tool_id: Option<&str>) -> bool {
+        let (Some(pattern), Some(id)) = (&self.matcher, tool_id) else {
+            return true;
+        };
+        regex::Regex::new(pattern).is_ok_and(|re| re.is_match(id))
+    }
+}
+
+impl HooksConfig {
+    /// The configured `HookMatcherGroup`s for `kind`.
+    #[must_use]
+    pub fn groups_for(&self, kind: HookKind) -> &[HookMatcherGroup] {
+        match kind {
+            HookKind::SessionStart => &self.session_start,
+            HookKind::UserPromptSubmit => &self.user_prompt_submit,
+            HookKind::PreToolUse => &self.pre_tool_use,
+            HookKind::PostToolUse => &self.post_tool_use,
+            HookKind::PreCompact => &self.pre_compact,
+            HookKind::Stop => &self.stop,
+            HookKind::SubagentStop => &self.subagent_stop,
+            HookKind::Notification => &self.notification,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +110,70 @@ mod tests {
         let cfg: HooksConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.stop[0].matcher, None);
         assert_eq!(cfg.stop[0].hooks[0].timeout_ms, None);
+    }
+
+    #[test]
+    fn matches_every_tool_id_when_matcher_absent() {
+        let group = HookMatcherGroup {
+            matcher: None,
+            hooks: vec![],
+        };
+        assert!(group.matches(Some("bash")));
+        assert!(group.matches(Some("edit")));
+    }
+
+    #[test]
+    fn matches_non_tool_events_regardless_of_matcher() {
+        let group = HookMatcherGroup {
+            matcher: Some("^edit$".to_string()),
+            hooks: vec![],
+        };
+        assert!(group.matches(None), "non-tool events ignore the matcher entirely");
+    }
+
+    #[test]
+    fn matcher_regex_matches_anywhere_in_tool_id() {
+        let group = HookMatcherGroup {
+            matcher: Some("_search".to_string()),
+            hooks: vec![],
+        };
+        assert!(group.matches(Some("github_search")));
+        assert!(!group.matches(Some("bash")));
+    }
+
+    #[test]
+    fn matcher_anchors_are_respected_when_present() {
+        let group = HookMatcherGroup {
+            matcher: Some("^(edit|write)$".to_string()),
+            hooks: vec![],
+        };
+        assert!(group.matches(Some("edit")));
+        assert!(group.matches(Some("write")));
+        assert!(!group.matches(Some("apply_patch")));
+    }
+
+    #[test]
+    fn invalid_regex_never_matches() {
+        let group = HookMatcherGroup {
+            matcher: Some("(unterminated".to_string()),
+            hooks: vec![],
+        };
+        assert!(!group.matches(Some("bash")));
+    }
+
+    #[test]
+    fn groups_for_returns_the_right_field() {
+        let cfg = HooksConfig {
+            stop: vec![HookMatcherGroup {
+                matcher: None,
+                hooks: vec![HookCommand {
+                    command: "notify.sh".to_string(),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(cfg.groups_for(crate::event::HookKind::Stop).len(), 1);
+        assert!(cfg.groups_for(crate::event::HookKind::SessionStart).is_empty());
     }
 }
