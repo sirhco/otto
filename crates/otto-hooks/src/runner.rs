@@ -243,16 +243,36 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_kills_process_quickly() {
+        // Create a unique marker file path to prove process termination.
+        let marker = std::env::temp_dir()
+            .join(format!("otto-hooks-test-marker-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker); // clean slate
+
         let cfg = cfg_with_pre_tool_use(vec![HookCommand {
-            command: "sleep 30".to_string(),
+            // Sleep 1s, then try to create a marker file.
+            // If the timeout kills the process, the marker never appears.
+            command: format!("sleep 1 && touch {}", marker.display()),
             timeout_ms: Some(50),
         }]);
         let start = std::time::Instant::now();
         let verdict = HookRunner::new(cfg).fire(pre_tool_use_event()).await;
         let elapsed = start.elapsed();
         assert_eq!(verdict.decision, Decision::Allow);
-        // Should return quickly (well under the 30s sleep), proving the process was killed
-        assert!(elapsed.as_secs() < 5, "timeout should return quickly, got {elapsed:?}");
+        // Should return quickly (well under the 1s sleep), proving the timeout fired.
+        assert!(
+            elapsed.as_millis() < 500,
+            "timeout should return quickly after 50ms, got {elapsed:?}"
+        );
+
+        // Give the (supposedly killed) process ample time to have finished
+        // if it had NOT been terminated. If the marker exists, the process
+        // wasn't actually killed and this test fails.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(
+            !marker.exists(),
+            "marker file should not exist — proves process was killed, not just that timeout fired"
+        );
+        let _ = std::fs::remove_file(&marker); // cleanup
     }
 
     #[tokio::test]
