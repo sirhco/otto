@@ -158,6 +158,9 @@ impl Runtime {
             Some(lsp.clone() as Arc<dyn otto_tools::LspHandle>);
         let mut registry = ToolRegistry::with_builtins(lsp_handle);
         registry.register_hook(Arc::new(otto_tools::RtkHook::new(rtk_enabled(&config))));
+        registry.set_lifecycle_hooks(Arc::new(otto_hooks::HookRunner::new(
+            config.hooks.clone().unwrap_or_default(),
+        )));
         // Best-effort MCP: connect each configured server and register its
         // namespaced tools. A server that fails to connect is skipped, never
         // fatal (mirrors opencode tolerating an unreachable MCP server).
@@ -230,6 +233,9 @@ impl Runtime {
             Some(lsp.clone() as Arc<dyn otto_tools::LspHandle>);
         let mut registry = ToolRegistry::with_builtins(lsp_handle);
         registry.register_hook(Arc::new(otto_tools::RtkHook::new(rtk_enabled(&config))));
+        registry.set_lifecycle_hooks(Arc::new(otto_hooks::HookRunner::new(
+            config.hooks.clone().unwrap_or_default(),
+        )));
         let tools = Arc::new(registry);
 
         let route_factory: Arc<dyn RouteFactory> = Arc::new(AuthRouteFactory::new(
