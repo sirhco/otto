@@ -4,5 +4,7 @@
 //! `docs/superpowers/specs/2026-07-12-lifecycle-hooks-design.md`.
 
 mod config;
+mod event;
 
 pub use config::{HookCommand, HookMatcherGroup, HooksConfig};
+pub use event::{CompactTrigger, Decision, HookEvent, HookKind, HookVerdict, SessionStartSource};
