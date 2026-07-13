@@ -1,3 +1,6 @@
+   Compiling otto-config v0.3.3 (/Users/chrisolson/development/github/otto/crates/otto-config)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.64s
+     Running `target/debug/examples/gen_schema`
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Config",
@@ -82,6 +85,17 @@
     },
     "formatter": {
       "description": "`formatter` — `bool | Record<..>` (`config.ts:113`), permissive."
+    },
+    "hooks": {
+      "description": "`hooks` — otto-native lifecycle hooks (external, user-configured commands fired at points in the session/tool/compaction pipeline). No opencode analogue — otto extension inspired by Claude Code's hooks.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/HooksConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "instructions": {
       "description": "`instructions` (`config.ts:121`) — merge concatenates + dedupes these (see `loader::merge`, `mergeConfigConcatArrays` config.ts:45-51).",
@@ -309,6 +323,103 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "HookCommand": {
+      "description": "One external command to run via `sh -c`.",
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Overrides `otto_hooks::runner::DEFAULT_TIMEOUT_MS` for this command.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "HookMatcherGroup": {
+      "description": "A tool-id matcher plus the commands to run when it matches (or, for non-tool events, unconditionally).",
+      "type": "object",
+      "required": [
+        "hooks"
+      ],
+      "properties": {
+        "hooks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HookCommand"
+          }
+        },
+        "matcher": {
+          "description": "Regex tested against the tool id. `None` matches every tool id, and the field is ignored entirely for non-tool events.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "HooksConfig": {
+      "description": "One `HookMatcherGroup` list per lifecycle event otto supports.",
+      "type": "object",
+      "properties": {
+        "notification": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HookMatcherGroup"
+          }
+        },
+        "post_tool_use": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HookMatcherGroup"
+          }
+        },
+        "pre_compact": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HookMatcherGroup"
+          }
+        },
+        "pre_tool_use": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HookMatcherGroup"
+          }
+        },
+        "session_start": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HookMatcherGroup"
+          }
+        },
+        "stop": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HookMatcherGroup"
+          }
+        },
+        "subagent_stop": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HookMatcherGroup"
+          }
+        },
+        "user_prompt_submit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HookMatcherGroup"
+          }
         }
       }
     },

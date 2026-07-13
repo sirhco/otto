@@ -22,6 +22,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use otto_hooks::HooksConfig;
+
 /// Default `$schema` otto injects on load — points at the JSON schema
 /// generated from this module (`examples/gen_schema.rs`) and committed at
 /// `schema/config.json` in the otto repo. Namespaced away from opencode's
@@ -252,6 +254,12 @@ pub struct Config {
     /// keeping code, paths, and error strings byte-exact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tersemode: Option<Tersemode>,
+
+    /// `hooks` — otto-native lifecycle hooks (external, user-configured
+    /// commands fired at points in the session/tool/compaction pipeline).
+    /// No opencode analogue — otto extension inspired by Claude Code's hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksConfig>,
 }
 
 /// `rtk` config block. Off unless `enabled` is set.

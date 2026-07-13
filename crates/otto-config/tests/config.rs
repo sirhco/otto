@@ -92,6 +92,37 @@ fn merge_none_does_not_clobber() {
     assert_eq!(merged.model.as_deref(), Some("a/1"));
 }
 
+#[test]
+fn parses_and_merges_hooks_config() {
+    let base = parse(
+        r#"{ "hooks": { "pre_tool_use": [ { "matcher": "bash", "hooks": [ { "command": "check.sh" } ] } ] } }"#,
+    )
+    .unwrap();
+    let hooks = base.hooks.as_ref().expect("hooks present");
+    assert_eq!(hooks.pre_tool_use.len(), 1);
+    assert_eq!(hooks.pre_tool_use[0].matcher.as_deref(), Some("bash"));
+    assert_eq!(hooks.pre_tool_use[0].hooks[0].command, "check.sh");
+
+    // Merge: an override with a different event's hooks must not clobber the
+    // base's `pre_tool_use` entries — object-level fields merge, they don't
+    // replace wholesale (same deep-merge guarantee as every other typed
+    // sub-config field in `Config`).
+    let over = parse(
+        r#"{ "hooks": { "post_tool_use": [ { "hooks": [ { "command": "notify.sh" } ] } ] } }"#,
+    )
+    .unwrap();
+    let merged = merge(base, over);
+    let merged_hooks = merged.hooks.expect("hooks present after merge");
+    assert_eq!(merged_hooks.pre_tool_use.len(), 1, "base's pre_tool_use survives the merge");
+    assert_eq!(merged_hooks.post_tool_use.len(), 1, "override's post_tool_use is present");
+}
+
+#[test]
+fn hooks_absent_when_not_configured() {
+    let cfg = parse("{}").unwrap();
+    assert!(cfg.hooks.is_none());
+}
+
 // ---------------------------------------------------------------------------
 // discover
 // ---------------------------------------------------------------------------
