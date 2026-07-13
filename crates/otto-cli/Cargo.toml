@@ -21,6 +21,7 @@ otto-auth.workspace = true
 otto-events.workspace = true
 otto-llm.workspace = true
 otto-session.workspace = true
+otto-storage.workspace = true
 otto-agent.workspace = true
 otto-permission.workspace = true
 otto-mcp.workspace = true

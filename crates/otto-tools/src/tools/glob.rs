@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use globset::{Glob, GlobMatcher};
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::parallel_walk::parallel_collect;
 use super::{assert_external_directory, resolve_path};
 use crate::tool::{ExecuteResult, Tool, ToolContext, ToolError, decode_args};
 
@@ -87,30 +87,19 @@ impl Tool for GlobTool {
             .compile_matcher();
 
         let root = search.clone();
-        let mut found: Vec<(PathBuf, SystemTime)> = Vec::new();
-        for result in WalkBuilder::new(&search)
-            .hidden(false)
-            .require_git(false)
-            .build()
-        {
-            let entry = match result {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
-                continue;
-            }
+        let mut found: Vec<(PathBuf, SystemTime)> = parallel_collect(root.clone(), None, move |entry| {
             let path = entry.path();
             if !matches(&matcher, &root, path) {
-                continue;
+                return Vec::new();
             }
             let mtime = entry
                 .metadata()
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            found.push((path.to_path_buf(), mtime));
-        }
+            vec![(path.to_path_buf(), mtime)]
+        })
+        .await;
 
         // newest-first by mtime (glob.ts sorts by mtime).
         found.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));

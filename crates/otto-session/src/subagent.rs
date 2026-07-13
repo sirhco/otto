@@ -19,7 +19,8 @@ use otto_agent::{AgentInfo, config as agent_config, derive_subagent_permission};
 use otto_llm::{Model, Route};
 use otto_permission::{Permission, Ruleset, SessionGate, merge};
 use otto_storage::model::{
-    Info, InfoBody, Part, PartKind, User, UserModel, UserTime, new_message_id, new_part_id,
+    Info, InfoBody, Part, PartKind, SessionId, User, UserModel, UserTime, new_message_id,
+    new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
 use otto_tools::{PermissionGate, SubagentRequest, SubagentSpawner, ToolError, ToolRegistry};
@@ -171,15 +172,15 @@ impl SubagentSpawner for SessionSubagentSpawner {
             Some(id)
                 if self
                     .store
-                    .get_session(id)
+                    .get_session(&SessionId::from(id))
                     .await
                     .map_err(storage_err)?
                     .is_some() =>
             {
-                id.clone()
+                SessionId::from(id)
             }
             _ => {
-                let id = otto_id::ascending(otto_id::Prefix::Session);
+                let id = SessionId::new_ascending();
                 let now = now_ms();
                 self.store
                     .create_session(&Session {

@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use crate::model::{Info, Part, PartKind, WithParts};
+use crate::model::{Info, MessageId, Part, PartKind, WithParts};
 
 /// Result of [`latest`] — the newest user / assistant / finished-assistant
 /// messages plus outstanding tasks (`message-v2.ts:585-601`).
@@ -97,8 +97,8 @@ pub fn latest(msgs: &[WithParts]) -> Latest {
 #[must_use]
 pub fn filter_compacted(msgs: Vec<WithParts>) -> Vec<WithParts> {
     let mut result: Vec<WithParts> = Vec::new();
-    let mut completed: HashSet<String> = HashSet::new();
-    let mut retain: Option<String> = None;
+    let mut completed: HashSet<MessageId> = HashSet::new();
+    let mut retain: Option<MessageId> = None;
 
     for msg in msgs {
         // Snapshot the values we need before moving `msg` into `result`.
@@ -106,13 +106,13 @@ pub fn filter_compacted(msgs: Vec<WithParts>) -> Vec<WithParts> {
         let is_user = msg.info.is_user();
         // `Some(tail)` if a compaction part exists on this message; the inner
         // `Option` is that part's `tail_start_id`.
-        let compaction_part_tail: Option<Option<String>> =
+        let compaction_part_tail: Option<Option<MessageId>> =
             msg.parts.iter().find_map(|p| match &p.kind {
                 PartKind::Compaction { tail_start_id, .. } => Some(tail_start_id.clone()),
                 _ => None,
             });
         // `Some(parentID)` if this is a compaction-summary assistant message.
-        let summary_parent: Option<String> = msg.info.as_assistant().and_then(|a| {
+        let summary_parent: Option<MessageId> = msg.info.as_assistant().and_then(|a| {
             if a.summary == Some(true) && a.finish.is_some() && a.error.is_none() {
                 Some(a.parent_id.clone())
             } else {
@@ -167,7 +167,7 @@ pub fn filter_compacted(msgs: Vec<WithParts>) -> Vec<WithParts> {
     });
 
     let compaction_id = compaction_index.map(|i| result[i].info.id.clone());
-    let tail_start_id: Option<String> = compaction_index.and_then(|i| {
+    let tail_start_id: Option<MessageId> = compaction_index.and_then(|i| {
         result[i].parts.iter().find_map(|p| match &p.kind {
             PartKind::Compaction {
                 tail_start_id: Some(t),

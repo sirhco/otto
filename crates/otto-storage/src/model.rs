@@ -27,19 +27,22 @@ use std::collections::HashMap;
 /// tool `input`, and `structured` payloads.
 pub type Json = serde_json::Value;
 
-/// Session identifier string (`ses_…`). Mirrors `SessionID` in `session.ts`.
-pub type SessionId = String;
-/// Message identifier string (`msg_…`). Mirrors `MessageID` (`session.ts:17`).
-pub type MessageId = String;
-/// Part identifier string (`prt_…`). Mirrors `PartID` (`session.ts:23`).
-pub type PartId = String;
+/// Session identifier (`ses_…`), distinct from every other id type at
+/// compile time. Mirrors `SessionID` in `session.ts`.
+pub use otto_id::SessionId;
+/// Message identifier (`msg_…`), distinct from every other id type at
+/// compile time. Mirrors `MessageID` (`session.ts:17`).
+pub use otto_id::MessageId;
+/// Part identifier (`prt_…`), distinct from every other id type at compile
+/// time. Mirrors `PartID` (`session.ts:23`).
+pub use otto_id::PartId;
 
 /// Generates a fresh ascending [`MessageId`] (`msg_…`) via `otto-id`.
 ///
 /// Equivalent to `MessageID.ascending()` (`session.ts:19`).
 #[must_use]
 pub fn new_message_id() -> MessageId {
-    otto_id::ascending(otto_id::Prefix::Message)
+    MessageId::new_ascending()
 }
 
 /// Generates a fresh ascending [`PartId`] (`prt_…`) via `otto-id`.
@@ -47,7 +50,7 @@ pub fn new_message_id() -> MessageId {
 /// Equivalent to `PartID.ascending()` (`session.ts:25`).
 #[must_use]
 pub fn new_part_id() -> PartId {
-    otto_id::ascending(otto_id::Prefix::Part)
+    PartId::new_ascending()
 }
 
 // ---------------------------------------------------------------------------

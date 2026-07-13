@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use otto_id::{MessageId, SessionId};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -166,9 +167,9 @@ impl MetadataSink for NoopSink {
 #[derive(Clone)]
 pub struct ToolContext {
     /// Owning session id.
-    pub session_id: String,
+    pub session_id: SessionId,
     /// Owning message id.
-    pub message_id: String,
+    pub message_id: MessageId,
     /// Agent name (used by model gating / task tooling).
     pub agent: String,
     /// Working directory: relative paths resolve here and paths outside it
@@ -199,8 +200,8 @@ impl ToolContext {
     /// gate, `NoopSink`, fresh [`CancellationToken`], empty ids).
     pub fn builder(directory: impl Into<PathBuf>) -> ToolContextBuilder {
         ToolContextBuilder {
-            session_id: String::new(),
-            message_id: String::new(),
+            session_id: SessionId::default(),
+            message_id: MessageId::default(),
             agent: String::from("build"),
             directory: directory.into(),
             abort: CancellationToken::new(),
@@ -215,8 +216,8 @@ impl ToolContext {
 /// Builder for [`ToolContext`] — primarily for tests and call sites that only
 /// care about a couple of fields.
 pub struct ToolContextBuilder {
-    session_id: String,
-    message_id: String,
+    session_id: SessionId,
+    message_id: MessageId,
     agent: String,
     directory: PathBuf,
     abort: CancellationToken,
@@ -229,14 +230,14 @@ pub struct ToolContextBuilder {
 impl ToolContextBuilder {
     /// Set the session id.
     #[must_use]
-    pub fn session_id(mut self, id: impl Into<String>) -> Self {
+    pub fn session_id(mut self, id: impl Into<SessionId>) -> Self {
         self.session_id = id.into();
         self
     }
 
     /// Set the message id.
     #[must_use]
-    pub fn message_id(mut self, id: impl Into<String>) -> Self {
+    pub fn message_id(mut self, id: impl Into<MessageId>) -> Self {
         self.message_id = id.into();
         self
     }

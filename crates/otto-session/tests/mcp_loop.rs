@@ -21,8 +21,8 @@ use otto_llm::{LLMError, LLMRequest, Model, Route};
 use otto_mcp::McpClient;
 use otto_session::{RunConfig, run_loop};
 use otto_storage::model::{
-    Info, InfoBody, Part, PartKind, ToolState, User, UserModel, UserTime, new_message_id,
-    new_part_id,
+    Info, InfoBody, MessageId, Part, PartKind, SessionId, ToolState, User, UserModel, UserTime,
+    new_message_id, new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
 use otto_tools::{AllowAll, ToolRegistry};
@@ -268,7 +268,7 @@ fn config(store: Store, route: Arc<dyn Route>, tools: ToolRegistry) -> RunConfig
     }
 }
 
-async fn parts_of(store: &Store, message_id: &str) -> Vec<Part> {
+async fn parts_of(store: &Store, message_id: &MessageId) -> Vec<Part> {
     store.list_parts(message_id).await.expect("parts")
 }
 
@@ -324,7 +324,9 @@ async fn mcp_tool_executes_through_run_loop() {
     let cfg = config(store.clone(), route, registry);
 
     // 5. Run the loop.
-    let last = run_loop(&cfg, SES).await.expect("run_loop");
+    let last = run_loop(&cfg, &SessionId::from(SES))
+        .await
+        .expect("run_loop");
 
     // Exactly two provider turns: the MCP tool call forced the second.
     assert_eq!(calls.load(Ordering::SeqCst), 2, "two provider turns");
@@ -342,7 +344,10 @@ async fn mcp_tool_executes_through_run_loop() {
 
     // A completed `testserver_echo` tool part exists with output "hi" — the MCP
     // tool actually executed and its result was fed back through storage.
-    let all_messages = store.list_messages(SES).await.expect("messages");
+    let all_messages = store
+        .list_messages(&SessionId::from(SES))
+        .await
+        .expect("messages");
     let mut mcp_output = None;
     for m in &all_messages {
         for p in parts_of(&store, m.id()).await {

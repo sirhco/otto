@@ -8,11 +8,11 @@
 use std::path::Path;
 
 use globset::{Glob, GlobMatcher};
-use ignore::WalkBuilder;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::parallel_walk::parallel_collect;
 use super::{assert_external_directory, resolve_path};
 use crate::tool::{ExecuteResult, Tool, ToolContext, ToolError, decode_args};
 
@@ -121,46 +121,36 @@ impl Tool for GrepTool {
         };
 
         let root = cwd.clone();
-        let mut matches: Vec<Match> = Vec::new();
-        'walk: for result in WalkBuilder::new(&cwd)
-            .hidden(false)
-            .require_git(false)
-            .build()
-        {
-            let entry = match result {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
-                continue;
-            }
+        let mut matches: Vec<Match> = parallel_collect(cwd, Some(LIMIT), move |entry| {
             let path = entry.path();
             if !include_ok(&include, &root, path) {
-                continue;
+                return Vec::new();
             }
             let Ok(content) = std::fs::read_to_string(path) else {
-                continue;
+                return Vec::new();
             };
-            for (i, line) in content.lines().enumerate() {
-                if re.is_match(line) {
-                    matches.push(Match {
-                        path: path.display().to_string(),
-                        line: i + 1,
-                        text: line.to_string(),
-                    });
-                    if matches.len() >= LIMIT {
-                        break 'walk;
-                    }
-                }
-            }
-        }
+            content
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| re.is_match(line))
+                .map(|(i, line)| Match {
+                    path: path.display().to_string(),
+                    line: i + 1,
+                    text: line.to_string(),
+                })
+                .collect()
+        })
+        .await;
 
         if matches.is_empty() {
             return Ok(empty());
         }
 
+        // Concurrent threads can push past LIMIT before the shared stop flag
+        // is observed; cap here to match the single-threaded walk's bound.
+        let truncated = matches.len() > LIMIT;
+        matches.truncate(LIMIT);
         let total = matches.len();
-        let truncated = total >= LIMIT;
         // Group by file, stable within discovery order.
         matches.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
 

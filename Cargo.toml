@@ -82,4 +82,5 @@ libc = "0.2"
 unicode-width = "0.2"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1

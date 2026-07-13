@@ -19,8 +19,8 @@ use otto_llm::{LLMError, LLMRequest, Model, Route};
 use otto_permission::{Permission, Ruleset, SessionGate};
 use otto_session::{RouteFor, RunConfig, SessionSubagentSpawner, run_loop};
 use otto_storage::model::{
-    Info, InfoBody, Part, PartKind, ToolState, User, UserModel, UserTime, new_message_id,
-    new_part_id,
+    Info, InfoBody, MessageId, Part, PartKind, SessionId, ToolState, User, UserModel, UserTime,
+    new_message_id, new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
 use otto_tools::{
@@ -28,6 +28,10 @@ use otto_tools::{
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+
+fn sid(s: &str) -> SessionId {
+    s.into()
+}
 
 // -- scripted route ----------------------------------------------------------
 
@@ -117,7 +121,7 @@ fn text_turn(id: &str, text: &str) -> Vec<LLMEvent> {
 
 // -- fixtures ----------------------------------------------------------------
 
-async fn seed_session(store: &Store, id: &str, text: &str) -> String {
+async fn seed_session(store: &Store, id: &str, text: &str) -> MessageId {
     store
         .create_session(&Session {
             id: id.into(),
@@ -187,7 +191,7 @@ fn model() -> Model {
 }
 
 /// Find the first tool part with the given tool name across a session.
-async fn tool_state(store: &Store, session_id: &str, tool_name: &str) -> Option<ToolState> {
+async fn tool_state(store: &Store, session_id: &SessionId, tool_name: &str) -> Option<ToolState> {
     for m in store.list_messages(session_id).await.expect("messages") {
         for p in store.list_parts(m.id()).await.expect("parts") {
             if let PartKind::Tool { tool, state, .. } = &p.kind
@@ -272,13 +276,13 @@ async fn subagent_spawn_end_to_end() {
         tersemode_directive: None,
     };
 
-    run_loop(&cfg, parent_id).await.expect("parent run_loop");
+    run_loop(&cfg, &sid(parent_id)).await.expect("parent run_loop");
 
     // The child ran exactly once.
     assert_eq!(child_calls.load(Ordering::SeqCst), 1, "child ran once");
 
     // The parent's task tool result carries the wrapped child text.
-    let state = tool_state(&store, parent_id, "task")
+    let state = tool_state(&store, &sid(parent_id), "task")
         .await
         .expect("a task tool part");
     let output = match state {
@@ -395,7 +399,7 @@ async fn ruleset_deny_fails_tool_but_turn_continues() {
         tersemode_directive: None,
     };
 
-    let last = run_loop(&cfg, ses).await.expect("run completes");
+    let last = run_loop(&cfg, &sid(ses)).await.expect("run completes");
 
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -404,7 +408,7 @@ async fn ruleset_deny_fails_tool_but_turn_continues() {
     );
     // The denied call is recorded as a tool error whose message avoids the
     // turn-stopping rejection keywords.
-    let state = tool_state(&store, ses, "todowrite")
+    let state = tool_state(&store, &sid(ses), "todowrite")
         .await
         .expect("todowrite part");
     match state {
@@ -464,7 +468,7 @@ async fn spawned_child_inherits_parent_permission_mode() {
 
     let child_result = spawner
         .spawn(otto_tools::SubagentRequest {
-            parent_session_id: parent_id.to_string(),
+            parent_session_id: sid(parent_id),
             parent_message_id: "msg_x".into(),
             subagent_type: "general".into(),
             description: "d".into(),
@@ -727,7 +731,7 @@ async fn nested_subagent_spawn() {
         tersemode_directive: None,
     };
 
-    run_loop(&cfg, parent_id).await.expect("parent run_loop");
+    run_loop(&cfg, &sid(parent_id)).await.expect("parent run_loop");
 
     // The grandchild ran — nested spawner re-injection worked.
     assert_eq!(grandchild_calls.load(Ordering::SeqCst), 1, "grandchild ran");
@@ -810,8 +814,8 @@ async fn run_askedit_with_ruleset(ruleset: Value) -> ToolState {
         system_cache: None,
         tersemode_directive: None,
     };
-    run_loop(&cfg, ses).await.expect("run_loop");
-    tool_state(&store, ses, "askedit")
+    run_loop(&cfg, &sid(ses)).await.expect("run_loop");
+    tool_state(&store, &sid(ses), "askedit")
         .await
         .expect("askedit tool part")
 }
@@ -884,9 +888,9 @@ async fn permission_ask_admits_on_reply_once() {
         system_cache: None,
         tersemode_directive: None,
     };
-    run_loop(&cfg, ses).await.expect("run_loop");
+    run_loop(&cfg, &sid(ses)).await.expect("run_loop");
 
-    match tool_state(&store, ses, "askedit").await.expect("part") {
+    match tool_state(&store, &sid(ses), "askedit").await.expect("part") {
         ToolState::Completed { output, .. } => assert_eq!(output, "edited"),
         other => panic!("expected completed after reply Once, got {other:?}"),
     }

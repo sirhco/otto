@@ -16,6 +16,7 @@ use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::parallel_walk::parallel_collect;
 use crate::tool::{ExecuteResult, PermissionRequest, Tool, ToolContext, ToolError, decode_args};
 
 #[derive(Debug, Deserialize)]
@@ -278,18 +279,13 @@ impl Tool for SkillTool {
             .unwrap_or_default();
 
         // Sample sibling files (excluding SKILL.md), up to 10 (skill.ts:36-43).
-        let mut files: Vec<String> = Vec::new();
-        let walker = WalkBuilder::new(&dir).hidden(false).build();
-        for entry in walker.flatten() {
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
-                && entry.file_name() != "SKILL.md"
-            {
-                files.push(entry.path().display().to_string());
-                if files.len() >= 10 {
-                    break;
-                }
+        let files: Vec<String> = parallel_collect(dir.clone(), Some(10), |entry| {
+            if entry.file_name() == "SKILL.md" {
+                return Vec::new();
             }
-        }
+            vec![entry.path().display().to_string()]
+        })
+        .await;
 
         let body = if let Some(section) = &params.section {
             match extract_section(&info.body, section) {

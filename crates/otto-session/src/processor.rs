@@ -22,8 +22,8 @@ use futures::{Stream, StreamExt};
 use otto_events::{FinishReason, LLMEvent, ProviderFailureClassification, ToolResultValue, Usage};
 use otto_llm::{LLMError, Model};
 use otto_storage::model::{
-    Assistant, CompletedTime, Info, InfoBody, Json, Part, PartKind, StartEndReqTime, StartEndTime,
-    StartTime, TokenCache, Tokens, ToolState, new_part_id,
+    Assistant, CompletedTime, Info, InfoBody, Json, MessageId, Part, PartId, PartKind, SessionId,
+    StartEndReqTime, StartEndTime, StartTime, TokenCache, Tokens, ToolState, new_part_id,
 };
 use otto_storage::{StorageError, Store};
 use otto_tools::tool::{PermissionGate, PermissionRequest};
@@ -81,7 +81,7 @@ pub enum ProcessorError {
 /// signal fired when the call settles (completes or errors).
 struct ToolCallHandle {
     /// Id of the backing [`PartKind::Tool`] part.
-    part_id: String,
+    part_id: PartId,
     /// Sender half of the `done` signal, taken and fired on settle.
     done_tx: Option<oneshot::Sender<()>>,
     /// Receiver half, taken and awaited in [`Processor::cleanup`].
@@ -99,7 +99,7 @@ const PART_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 /// Accumulated streaming state for the currently-open text part.
 struct TextAccum {
     /// Backing part id.
-    part_id: String,
+    part_id: PartId,
     /// Concatenated text so far.
     text: String,
     /// Millisecond start timestamp.
@@ -114,7 +114,7 @@ struct TextAccum {
 /// (keyed by `reasoning-*` block id in [`Processor::reasoning_map`]).
 struct ReasoningAccum {
     /// Backing part id.
-    part_id: String,
+    part_id: PartId,
     /// Concatenated reasoning text so far.
     text: String,
     /// Millisecond start timestamp.
@@ -130,8 +130,8 @@ struct ReasoningAccum {
 /// (`processor.ts:98-691`), minus the snapshot/summary/status seams.
 pub struct Processor {
     store: Store,
-    session_id: String,
-    assistant_message_id: String,
+    session_id: SessionId,
+    assistant_message_id: MessageId,
     model: Model,
     #[allow(dead_code)]
     agent: String,
@@ -204,8 +204,8 @@ impl Processor {
     #[must_use]
     pub fn new(
         store: Store,
-        session_id: impl Into<String>,
-        assistant_message_id: impl Into<String>,
+        session_id: impl Into<SessionId>,
+        assistant_message_id: impl Into<MessageId>,
         model: Model,
         agent: impl Into<String>,
         permission: Arc<dyn PermissionGate>,
@@ -250,10 +250,10 @@ impl Processor {
             .store
             .get_message(&self.session_id, &self.assistant_message_id)
             .await?
-            .ok_or_else(|| ProcessorError::MissingMessage(self.assistant_message_id.clone()))?;
+            .ok_or_else(|| ProcessorError::MissingMessage(self.assistant_message_id.to_string()))?;
         if !info.is_assistant() {
             return Err(ProcessorError::NotAssistant(
-                self.assistant_message_id.clone(),
+                self.assistant_message_id.to_string(),
             ));
         }
         self.message = Some(info);
@@ -571,14 +571,14 @@ impl Processor {
     /// Build a [`PartKind::Reasoning`] [`Part`] for the assistant message.
     fn reasoning_part(
         &self,
-        part_id: &str,
+        part_id: &PartId,
         text: &str,
         start: i64,
         end: Option<i64>,
         metadata: Option<Json>,
     ) -> Part {
         Part {
-            id: part_id.to_string(),
+            id: part_id.clone(),
             session_id: self.session_id.clone(),
             message_id: self.assistant_message_id.clone(),
             kind: PartKind::Reasoning {
@@ -656,14 +656,14 @@ impl Processor {
     /// Build a [`PartKind::Text`] [`Part`] for the assistant message.
     fn text_part(
         &self,
-        part_id: &str,
+        part_id: &PartId,
         text: &str,
         start: i64,
         end: Option<i64>,
         metadata: Option<Json>,
     ) -> Part {
         Part {
-            id: part_id.to_string(),
+            id: part_id.clone(),
             session_id: self.session_id.clone(),
             message_id: self.assistant_message_id.clone(),
             kind: PartKind::Text {
@@ -759,7 +759,7 @@ impl Processor {
 
     /// Ensure a tool part exists in `pending` state for `call_id`, registering
     /// its `done` signal (`ensureToolCall`, `processor.ts:214-251`).
-    async fn ensure_tool_call(&mut self, call_id: &str) -> Result<String, ProcessorError> {
+    async fn ensure_tool_call(&mut self, call_id: &str) -> Result<PartId, ProcessorError> {
         if let Some(handle) = self.toolcalls.get(call_id) {
             return Ok(handle.part_id.clone());
         }

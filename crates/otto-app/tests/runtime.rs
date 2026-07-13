@@ -17,7 +17,7 @@ use otto_auth::{AuthMap, Credential};
 use otto_config::Config;
 use otto_events::{FinishReason, LLMEvent};
 use otto_llm::{HttpTransport, LLMError, LLMRequest, Model, Route};
-use otto_storage::model::{PartKind, ToolState};
+use otto_storage::model::{PartKind, SessionId, ToolState};
 use otto_tools::{ExecuteResult, PermissionRequest, Tool, ToolContext, ToolError, ToolRegistry};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -177,7 +177,7 @@ fn text_turn(id: &str, text: &str) -> Vec<LLMEvent> {
     turn
 }
 
-async fn assistant_text(rt: &Runtime, session: &str) -> Option<String> {
+async fn assistant_text(rt: &Runtime, session: &SessionId) -> Option<String> {
     let messages = rt.store().list_messages(session).await.expect("messages");
     for m in messages.iter().rev() {
         if !m.is_assistant() {
@@ -192,7 +192,7 @@ async fn assistant_text(rt: &Runtime, session: &str) -> Option<String> {
     None
 }
 
-async fn tool_state(rt: &Runtime, session: &str, tool_id: &str) -> Option<ToolState> {
+async fn tool_state(rt: &Runtime, session: &SessionId, tool_id: &str) -> Option<ToolState> {
     for m in rt.store().list_messages(session).await.expect("messages") {
         for p in rt.store().list_parts(m.id()).await.expect("parts") {
             if let PartKind::Tool { tool, state, .. } = &p.kind

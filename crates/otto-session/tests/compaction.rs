@@ -17,13 +17,24 @@ use otto_llm::{LLMError, LLMRequest, Model, Route};
 use otto_session::compaction;
 use otto_session::{RunConfig, run_loop};
 use otto_storage::model::{
-    Assistant, AssistantPath, AssistantTime, CompletedTime, Info, InfoBody, Part, PartKind,
-    TokenCache, Tokens, ToolState, User, UserModel, UserTime, new_message_id, new_part_id,
+    Assistant, AssistantPath, AssistantTime, CompletedTime, Info, InfoBody, MessageId, Part,
+    PartKind, SessionId, TokenCache, Tokens, ToolState, User, UserModel, UserTime, new_message_id,
+    new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
 use otto_tools::{AllowAll, ToolRegistry};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
+
+/// Wraps a string literal test fixture id as a typed [`SessionId`].
+fn sid(s: &str) -> SessionId {
+    s.into()
+}
+
+/// Wraps a string literal test fixture id as a typed [`MessageId`].
+fn mid(s: &str) -> MessageId {
+    s.into()
+}
 
 // -- scripted route ----------------------------------------------------------
 
@@ -123,7 +134,7 @@ async fn open_session(id: &str) -> Store {
     store
 }
 
-async fn insert_user(store: &Store, ses: &str, text: &str) -> String {
+async fn insert_user(store: &Store, ses: &str, text: &str) -> MessageId {
     let id = new_message_id();
     store
         .insert_message(&Info {
@@ -169,7 +180,7 @@ async fn insert_assistant(
     parent: &str,
     text: &str,
     tokens: Tokens,
-) -> String {
+) -> MessageId {
     let id = new_message_id();
     store
         .insert_message(&Info {
@@ -225,7 +236,7 @@ async fn insert_tool_part(store: &Store, ses: &str, msg_id: &str, tool: &str, ou
             session_id: ses.into(),
             message_id: msg_id.into(),
             kind: PartKind::Tool {
-                call_id: new_part_id(),
+                call_id: new_part_id().to_string(),
                 tool: tool.into(),
                 metadata: None,
                 state: ToolState::Completed {
@@ -295,7 +306,7 @@ fn config(store: Store, route: Arc<dyn Route>, model: Model) -> RunConfig {
 }
 
 async fn parts_of(store: &Store, msg_id: &str) -> Vec<Part> {
-    store.list_parts(msg_id).await.expect("parts")
+    store.list_parts(&mid(msg_id)).await.expect("parts")
 }
 
 /// The tool part matching `tool` on `msg_id`, if any.
@@ -331,13 +342,13 @@ async fn create_summarizes_and_filter_reorders() {
     let mut cfg = config(store.clone(), route, model_with_context(None));
     cfg.preserve_recent_tokens = 60; // only the tiny last turn fits
 
-    compaction::create(&cfg, ses, true, false)
+    compaction::create(&cfg, &sid(ses), true, false)
         .await
         .expect("create");
     assert_eq!(calls.load(Ordering::SeqCst), 1, "one summary LLM call");
 
     // A user message carries a compaction part with tail_start_id = u3.
-    let msgs = store.messages_with_parts(ses).await.expect("history");
+    let msgs = store.messages_with_parts(&sid(ses)).await.expect("history");
     let compaction_msg = msgs
         .iter()
         .find(|m| m.parts.iter().any(Part::is_compaction))
@@ -370,10 +381,10 @@ async fn create_summarizes_and_filter_reorders() {
 
     // filter_compacted (fed newest-first) drops the summarized head and splices
     // [compaction, summary, tail…, continue].
-    let mut newest_first = store.messages_with_parts(ses).await.expect("history");
+    let mut newest_first = store.messages_with_parts(&sid(ses)).await.expect("history");
     newest_first.reverse();
     let out = otto_storage::filter_compacted(newest_first);
-    let out_ids: Vec<String> = out.iter().map(|m| m.info.id.clone()).collect();
+    let out_ids: Vec<MessageId> = out.iter().map(|m| m.info.id.clone()).collect();
 
     assert!(!out_ids.contains(&u1), "head dropped");
     assert!(!out_ids.contains(&a1), "head dropped");
@@ -412,12 +423,12 @@ async fn run_loop_auto_compacts_on_overflow() {
     ]);
     let cfg = config(store.clone(), route, model_with_context(Some(1000)));
 
-    run_loop(&cfg, ses).await.expect("run_loop");
+    run_loop(&cfg, &sid(ses)).await.expect("run_loop");
 
     // Summary + reply were the two provider calls.
     assert_eq!(calls.load(Ordering::SeqCst), 2, "summary then reply");
 
-    let msgs = store.messages_with_parts(ses).await.expect("history");
+    let msgs = store.messages_with_parts(&sid(ses)).await.expect("history");
     assert!(
         msgs.iter().any(|m| m.parts.iter().any(Part::is_compaction)),
         "a compaction message was created before the turn"
@@ -457,13 +468,13 @@ async fn run_loop_compact_outcome_continues() {
     ]);
     let cfg = config(store.clone(), route, model_with_context(Some(1000)));
 
-    let last = run_loop(&cfg, ses).await.expect("run_loop");
+    let last = run_loop(&cfg, &sid(ses)).await.expect("run_loop");
 
     // Compact → summary → reply: three provider calls, and the loop continued
     // (did not break) to produce the final reply.
     assert_eq!(calls.load(Ordering::SeqCst), 3, "compact, summary, reply");
 
-    let msgs = store.messages_with_parts(ses).await.expect("history");
+    let msgs = store.messages_with_parts(&sid(ses)).await.expect("history");
     assert!(
         msgs.iter().any(|m| m.parts.iter().any(Part::is_compaction)),
         "compaction ran on the Compact outcome"
@@ -515,7 +526,7 @@ async fn prune_erases_old_tool_outputs() {
     let (route, _) = ScriptedRoute::build(vec![]);
     let cfg = config(store.clone(), route, model_with_context(None));
 
-    compaction::prune(&cfg, ses).await.expect("prune");
+    compaction::prune(&cfg, &sid(ses)).await.expect("prune");
 
     let compacted = |state: Option<ToolState>| match state {
         Some(ToolState::Completed { time, .. }) => time.compacted.is_some(),
@@ -553,7 +564,7 @@ async fn insert_read_part(store: &Store, ses: &str, msg_id: &str, path: &str, ou
             session_id: ses.into(),
             message_id: msg_id.into(),
             kind: PartKind::Tool {
-                call_id: new_part_id(),
+                call_id: new_part_id().to_string(),
                 tool: "read".into(),
                 metadata: None,
                 state: ToolState::Completed {
@@ -607,7 +618,7 @@ async fn prune_keeps_newest_read_per_path() {
     let (route, _) = ScriptedRoute::build(vec![]);
     let cfg = config(store.clone(), route, model_with_context(None));
 
-    compaction::prune(&cfg, ses).await.expect("prune");
+    compaction::prune(&cfg, &sid(ses)).await.expect("prune");
 
     let compacted = |state: Option<ToolState>| match state {
         Some(ToolState::Completed { time, .. }) => time.compacted.is_some(),

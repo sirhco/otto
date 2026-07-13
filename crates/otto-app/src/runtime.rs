@@ -18,7 +18,8 @@ use otto_session::run::{
 };
 use otto_session::{RouteFor, RunConfig, SessionSubagentSpawner, run_loop};
 use otto_storage::model::{
-    Info, InfoBody, Part, PartKind, User, UserModel, UserTime, new_message_id, new_part_id,
+    Info, InfoBody, Part, PartKind, SessionId, User, UserModel, UserTime, new_message_id,
+    new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
 use otto_tools::{PermissionGate, SubagentSpawner, ToolRegistry};
@@ -361,9 +362,9 @@ impl Runtime {
         &self,
         title: impl Into<String>,
         agent: &AgentInfo,
-        parent: Option<String>,
-    ) -> Result<String> {
-        let id = otto_id::ascending(otto_id::Prefix::Session);
+        parent: Option<SessionId>,
+    ) -> Result<SessionId> {
+        let id = SessionId::new_ascending();
         let now = now_ms();
         // Link the child into the permission service's parent chain so it
         // inherits the parent's permission mode live (e.g. a workflow session
@@ -407,7 +408,7 @@ impl Runtime {
     #[must_use]
     pub fn run(
         &self,
-        session_id: impl Into<String>,
+        session_id: impl Into<SessionId>,
         prompt: impl Into<String>,
         agent: &AgentInfo,
         model_ref: &ModelRef,
@@ -465,7 +466,7 @@ impl Runtime {
     #[must_use]
     pub fn run_with_parts(
         &self,
-        session_id: impl Into<String>,
+        session_id: impl Into<SessionId>,
         prompt: impl Into<String>,
         extra_parts: Vec<PartKind>,
         agent: &AgentInfo,

@@ -27,7 +27,8 @@ use otto_llm::{LLMClient, LLMError, LLMRequest, LLMResponse};
 use otto_storage::StorageError;
 use otto_storage::model::{
     Assistant, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part, PartKind,
-    StartEndTime, TokenCache, Tokens, ToolState, User, UserModel, UserTime, new_message_id,
+    SessionId, StartEndTime, TokenCache, Tokens, ToolState, User, UserModel, UserTime,
+    new_message_id,
     new_part_id,
 };
 
@@ -315,7 +316,7 @@ fn summary_text(resp: &LLMResponse) -> String {
 /// [`filter_compacted`]: otto_storage::filter_compacted
 pub async fn create(
     cfg: &RunConfig,
-    session_id: &str,
+    session_id: &SessionId,
     auto: bool,
     overflow: bool,
 ) -> Result<(), CompactionError> {
@@ -353,7 +354,7 @@ pub async fn create(
     let compaction_id = new_message_id();
     let compaction_msg = Info {
         id: compaction_id.clone(),
-        session_id: session_id.to_string(),
+        session_id: session_id.clone(),
         body: InfoBody::User(User {
             time: UserTime { created: now_ms() },
             format: None,
@@ -372,7 +373,7 @@ pub async fn create(
     cfg.store
         .insert_part(&Part {
             id: new_part_id(),
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
             message_id: compaction_id.clone(),
             kind: PartKind::Compaction {
                 auto,
@@ -387,7 +388,7 @@ pub async fn create(
     let now = now_ms();
     let summary_msg = Info {
         id: summary_id.clone(),
-        session_id: session_id.to_string(),
+        session_id: session_id.clone(),
         body: InfoBody::Assistant(Assistant {
             time: AssistantTime {
                 created: now,
@@ -424,7 +425,7 @@ pub async fn create(
     cfg.store
         .insert_part(&Part {
             id: new_part_id(),
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
             message_id: summary_id.clone(),
             kind: PartKind::Text {
                 text: summary,
@@ -444,7 +445,7 @@ pub async fn create(
         let continue_id = new_message_id();
         let continue_msg = Info {
             id: continue_id.clone(),
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
             body: InfoBody::User(User {
                 time: UserTime { created: now_ms() },
                 format: None,
@@ -468,7 +469,7 @@ pub async fn create(
         cfg.store
             .insert_part(&Part {
                 id: new_part_id(),
-                session_id: session_id.to_string(),
+                session_id: session_id.clone(),
                 message_id: continue_id,
                 kind: PartKind::Text {
                     text,
@@ -500,7 +501,7 @@ pub async fn create(
 ///
 /// # Errors
 /// Returns [`CompactionError::Storage`] on a persistence failure.
-pub async fn prune(cfg: &RunConfig, session_id: &str) -> Result<(), CompactionError> {
+pub async fn prune(cfg: &RunConfig, session_id: &SessionId) -> Result<(), CompactionError> {
     let msgs = cfg.store.messages_with_parts(session_id).await?;
 
     let mut total: u64 = 0;

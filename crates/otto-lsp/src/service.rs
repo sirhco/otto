@@ -168,7 +168,11 @@ impl Lsp {
                 .to_ascii_lowercase()
         );
         let language_id = registry::language_id(path);
-        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let read_path = path.to_path_buf();
+        let text = tokio::task::spawn_blocking(move || std::fs::read_to_string(read_path))
+            .await
+            .unwrap_or_else(|_| Ok(String::new()))
+            .unwrap_or_default();
 
         for server in self.resolved_servers() {
             if !server

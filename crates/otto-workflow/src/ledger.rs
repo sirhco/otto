@@ -2,6 +2,7 @@
 //! `workflow_task` table. The engine records every per-task status transition
 //! here; `otto workflow` renders it.
 
+use otto_storage::model::SessionId;
 use otto_storage::{Store, WorkflowTaskRow};
 
 use crate::error::{TaskStatus, WfError};
@@ -17,13 +18,13 @@ pub struct TaskRecord {
 /// A status log scoped to one workflow run (session + kind).
 pub struct Ledger {
     store: Store,
-    session_id: String,
+    session_id: SessionId,
     kind: String,
 }
 
 impl Ledger {
     #[must_use]
-    pub fn new(store: Store, session_id: impl Into<String>, kind: impl Into<String>) -> Self {
+    pub fn new(store: Store, session_id: impl Into<SessionId>, kind: impl Into<String>) -> Self {
         Self {
             store,
             session_id: session_id.into(),

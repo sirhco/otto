@@ -1732,6 +1732,7 @@ dependencies = [
  "otto-permission",
  "otto-server",
  "otto-session",
+ "otto-storage",
  "otto-tools",
  "otto-tui",
  "otto-vcs",
@@ -1773,6 +1774,7 @@ name = "otto-id"
 version = "0.3.3"
 dependencies = [
  "rand 0.8.6",
+ "serde",
 ]
 
 [[package]]
@@ -1970,7 +1972,6 @@ dependencies = [
 name = "otto-vcs"
 version = "0.3.3"
 dependencies = [
- "anyhow",
  "serde",
  "serde_json",
  "sha2",

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
-use crate::model::{Info, Part, WithParts};
+use crate::model::{Info, MessageId, Part, PartId, SessionId, WithParts};
 
 /// Errors returned by [`Store`] operations.
 #[derive(Debug, thiserror::Error)]
@@ -60,11 +60,11 @@ pub struct SessionTokens {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     /// Session id (`ses_…`).
-    pub id: String,
+    pub id: SessionId,
     /// Owning project id (`sql.ts:26`).
     pub project_id: String,
     /// Optional parent session id (`sql.ts:31`).
-    pub parent_id: Option<String>,
+    pub parent_id: Option<SessionId>,
     /// Working directory (`sql.ts:33`).
     pub directory: String,
     /// Session title (`sql.ts:35`).
@@ -89,7 +89,7 @@ pub struct WorkflowTaskRow {
     /// Task row id.
     pub id: String,
     /// Owning session id.
-    pub session_id: String,
+    pub session_id: SessionId,
     /// Workflow kind (e.g. `sdd`).
     pub workflow_kind: String,
     /// Ordinal position of the task within the workflow.
@@ -236,9 +236,9 @@ impl Store {
                 tokens_cache_read, tokens_cache_write, time_created, time_updated
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&session.id)
+        .bind(session.id.as_str())
         .bind(&session.project_id)
-        .bind(&session.parent_id)
+        .bind(session.parent_id.as_deref())
         .bind(&session.directory)
         .bind(&session.title)
         .bind(&session.version)
@@ -261,10 +261,14 @@ impl Store {
     ///
     /// # Errors
     /// Returns a [`StorageError`] on SQLite failure.
-    pub async fn update_session_title(&self, id: &str, title: &str) -> Result<(), StorageError> {
+    pub async fn update_session_title(
+        &self,
+        id: &SessionId,
+        title: &str,
+    ) -> Result<(), StorageError> {
         sqlx::query("UPDATE session SET title = ? WHERE id = ?")
             .bind(title)
-            .bind(id)
+            .bind(id.as_str())
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -274,14 +278,14 @@ impl Store {
     ///
     /// # Errors
     /// Returns a [`StorageError`] on SQLite or JSON failure.
-    pub async fn get_session(&self, id: &str) -> Result<Option<Session>, StorageError> {
+    pub async fn get_session(&self, id: &SessionId) -> Result<Option<Session>, StorageError> {
         let row = sqlx::query(
             "SELECT id, project_id, parent_id, directory, title, version, metadata,
                     cost, tokens_input, tokens_output, tokens_reasoning,
                     tokens_cache_read, tokens_cache_write, time_created, time_updated
              FROM session WHERE id = ?",
         )
-        .bind(id)
+        .bind(id.as_str())
         .fetch_optional(&self.pool)
         .await?;
         row.map(session_from_row).transpose()
@@ -320,7 +324,7 @@ impl Store {
                  updated_at = excluded.updated_at",
         )
         .bind(&row.id)
-        .bind(&row.session_id)
+        .bind(row.session_id.as_str())
         .bind(&row.workflow_kind)
         .bind(row.task_index)
         .bind(&row.status)
@@ -337,13 +341,13 @@ impl Store {
     /// Returns a [`StorageError`] on SQLite failure.
     pub async fn list_workflow_tasks(
         &self,
-        session_id: &str,
+        session_id: &SessionId,
     ) -> Result<Vec<WorkflowTaskRow>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, session_id, workflow_kind, task_index, status, notes, updated_at
              FROM workflow_task WHERE session_id = ? ORDER BY task_index, id",
         )
-        .bind(session_id)
+        .bind(session_id.as_str())
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(workflow_task_from_row).collect()
@@ -363,8 +367,8 @@ impl Store {
             "INSERT INTO message (id, session_id, time_created, time_updated, data)
              VALUES (?, ?, ?, ?, ?)",
         )
-        .bind(info.id())
-        .bind(&info.session_id)
+        .bind(info.id().as_str())
+        .bind(info.session_id.as_str())
         .bind(time_created)
         .bind(time_created)
         .bind(&data)
@@ -389,8 +393,8 @@ impl Store {
                  data = excluded.data,
                  time_updated = excluded.time_updated",
         )
-        .bind(info.id())
-        .bind(&info.session_id)
+        .bind(info.id().as_str())
+        .bind(info.session_id.as_str())
         .bind(time_created)
         .bind(time_created)
         .bind(&data)
@@ -406,13 +410,13 @@ impl Store {
     /// Returns a [`StorageError`] on SQLite or JSON failure.
     pub async fn get_message(
         &self,
-        session_id: &str,
-        message_id: &str,
+        session_id: &SessionId,
+        message_id: &MessageId,
     ) -> Result<Option<Info>, StorageError> {
         let row =
             sqlx::query("SELECT id, session_id, data FROM message WHERE id = ? AND session_id = ?")
-                .bind(message_id)
-                .bind(session_id)
+                .bind(message_id.as_str())
+                .bind(session_id.as_str())
                 .fetch_optional(&self.pool)
                 .await?;
         row.map(info_from_row).transpose()
@@ -423,12 +427,12 @@ impl Store {
     ///
     /// # Errors
     /// Returns a [`StorageError`] on SQLite or JSON failure.
-    pub async fn list_messages(&self, session_id: &str) -> Result<Vec<Info>, StorageError> {
+    pub async fn list_messages(&self, session_id: &SessionId) -> Result<Vec<Info>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, session_id, data FROM message
              WHERE session_id = ? ORDER BY time_created, id",
         )
-        .bind(session_id)
+        .bind(session_id.as_str())
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(info_from_row).collect()
@@ -449,9 +453,9 @@ impl Store {
             "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
              VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(&part.id)
-        .bind(&part.message_id)
-        .bind(&part.session_id)
+        .bind(part.id.as_str())
+        .bind(part.message_id.as_str())
+        .bind(part.session_id.as_str())
         .bind(time_created)
         .bind(time_created)
         .bind(&data)
@@ -478,9 +482,9 @@ impl Store {
                  data = excluded.data,
                  time_updated = excluded.time_updated",
         )
-        .bind(&part.id)
-        .bind(&part.message_id)
-        .bind(&part.session_id)
+        .bind(part.id.as_str())
+        .bind(part.message_id.as_str())
+        .bind(part.session_id.as_str())
         .bind(time_created)
         .bind(time_created)
         .bind(&data)
@@ -494,12 +498,12 @@ impl Store {
     ///
     /// # Errors
     /// Returns a [`StorageError`] on SQLite or JSON failure.
-    pub async fn list_parts(&self, message_id: &str) -> Result<Vec<Part>, StorageError> {
+    pub async fn list_parts(&self, message_id: &MessageId) -> Result<Vec<Part>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, session_id, message_id, data FROM part
              WHERE message_id = ? ORDER BY id",
         )
-        .bind(message_id)
+        .bind(message_id.as_str())
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(part_from_row).collect()
@@ -512,9 +516,12 @@ impl Store {
     ///
     /// # Errors
     /// Returns a [`StorageError`] on SQLite failure.
-    pub async fn delete_parts_for_message(&self, message_id: &str) -> Result<(), StorageError> {
+    pub async fn delete_parts_for_message(
+        &self,
+        message_id: &MessageId,
+    ) -> Result<(), StorageError> {
         sqlx::query("DELETE FROM part WHERE message_id = ?")
-            .bind(message_id)
+            .bind(message_id.as_str())
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -526,9 +533,9 @@ impl Store {
     ///
     /// # Errors
     /// Returns a [`StorageError`] on SQLite failure.
-    pub async fn delete_part(&self, part_id: &str) -> Result<(), StorageError> {
+    pub async fn delete_part(&self, part_id: &PartId) -> Result<(), StorageError> {
         sqlx::query("DELETE FROM part WHERE id = ?")
-            .bind(part_id)
+            .bind(part_id.as_str())
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -545,17 +552,17 @@ impl Store {
     /// Returns a [`StorageError`] on SQLite or JSON failure.
     pub async fn messages_with_parts(
         &self,
-        session_id: &str,
+        session_id: &SessionId,
     ) -> Result<Vec<WithParts>, StorageError> {
         let messages = self.list_messages(session_id).await?;
         let rows = sqlx::query(
             "SELECT id, session_id, message_id, data FROM part
              WHERE session_id = ? ORDER BY message_id, id",
         )
-        .bind(session_id)
+        .bind(session_id.as_str())
         .fetch_all(&self.pool)
         .await?;
-        let mut by_message: std::collections::HashMap<String, Vec<Part>> =
+        let mut by_message: std::collections::HashMap<MessageId, Vec<Part>> =
             std::collections::HashMap::new();
         for row in rows {
             let part = part_from_row(row)?;
@@ -576,8 +583,8 @@ impl Store {
 
 /// Hydrates an [`Info`] from a `message` row (`id`, `session_id`, `data`).
 fn info_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Info, StorageError> {
-    let id: String = row.try_get("id")?;
-    let session_id: String = row.try_get("session_id")?;
+    let id: MessageId = row.try_get::<String, _>("id")?.into();
+    let session_id: SessionId = row.try_get::<String, _>("session_id")?.into();
     let data: String = row.try_get("data")?;
     Ok(Info::from_row(id, session_id, &data)?)
 }
@@ -585,9 +592,9 @@ fn info_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Info, StorageError> {
 /// Hydrates a [`Part`] from a `part` row (`id`, `session_id`, `message_id`,
 /// `data`).
 fn part_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Part, StorageError> {
-    let id: String = row.try_get("id")?;
-    let session_id: String = row.try_get("session_id")?;
-    let message_id: String = row.try_get("message_id")?;
+    let id: PartId = row.try_get::<String, _>("id")?.into();
+    let session_id: SessionId = row.try_get::<String, _>("session_id")?.into();
+    let message_id: MessageId = row.try_get::<String, _>("message_id")?.into();
     let data: String = row.try_get("data")?;
     Ok(Part::from_row(id, session_id, message_id, &data)?)
 }
@@ -597,9 +604,11 @@ fn session_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Session, StorageErro
     let metadata: Option<String> = row.try_get("metadata")?;
     let metadata = metadata.map(|m| serde_json::from_str(&m)).transpose()?;
     Ok(Session {
-        id: row.try_get("id")?,
+        id: row.try_get::<String, _>("id")?.into(),
         project_id: row.try_get("project_id")?,
-        parent_id: row.try_get("parent_id")?,
+        parent_id: row
+            .try_get::<Option<String>, _>("parent_id")?
+            .map(Into::into),
         directory: row.try_get("directory")?,
         title: row.try_get("title")?,
         version: row.try_get("version")?,
@@ -623,7 +632,7 @@ fn session_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Session, StorageErro
 fn workflow_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkflowTaskRow, StorageError> {
     Ok(WorkflowTaskRow {
         id: row.try_get("id")?,
-        session_id: row.try_get("session_id")?,
+        session_id: row.try_get::<String, _>("session_id")?.into(),
         workflow_kind: row.try_get("workflow_kind")?,
         task_index: row.try_get("task_index")?,
         status: row.try_get("status")?,

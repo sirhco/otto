@@ -15,6 +15,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use otto_agent::{AgentInfo, ModelRef};
 use otto_app::{RunHandle, Runtime};
+use otto_storage::model::SessionId;
 use otto_permission::{Asked, Reply};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
@@ -41,7 +42,7 @@ pub struct RunRequest {
     /// The resolved model to generate with.
     pub model: ModelRef,
     /// An existing session to continue, or `None` to create a fresh one.
-    pub session_id: Option<String>,
+    pub session_id: Option<SessionId>,
 }
 
 /// Drive a single agent turn on `runtime`, rendering the streamed events to
@@ -298,8 +299,9 @@ async fn resolve_session(
     runtime: &Runtime,
     session: Option<String>,
     continue_latest: bool,
-) -> Result<Option<String>> {
+) -> Result<Option<SessionId>> {
     if let Some(id) = session {
+        let id = SessionId::from(id);
         if runtime.store().get_session(&id).await?.is_none() {
             bail!("session not found: {id}");
         }

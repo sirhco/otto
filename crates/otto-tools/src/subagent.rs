@@ -9,6 +9,7 @@
 //! implementation (`SessionSubagentSpawner`) lives in `otto-session`, which
 //! owns `run_loop`; here we only define the contract the tool calls.
 
+use otto_id::{MessageId, SessionId};
 use tokio_util::sync::CancellationToken;
 
 use crate::tool::ToolError;
@@ -27,9 +28,9 @@ pub struct SubagentRequest {
     pub prompt: String,
     /// The parent session id (`ctx.sessionID`, task.ts:124) — the child's
     /// `parentID`.
-    pub parent_session_id: String,
+    pub parent_session_id: SessionId,
     /// The parent assistant message id (`ctx.messageID`, task.ts:160).
-    pub parent_message_id: String,
+    pub parent_message_id: MessageId,
     /// Resume a prior child session instead of creating a fresh one
     /// (`params.task_id`, task.ts:47-50, 121-123).
     pub task_id: Option<String>,
@@ -86,8 +87,8 @@ mod tests {
             subagent_type: "general".into(),
             description: desc.into(),
             prompt: String::new(),
-            parent_session_id: String::new(),
-            parent_message_id: String::new(),
+            parent_session_id: SessionId::default(),
+            parent_message_id: MessageId::default(),
             task_id: None,
             command: None,
             abort: CancellationToken::new(),

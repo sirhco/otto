@@ -221,6 +221,151 @@ pub fn timestamp(id: &str) -> Option<u64> {
     Some(encoded / 0x1000)
 }
 
+/// Defines a newtype ID wrapping a generated string, distinguishing e.g. a
+/// `SessionId` from a `MessageId` at compile time even though both are
+/// `<prefix>_<26 chars>` strings underneath.
+///
+/// Deliberately `Deref<Target = str>` + `Borrow<str>`: the type-safety this
+/// buys is at API boundaries (a function taking `&SessionId` can't
+/// accidentally receive a `MessageId`), not in denying string operations on
+/// an id you already hold — those (`.starts_with`, formatting, `HashMap<_,
+/// str>` lookups) should keep working exactly as they did on a bare `String`.
+macro_rules! id_type {
+    ($(#[$meta:meta])* $name:ident, $prefix:expr) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Generates a new ascending (chronologically sortable) id.
+            #[must_use]
+            pub fn new_ascending() -> Self {
+                Self(ascending($prefix))
+            }
+
+            /// Generates a new descending (reverse-chronologically sortable) id.
+            #[must_use]
+            pub fn new_descending() -> Self {
+                Self(descending($prefix))
+            }
+
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+            fn deref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::borrow::Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(s: String) -> Self {
+                Self(s)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(s: &str) -> Self {
+                Self(s.to_string())
+            }
+        }
+
+        impl From<&String> for $name {
+            fn from(s: &String) -> Self {
+                Self(s.clone())
+            }
+        }
+
+        impl From<&$name> for $name {
+            fn from(id: &$name) -> Self {
+                id.clone()
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(id: $name) -> String {
+                id.0
+            }
+        }
+
+        impl Default for $name {
+            /// An empty placeholder id — for builders whose caller doesn't
+            /// care about this field, not a valid generated id.
+            fn default() -> Self {
+                Self(String::new())
+            }
+        }
+
+        impl PartialEq<str> for $name {
+            fn eq(&self, other: &str) -> bool {
+                self.0 == other
+            }
+        }
+
+        impl PartialEq<&str> for $name {
+            fn eq(&self, other: &&str) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl PartialEq<String> for $name {
+            fn eq(&self, other: &String) -> bool {
+                &self.0 == other
+            }
+        }
+
+        impl PartialEq<$name> for str {
+            fn eq(&self, other: &$name) -> bool {
+                self == other.0
+            }
+        }
+    };
+}
+
+id_type!(
+    /// A session id (`ses_...`), distinct from every other id type.
+    SessionId,
+    Prefix::Session
+);
+id_type!(
+    /// A message id (`msg_...`), distinct from every other id type.
+    MessageId,
+    Prefix::Message
+);
+id_type!(
+    /// A message-part id (`prt_...`), distinct from every other id type.
+    PartId,
+    Prefix::Part
+);
+id_type!(
+    /// A permission request id (`per_...`), distinct from every other id type.
+    PermissionId,
+    Prefix::Permission
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

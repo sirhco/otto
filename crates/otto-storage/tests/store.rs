@@ -1,12 +1,20 @@
 //! Integration tests for the SQLite [`Store`].
 
 use otto_storage::model::{
-    Assistant, AssistantPath, AssistantTime, Info, InfoBody, Part, PartKind, TokenCache, Tokens,
-    User, UserModel, UserTime,
+    Assistant, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part, PartKind,
+    SessionId, TokenCache, Tokens, User, UserModel, UserTime,
 };
 use otto_storage::{Session, SessionCacheTokens, SessionTokens, Store};
 use serde_json::json;
 use sqlx::Row;
+
+fn sid(s: &str) -> SessionId {
+    s.into()
+}
+
+fn mid(s: &str) -> MessageId {
+    s.into()
+}
 
 fn session(id: &str) -> Session {
     Session {
@@ -105,13 +113,13 @@ fn text_part(id: &str, msg: &str, text: &str) -> Part {
 #[tokio::test]
 async fn session_crud() {
     let store = Store::open_in_memory().await.expect("open");
-    assert!(store.get_session("ses_1").await.expect("get").is_none());
+    assert!(store.get_session(&sid("ses_1")).await.expect("get").is_none());
 
     let s = session("ses_1");
     store.create_session(&s).await.expect("create");
 
     let got = store
-        .get_session("ses_1")
+        .get_session(&sid("ses_1"))
         .await
         .expect("get")
         .expect("some");
@@ -128,12 +136,12 @@ async fn update_session_title_changes_only_title() {
     store.create_session(&s).await.expect("create");
 
     store
-        .update_session_title("ses_1", "Streaming client retry logic")
+        .update_session_title(&sid("ses_1"), "Streaming client retry logic")
         .await
         .expect("update title");
 
     let got = store
-        .get_session("ses_1")
+        .get_session(&sid("ses_1"))
         .await
         .expect("get")
         .expect("some");
@@ -176,14 +184,17 @@ async fn messages_with_parts_ordered() {
         .await
         .expect("p1");
 
-    let messages = store.list_messages("ses_1").await.expect("list messages");
+    let messages = store
+        .list_messages(&sid("ses_1"))
+        .await
+        .expect("list messages");
     assert_eq!(
         messages.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
         vec!["msg_001", "msg_002"]
     );
 
     let with_parts = store
-        .messages_with_parts("ses_1")
+        .messages_with_parts(&sid("ses_1"))
         .await
         .expect("with parts");
     assert_eq!(with_parts.len(), 2);
@@ -194,12 +205,18 @@ async fn messages_with_parts_ordered() {
 
     // get_message round-trips hydration.
     let got = store
-        .get_message("ses_1", "msg_002")
+        .get_message(&sid("ses_1"), &mid("msg_002"))
         .await
         .expect("get")
         .expect("some");
     assert_eq!(got, assistant_info("msg_002", "msg_001", 200));
-    assert!(store.list_parts("msg_002").await.expect("parts").is_empty());
+    assert!(
+        store
+            .list_parts(&mid("msg_002"))
+            .await
+            .expect("parts")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -245,12 +262,12 @@ async fn data_blob_excludes_columns_and_hydrates() {
 
     // Hydration merges the columns back onto the blob.
     let hydrated = store
-        .get_message("ses_1", "msg_001")
+        .get_message(&sid("ses_1"), &mid("msg_001"))
         .await
         .expect("get")
         .expect("some");
     assert_eq!(hydrated, info);
-    let parts = store.list_parts("msg_001").await.expect("parts");
+    let parts = store.list_parts(&mid("msg_001")).await.expect("parts");
     assert_eq!(parts[0], text_part("prt_001", "msg_001", "hi"));
 }
 
@@ -282,7 +299,7 @@ async fn messages_with_parts_scoped_to_session() {
         .expect("m2");
 
     let with_parts = store
-        .messages_with_parts("ses_1")
+        .messages_with_parts(&sid("ses_1"))
         .await
         .expect("with parts");
     assert_eq!(with_parts.len(), 2);
@@ -311,7 +328,7 @@ async fn open_file_backed_roundtrips() {
         .expect("msg");
 
     let got = store
-        .get_message("ses_1", "msg_001")
+        .get_message(&sid("ses_1"), &mid("msg_001"))
         .await
         .expect("get")
         .expect("some");
@@ -375,7 +392,7 @@ async fn update_part_and_message_upsert_in_place() {
         .await
         .expect("overwrite via update_part");
 
-    let parts = store.list_parts("msg_001").await.expect("parts");
+    let parts = store.list_parts(&mid("msg_001")).await.expect("parts");
     assert_eq!(parts.len(), 1, "upsert must not duplicate the row");
     match &parts[0].kind {
         PartKind::Text { text, .. } => assert_eq!(text, "goodbye"),
@@ -394,7 +411,7 @@ async fn update_part_and_message_upsert_in_place() {
         .expect("update message");
 
     let got = store
-        .get_message("ses_1", "msg_001")
+        .get_message(&sid("ses_1"), &mid("msg_001"))
         .await
         .expect("get")
         .expect("some");
@@ -402,7 +419,11 @@ async fn update_part_and_message_upsert_in_place() {
     assert_eq!(a.finish.as_deref(), Some("length"));
     assert_eq!(a.cost, 1.25);
     assert_eq!(
-        store.list_messages("ses_1").await.expect("list").len(),
+        store
+            .list_messages(&sid("ses_1"))
+            .await
+            .expect("list")
+            .len(),
         1,
         "upsert must not duplicate the message row"
     );
@@ -439,15 +460,19 @@ async fn delete_parts_for_message_scoped_to_message() {
         .expect("b1");
 
     store
-        .delete_parts_for_message("msg_a")
+        .delete_parts_for_message(&mid("msg_a"))
         .await
         .expect("delete");
 
     assert!(
-        store.list_parts("msg_a").await.expect("parts a").is_empty(),
+        store
+            .list_parts(&mid("msg_a"))
+            .await
+            .expect("parts a")
+            .is_empty(),
         "message A's parts must all be deleted"
     );
-    let parts_b = store.list_parts("msg_b").await.expect("parts b");
+    let parts_b = store.list_parts(&mid("msg_b")).await.expect("parts b");
     assert_eq!(
         parts_b,
         vec![text_part("prt_b1", "msg_b", "untouched")],
@@ -456,11 +481,11 @@ async fn delete_parts_for_message_scoped_to_message() {
 
     // Deleting a message with no parts (already-empty or never had any) is a no-op.
     store
-        .delete_parts_for_message("msg_a")
+        .delete_parts_for_message(&mid("msg_a"))
         .await
         .expect("delete again is a no-op");
     store
-        .delete_parts_for_message("msg_nonexistent")
+        .delete_parts_for_message(&mid("msg_nonexistent"))
         .await
         .expect("delete on unknown message id is a no-op");
 }
@@ -471,7 +496,7 @@ async fn workflow_task_upsert_and_list() {
     let store = otto_storage::Store::open_in_memory().await.unwrap();
     let row = WorkflowTaskRow {
         id: "wft_1".into(),
-        session_id: "ses_1".into(),
+        session_id: sid("ses_1"),
         workflow_kind: "sdd".into(),
         task_index: 0,
         status: "NEEDS_CONTEXT".into(),
@@ -487,7 +512,7 @@ async fn workflow_task_upsert_and_list() {
     };
     store.upsert_workflow_task(&done).await.unwrap();
 
-    let rows = store.list_workflow_tasks("ses_1").await.unwrap();
+    let rows = store.list_workflow_tasks(&sid("ses_1")).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "DONE");
     assert_eq!(rows[0].updated_at, 200);
@@ -518,7 +543,7 @@ async fn workflow_tasks_list_ordered_by_index_and_scoped_by_session() {
         .upsert_workflow_task(&mk("z", "ses_other", 0))
         .await
         .unwrap();
-    let rows = store.list_workflow_tasks("ses_1").await.unwrap();
+    let rows = store.list_workflow_tasks(&sid("ses_1")).await.unwrap();
     assert_eq!(
         rows.iter().map(|r| r.task_index).collect::<Vec<_>>(),
         vec![0, 1]

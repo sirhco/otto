@@ -2,8 +2,8 @@
 //! (`message-v2.ts:585-601`, `521-572`).
 
 use otto_storage::model::{
-    Assistant, AssistantPath, AssistantTime, Info, InfoBody, Part, PartKind, TokenCache, Tokens,
-    User, UserModel, UserTime, WithParts,
+    Assistant, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part, PartKind,
+    TokenCache, Tokens, User, UserModel, UserTime, WithParts,
 };
 use otto_storage::{filter_compacted, latest};
 
@@ -83,7 +83,7 @@ fn compaction_part(id: &str, msg_id: &str, tail: Option<&str>) -> Part {
         kind: PartKind::Compaction {
             auto: true,
             overflow: None,
-            tail_start_id: tail.map(str::to_string),
+            tail_start_id: tail.map(MessageId::from),
         },
     }
 }
@@ -103,7 +103,7 @@ fn subtask_part(id: &str, msg_id: &str) -> Part {
     }
 }
 
-fn ids(msgs: &[WithParts]) -> Vec<String> {
+fn ids(msgs: &[WithParts]) -> Vec<MessageId> {
     msgs.iter().map(|m| m.info.id.clone()).collect()
 }
 
@@ -196,11 +196,11 @@ fn filter_compacted_cut_and_reorder() {
     // Cut: the pre-tail messages m1, m2 are gone.
     let out_ids = ids(&out);
     assert!(
-        !out_ids.contains(&"msg_001".to_string()),
+        !out_ids.contains(&MessageId::from("msg_001")),
         "m1 should be dropped"
     );
     assert!(
-        !out_ids.contains(&"msg_002".to_string()),
+        !out_ids.contains(&MessageId::from("msg_002")),
         "m2 should be dropped"
     );
 

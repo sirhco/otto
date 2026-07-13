@@ -23,6 +23,14 @@ use serde_json::json;
 const SES: &str = "ses_1";
 const MSG: &str = "msg_assistant_0001";
 
+fn sid(s: &str) -> otto_storage::model::SessionId {
+    s.into()
+}
+
+fn mid(s: &str) -> otto_storage::model::MessageId {
+    s.into()
+}
+
 // -- fixtures ---------------------------------------------------------------
 
 async fn store_with_message() -> Store {
@@ -140,12 +148,12 @@ fn ok_stream(
 }
 
 async fn parts(store: &Store) -> Vec<otto_storage::model::Part> {
-    store.list_parts(MSG).await.expect("parts")
+    store.list_parts(&mid(MSG)).await.expect("parts")
 }
 
 async fn get_assistant(store: &Store) -> Assistant {
     store
-        .get_message(SES, MSG)
+        .get_message(&sid(SES), &mid(MSG))
         .await
         .expect("get")
         .expect("some")

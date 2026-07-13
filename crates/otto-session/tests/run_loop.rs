@@ -18,8 +18,8 @@ use otto_events::{FinishReason, LLMEvent, ToolResultValue};
 use otto_llm::{LLMError, LLMRequest, Model, Route};
 use otto_session::{RunConfig, augment_with_tools, run_loop};
 use otto_storage::model::{
-    Info, InfoBody, Part, PartKind, ToolState, User, UserModel, UserTime, new_message_id,
-    new_part_id,
+    Info, InfoBody, MessageId, Part, PartKind, SessionId, ToolState, User, UserModel, UserTime,
+    new_message_id, new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
 use otto_tools::{AllowAll, ExecuteResult, Tool, ToolContext, ToolError, ToolRegistry};
@@ -146,7 +146,11 @@ impl Tool for WaitTool {
 
 const SES: &str = "ses_run";
 
-async fn seed(text: &str) -> (Store, String) {
+fn sid(s: &str) -> SessionId {
+    s.into()
+}
+
+async fn seed(text: &str) -> (Store, MessageId) {
     let store = Store::open_in_memory().await.expect("open");
     store
         .create_session(&Session {
@@ -295,7 +299,7 @@ fn text_events(id: &str, text: &str) -> Vec<LLMEvent> {
     ]
 }
 
-async fn parts_of(store: &Store, message_id: &str) -> Vec<Part> {
+async fn parts_of(store: &Store, message_id: &MessageId) -> Vec<Part> {
     store.list_parts(message_id).await.expect("parts")
 }
 
@@ -326,7 +330,7 @@ async fn end_to_end_tool_cycle() {
         CancellationToken::new(),
     );
 
-    let last = run_loop(&cfg, SES).await.expect("run_loop");
+    let last = run_loop(&cfg, &sid(SES)).await.expect("run_loop");
 
     // Exactly two provider turns.
     assert_eq!(calls.load(Ordering::SeqCst), 2, "two provider turns");
@@ -343,7 +347,7 @@ async fn end_to_end_tool_cycle() {
     assert_eq!(text, "done");
 
     // A completed echo tool part exists across the session with output "hi".
-    let all_messages = store.list_messages(SES).await.expect("messages");
+    let all_messages = store.list_messages(&sid(SES)).await.expect("messages");
     let mut echo_output = None;
     for m in &all_messages {
         for p in parts_of(&store, m.id()).await {
@@ -378,7 +382,7 @@ async fn exit_without_tools() {
         CancellationToken::new(),
     );
 
-    let last = run_loop(&cfg, SES).await.expect("run_loop");
+    let last = run_loop(&cfg, &sid(SES)).await.expect("run_loop");
     assert_eq!(calls.load(Ordering::SeqCst), 1, "one provider turn");
 
     let text = parts_of(&store, last.id())
@@ -419,14 +423,14 @@ async fn abort_mid_flight_marks_tool_interrupted() {
         canceller.cancel();
     });
 
-    let last = run_loop(&cfg, SES)
+    let last = run_loop(&cfg, &sid(SES))
         .await
         .expect("run_loop returns after abort");
     assert_eq!(calls.load(Ordering::SeqCst), 1, "only one provider turn");
 
     // The assistant message is finalized (completed stamped).
     let assistant = store
-        .get_message(SES, last.id())
+        .get_message(&sid(SES), last.id())
         .await
         .expect("get")
         .expect("some");
@@ -477,7 +481,7 @@ async fn has_tool_calls_guard_keeps_looping() {
         CancellationToken::new(),
     );
 
-    run_loop(&cfg, SES).await.expect("run_loop");
+    run_loop(&cfg, &sid(SES)).await.expect("run_loop");
     assert_eq!(
         calls.load(Ordering::SeqCst),
         2,
@@ -568,7 +572,7 @@ async fn event_tap_yields_events_for_a_turn() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
     cfg.event_tx = Some(tx);
 
-    run_loop(&cfg, SES).await.expect("run_loop");
+    run_loop(&cfg, &sid(SES)).await.expect("run_loop");
 
     // Drop `cfg` so the tap's sender is released; draining then terminates.
     drop(cfg);
@@ -616,7 +620,7 @@ async fn retry_emits_retry_event_before_backoff() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
     cfg.event_tx = Some(event_tx);
 
-    run_loop(&cfg, SES)
+    run_loop(&cfg, &sid(SES))
         .await
         .expect("run_loop recovers after one retry");
 
@@ -666,7 +670,7 @@ async fn non_retryable_error_emits_no_retry_event() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
     cfg.event_tx = Some(event_tx);
 
-    let result = run_loop(&cfg, SES).await;
+    let result = run_loop(&cfg, &sid(SES)).await;
     assert!(result.is_err(), "a non-retryable error propagates");
 
     drop(cfg);
@@ -701,7 +705,7 @@ async fn empty_stream_retries_with_backoff_then_errors() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
     cfg.event_tx = Some(event_tx);
 
-    let result = run_loop(&cfg, SES).await;
+    let result = run_loop(&cfg, &sid(SES)).await;
     assert!(result.is_err(), "an always-empty stream must fail the run");
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -720,7 +724,7 @@ async fn empty_stream_retries_with_backoff_then_errors() {
 
     // Exactly one assistant message (retries reuse the id — no pile-up), and
     // it is finalized with the provider error.
-    let msgs = store.list_messages(SES).await.expect("messages");
+    let msgs = store.list_messages(&sid(SES)).await.expect("messages");
     let assistants: Vec<_> = msgs.iter().filter(|m| m.is_assistant()).collect();
     assert_eq!(assistants.len(), 1, "no empty-assistant pile-up");
     let a = assistants[0].as_assistant().expect("assistant body");
@@ -771,7 +775,7 @@ async fn total_retry_budget_binds_across_generous_per_step_budget() {
     cfg.max_retries = 10;
     cfg.max_total_retries = 3;
 
-    let result = run_loop(&cfg, SES).await;
+    let result = run_loop(&cfg, &sid(SES)).await;
     assert!(result.is_err(), "total retry budget exhausts the run");
     assert_eq!(
         calls.load(Ordering::SeqCst),
@@ -856,7 +860,7 @@ async fn retry_salvages_completed_tool_work_instead_of_replaying() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
     cfg.event_tx = Some(event_tx);
 
-    run_loop(&cfg, SES).await.expect("run completes");
+    run_loop(&cfg, &sid(SES)).await.expect("run completes");
 
     assert_eq!(runs.load(Ordering::SeqCst), 1, "tool executed exactly once");
     assert_eq!(calls.load(Ordering::SeqCst), 2, "two provider calls");
@@ -872,7 +876,7 @@ async fn retry_salvages_completed_tool_work_instead_of_replaying() {
 
     // The failed attempt's assistant is finalized as a tool-calls step and
     // keeps its completed tool part; the follow-up assistant carries the text.
-    let msgs = store.list_messages(SES).await.expect("messages");
+    let msgs = store.list_messages(&sid(SES)).await.expect("messages");
     let assistants: Vec<_> = msgs.iter().filter(|m| m.is_assistant()).collect();
     assert_eq!(assistants.len(), 2, "salvaged step + follow-up step");
     let first = assistants[0].as_assistant().expect("assistant body");
@@ -909,8 +913,8 @@ async fn retry_with_no_tool_work_still_purges_and_replays() {
         registry(Arc::new(EchoTool)),
         CancellationToken::new(),
     );
-    run_loop(&cfg, SES).await.expect("run completes");
-    let msgs = store.list_messages(SES).await.expect("messages");
+    run_loop(&cfg, &sid(SES)).await.expect("run completes");
+    let msgs = store.list_messages(&sid(SES)).await.expect("messages");
     let assistants: Vec<_> = msgs.iter().filter(|m| m.is_assistant()).collect();
     assert_eq!(assistants.len(), 1, "in-place retry reuses the assistant");
 }
@@ -941,7 +945,7 @@ async fn truncated_stream_is_retried_then_succeeds() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
     cfg.event_tx = Some(event_tx);
 
-    run_loop(&cfg, SES).await.expect("run recovers");
+    run_loop(&cfg, &sid(SES)).await.expect("run recovers");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     drop(cfg);
@@ -986,7 +990,7 @@ async fn chronic_truncation_accepts_content_with_warning() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LLMEvent>();
     cfg.event_tx = Some(event_tx);
 
-    run_loop(&cfg, SES)
+    run_loop(&cfg, &sid(SES))
         .await
         .expect("chronic truncation must not fail the run");
 
@@ -1000,7 +1004,7 @@ async fn chronic_truncation_accepts_content_with_warning() {
     assert!(saw_warning, "acceptance is surfaced as a Warning");
 
     // The accepted assistant carries the streamed text and a terminal finish.
-    let msgs = store.list_messages(SES).await.expect("messages");
+    let msgs = store.list_messages(&sid(SES)).await.expect("messages");
     let assistant = msgs
         .iter()
         .rev()
@@ -1083,7 +1087,7 @@ async fn retry_purges_partial_parts_no_duplicates() {
         CancellationToken::new(),
     );
 
-    let last = run_loop(&cfg, SES)
+    let last = run_loop(&cfg, &sid(SES))
         .await
         .expect("run_loop recovers after one retry");
 
@@ -1121,13 +1125,13 @@ async fn abort_under_no_terminal_finish_finalizes_gracefully() {
     abort.cancel();
     let cfg = config(store.clone(), route, registry(Arc::new(EchoTool)), abort);
 
-    let last = run_loop(&cfg, SES)
+    let last = run_loop(&cfg, &sid(SES))
         .await
         .expect("aborted NoTerminalFinish must finalize gracefully, not error");
     assert_eq!(calls.load(Ordering::SeqCst), 1, "no retry after abort");
 
     let assistant = store
-        .get_message(SES, last.id())
+        .get_message(&sid(SES), last.id())
         .await
         .expect("get")
         .expect("some");

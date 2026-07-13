@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use otto_storage::model::MessageId;
 use otto_tools::{SubagentRequest, SubagentSpawner};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -354,8 +355,8 @@ impl SddWorkflow {
                  (or DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED).",
                 t.index, t.title, t.body
             ),
-            parent_session_id: parent.to_string(),
-            parent_message_id: String::new(),
+            parent_session_id: parent.into(),
+            parent_message_id: MessageId::default(),
             task_id: None,
             event_tx: crate::tap_subagent(t.index, subagent),
             command: None,
@@ -423,8 +424,8 @@ async fn spawn_one(
         subagent_type: agent.to_string(),
         description: "sdd node".to_string(),
         prompt: prompt.to_string(),
-        parent_session_id: parent.to_string(),
-        parent_message_id: String::new(),
+        parent_session_id: parent.into(),
+        parent_message_id: MessageId::default(),
         task_id: None,
         command: None,
         abort: abort.clone(),

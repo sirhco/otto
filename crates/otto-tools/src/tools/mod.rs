@@ -9,6 +9,7 @@ pub mod edit;
 pub mod glob;
 pub mod grep;
 pub mod invalid;
+pub(crate) mod parallel_walk;
 pub mod question;
 pub mod read;
 pub mod skill;

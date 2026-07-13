@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use otto_storage::model::MessageId;
 use otto_tools::{SubagentRequest, SubagentSpawner};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -200,8 +201,8 @@ impl TddWorkflow {
             subagent_type: "general".to_string(),
             description: "tdd node".to_string(),
             prompt: prompt.to_string(),
-            parent_session_id: parent.to_string(),
-            parent_message_id: String::new(),
+            parent_session_id: parent.into(),
+            parent_message_id: MessageId::default(),
             task_id: None,
             command: None,
             abort: abort.clone(),

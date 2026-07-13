@@ -37,6 +37,7 @@ use otto_agent::ModelRef;
 use otto_app::{RunHandle, Runtime};
 use otto_permission::Reply;
 use otto_storage::Session;
+use otto_storage::model::SessionId;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::broadcast;
@@ -424,7 +425,7 @@ async fn session_create(
     let agent = resolve_agent(&state.runtime, body.agent.as_deref());
     let id = state
         .runtime
-        .create_session(title, &agent, body.parent)
+        .create_session(title, &agent, body.parent.map(SessionId::from))
         .await?;
     let session = state
         .runtime
@@ -443,7 +444,7 @@ async fn session_get(
     state
         .runtime
         .store()
-        .get_session(&id)
+        .get_session(&SessionId::from(&id))
         .await?
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("session {id} not found")))
@@ -455,7 +456,11 @@ async fn session_messages(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let with_parts = state.runtime.store().messages_with_parts(&id).await?;
+    let with_parts = state
+        .runtime
+        .store()
+        .messages_with_parts(&SessionId::from(&id))
+        .await?;
     Ok(Json(json!(with_parts)))
 }
 
@@ -499,7 +504,7 @@ struct PartInput {
 
 /// One `files[]` element of a [`PromptBody`] — a workspace-relative path
 /// resolved via [`crate::attach::resolve_attachment`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct FileInput {
     path: String,
 }
@@ -540,7 +545,7 @@ async fn session_prompt(
         return Err(ApiError::bad_request("empty prompt"));
     }
     // Session must exist before we spend a turn on it.
-    if state.runtime.store().get_session(&id).await?.is_none() {
+    if state.runtime.store().get_session(&SessionId::from(&id)).await?.is_none() {
         return Err(ApiError::not_found(format!("session {id} not found")));
     }
 
@@ -563,36 +568,47 @@ async fn session_prompt(
             )
                 .into_response());
         }
-        for f in files {
-            match attach::resolve_attachment(&root, &f.path) {
-                Ok(attach::ResolvedAttachment::Text(envelope)) => {
-                    extra_parts.push(otto_storage::PartKind::Text {
-                        text: envelope,
-                        synthetic: Some(true),
-                        ignored: None,
-                        time: None,
-                        metadata: None,
-                    });
-                }
-                Ok(attach::ResolvedAttachment::Image {
-                    mime,
-                    filename,
-                    data_url,
-                }) => {
-                    extra_parts.push(otto_storage::PartKind::File {
+        // Attachment reads are blocking `std::fs` work; resolve the whole
+        // batch off the async runtime in one `spawn_blocking` call.
+        let files = files.clone();
+        let root = root.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            let mut parts = Vec::new();
+            for f in &files {
+                match attach::resolve_attachment(&root, &f.path) {
+                    Ok(attach::ResolvedAttachment::Text(envelope)) => {
+                        parts.push(otto_storage::PartKind::Text {
+                            text: envelope,
+                            synthetic: Some(true),
+                            ignored: None,
+                            time: None,
+                            metadata: None,
+                        });
+                    }
+                    Ok(attach::ResolvedAttachment::Image {
                         mime,
-                        filename: Some(filename),
-                        url: data_url,
-                        source: None,
-                    });
+                        filename,
+                        data_url,
+                    }) => {
+                        parts.push(otto_storage::PartKind::File {
+                            mime,
+                            filename: Some(filename),
+                            url: data_url,
+                            source: None,
+                        });
+                    }
+                    Err(e) => return Err(e.message(&f.path)),
                 }
-                Err(e) => {
-                    return Ok((
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": e.message(&f.path) })),
-                    )
-                        .into_response());
-                }
+            }
+            Ok(parts)
+        })
+        .await
+        .expect("attachment resolution task panicked");
+        match resolved {
+            Ok(parts) => extra_parts.extend(parts),
+            Err(message) => {
+                return Ok((StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+                    .into_response());
             }
         }
     }
@@ -824,14 +840,25 @@ struct ContentQuery {
 }
 
 /// `GET /find?pattern=` — content grep over the instance directory
-/// (opencode `file.ts`).
+/// (opencode `file.ts`). The walk + per-file reads are blocking `std::fs`
+/// work, so they run off the async runtime via `spawn_blocking`.
 async fn find_text(State(state): State<AppState>, Query(q): Query<FindQuery>) -> Json<Value> {
-    Json(find::grep(state.runtime.directory(), &q.pattern))
+    let root = state.runtime.directory().to_path_buf();
+    Json(
+        tokio::task::spawn_blocking(move || find::grep(&root, &q.pattern))
+            .await
+            .expect("find::grep task panicked"),
+    )
 }
 
 /// `GET /find/file?query=` — filename search (opencode `file.ts`).
 async fn find_file(State(state): State<AppState>, Query(q): Query<FileQuery>) -> Json<Value> {
-    Json(find::find_files(state.runtime.directory(), &q.query))
+    let root = state.runtime.directory().to_path_buf();
+    Json(
+        tokio::task::spawn_blocking(move || find::find_files(&root, &q.query))
+            .await
+            .expect("find::find_files task panicked"),
+    )
 }
 
 /// `GET /file/content?path=` — read a file (opencode `file.ts`).
@@ -839,7 +866,10 @@ async fn file_content(
     State(state): State<AppState>,
     Query(q): Query<ContentQuery>,
 ) -> ApiResult<Json<Value>> {
-    find::read(state.runtime.directory(), &q.path)
+    let root = state.runtime.directory().to_path_buf();
+    tokio::task::spawn_blocking(move || find::read(&root, &q.path))
+        .await
+        .expect("find::read task panicked")
         .map(Json)
         .map_err(|e| ApiError::not_found(e.to_string()))
 }
@@ -860,7 +890,10 @@ struct FileListQuery {
 /// `is_dir == ends_with('/')`.
 async fn file_list(State(state): State<AppState>, Query(q): Query<FileListQuery>) -> Json<Value> {
     let limit = q.limit.unwrap_or(1000).clamp(1, 5000);
-    let (files, dirs) = otto_vcs::find_entries(state.runtime.directory(), limit);
+    let root = state.runtime.directory().to_path_buf();
+    let (files, dirs) = tokio::task::spawn_blocking(move || otto_vcs::find_entries(&root, limit))
+        .await
+        .unwrap_or_default();
     let truncated = files.len() >= limit || dirs.len() >= limit;
     Json(json!({ "files": files, "dirs": dirs, "truncated": truncated }))
 }
@@ -975,7 +1008,11 @@ async fn workflow_run(
     let agent = rt.default_agent().clone();
     let model = rt.default_model();
     let session_id = rt
-        .create_session(format!("workflow {kind}"), &agent, body.parent.clone())
+        .create_session(
+            format!("workflow {kind}"),
+            &agent,
+            body.parent.clone().map(SessionId::from),
+        )
         .await?;
     let spawner = rt
         .subagent_spawner(&agent, &model)
@@ -994,7 +1031,7 @@ async fn workflow_run(
         runner: Arc::new(otto_workflow::AutoRunner::new(rt.directory().to_path_buf())),
         store: rt.store().clone(),
         directory: rt.directory().to_path_buf(),
-        parent_session_id: session_id.clone(),
+        parent_session_id: session_id.to_string(),
         permission: Arc::new(otto_permission::Ruleset::default()),
         progress: None,
         subagent: None,
@@ -1008,7 +1045,7 @@ async fn workflow_run(
     spawn_workflow(
         kind,
         body.arg,
-        session_id.clone(),
+        session_id.to_string(),
         cx,
         events,
         abort,

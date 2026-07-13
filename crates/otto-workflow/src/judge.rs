@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use otto_storage::model::MessageId;
 use otto_tools::{SubagentRequest, SubagentSpawner};
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
@@ -40,8 +41,8 @@ async fn spawn_text(
         subagent_type: agent.to_string(),
         description: "workflow judgment".to_string(),
         prompt: prompt.to_string(),
-        parent_session_id: parent_session_id.to_string(),
-        parent_message_id: String::new(),
+        parent_session_id: parent_session_id.into(),
+        parent_message_id: MessageId::default(),
         task_id: None,
         command: None,
         abort: abort.clone(),

@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use otto_id::{Prefix, ascending};
 use otto_tools::{PermissionDenied, PermissionRequest};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot};
@@ -18,10 +17,10 @@ use tokio::sync::{broadcast, oneshot};
 use crate::mode::{PermissionMode, danger_ruleset, mode_overlay};
 use crate::ruleset::{Action, Rule, Ruleset, evaluate};
 
-/// Session identifier (matches otto session id strings).
-pub type SessionId = String;
+/// Session identifier — the same type otto-storage uses for its `Session.id`.
+pub use otto_id::SessionId;
 /// Permission-request identifier (`per_…`, from [`otto_id`]).
-pub type RequestId = String;
+pub use otto_id::PermissionId as RequestId;
 
 /// The user's answer to a pending request — port of `PermissionV1.Reply`
 /// (`v1/permission.ts`, `["once", "always", "reject"]`) plus the optional
@@ -295,7 +294,7 @@ impl Permission {
                 return Ok(());
             }
 
-            let request_id = ascending(Prefix::Permission);
+            let request_id = RequestId::new_ascending();
             let (tx, rx) = oneshot::channel();
             inner.pending.insert(
                 request_id.clone(),

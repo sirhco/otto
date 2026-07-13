@@ -23,8 +23,8 @@ use futures::StreamExt;
 use otto_llm::message::{ContentPart, Message, SystemPart, ToolChoice, ToolDefinition};
 use otto_llm::{LLMRequest, Model, Route};
 use otto_storage::model::{
-    Assistant, AssistantError, AssistantPath, AssistantTime, Info, InfoBody, Part, PartKind,
-    TokenCache, Tokens, ToolState, new_message_id,
+    Assistant, AssistantError, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part,
+    PartKind, SessionId, TokenCache, Tokens, ToolState, new_message_id,
 };
 use otto_storage::{StorageError, Store, filter_compacted, latest};
 use otto_tools::tool::PermissionGate;
@@ -255,18 +255,23 @@ fn to_tool_def(tool: &Arc<dyn Tool>) -> ToolDefinition {
 
 /// Construct the fresh assistant [`Info`] created at the top of each generating
 /// iteration (`prompt.ts:1186-1200`).
-fn new_assistant(cfg: &RunConfig, session_id: &str, assistant_id: &str, parent_id: &str) -> Info {
+fn new_assistant(
+    cfg: &RunConfig,
+    session_id: &SessionId,
+    assistant_id: &MessageId,
+    parent_id: &MessageId,
+) -> Info {
     let dir = cfg.directory.display().to_string();
     Info {
-        id: assistant_id.to_string(),
-        session_id: session_id.to_string(),
+        id: assistant_id.clone(),
+        session_id: session_id.clone(),
         body: InfoBody::Assistant(Assistant {
             time: AssistantTime {
                 created: now_ms(),
                 completed: None,
             },
             error: None,
-            parent_id: parent_id.to_string(),
+            parent_id: parent_id.clone(),
             model_id: cfg.model.id.0.clone(),
             provider_id: cfg.model.provider.0.clone(),
             mode: cfg.agent.clone(),
@@ -300,8 +305,8 @@ fn new_assistant(cfg: &RunConfig, session_id: &str, assistant_id: &str, parent_i
 /// error if none is set.
 async fn finalize_interrupted(
     store: &Store,
-    session_id: &str,
-    assistant_id: &str,
+    session_id: &SessionId,
+    assistant_id: &MessageId,
 ) -> Result<(), StorageError> {
     let Some(mut info) = store.get_message(session_id, assistant_id).await? else {
         return Ok(());
@@ -333,12 +338,12 @@ async fn finalize_interrupted(
 /// their results live provider-side and a replay is required anyway.
 async fn salvage_completed_tools(
     store: &Store,
-    session_id: &str,
-    assistant_id: &str,
+    session_id: &SessionId,
+    assistant_id: &MessageId,
 ) -> Result<bool, StorageError> {
     let parts = store.list_parts(assistant_id).await?;
     let mut completed = 0usize;
-    let mut incomplete: Vec<String> = Vec::new();
+    let mut incomplete: Vec<otto_storage::model::PartId> = Vec::new();
     for part in &parts {
         let PartKind::Tool {
             metadata, state, ..
@@ -384,8 +389,8 @@ async fn salvage_completed_tools(
 /// so the exit condition sees a terminal turn. The streamed parts are kept.
 async fn finalize_truncated(
     store: &Store,
-    session_id: &str,
-    assistant_id: &str,
+    session_id: &SessionId,
+    assistant_id: &MessageId,
 ) -> Result<(), StorageError> {
     let Some(mut info) = store.get_message(session_id, assistant_id).await? else {
         return Ok(());
@@ -408,8 +413,8 @@ async fn finalize_truncated(
 /// [`finalize_interrupted`], which handles the abort path.
 async fn finalize_failed(
     store: &Store,
-    session_id: &str,
-    assistant_id: &str,
+    session_id: &SessionId,
+    assistant_id: &MessageId,
     err: &otto_llm::LLMError,
 ) -> Result<(), StorageError> {
     let Some(mut info) = store.get_message(session_id, assistant_id).await? else {
@@ -432,7 +437,7 @@ async fn finalize_failed(
 
 /// Resolve the message returned by [`run_loop`] — the newest assistant message,
 /// else the newest message (`prompt.ts:1073-1079`, `lastAssistant`).
-async fn last_assistant(store: &Store, session_id: &str) -> Result<Info, RunError> {
+async fn last_assistant(store: &Store, session_id: &SessionId) -> Result<Info, RunError> {
     let msgs = store.list_messages(session_id).await?;
     if let Some(assistant) = msgs.iter().rev().find(|m| m.is_assistant()) {
         return Ok(assistant.clone());
@@ -460,7 +465,7 @@ async fn last_assistant(store: &Store, session_id: &str) -> Result<Info, RunErro
 /// # Errors
 /// Returns [`RunError`] on a storage/processor failure, a missing user message,
 /// or if the iteration cap is exceeded.
-pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunError> {
+pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, RunError> {
     let mut step: u32 = 0;
     let mut iterations: u32 = 0;
     // Retries summed across every step of this prompt. The per-step `attempt`
@@ -653,7 +658,7 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         // the purge only runs at the top of the NEXT attempt.
                         if exhausted && matches!(err, otto_llm::LLMError::NoTerminalFinish) {
                             tracing::warn!(
-                                session = session_id,
+                                session = session_id.as_str(),
                                 message = assistant_id.as_str(),
                                 attempts = attempt,
                                 "retry budget exhausted on truncated stream; accepting response as-is"
@@ -672,7 +677,7 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         // propagating so the turn never leaves an unfinalized
                         // message behind (mirrors `finalize_interrupted`).
                         tracing::error!(
-                            session = session_id,
+                            session = session_id.as_str(),
                             message = assistant_id.as_str(),
                             attempt,
                             total_retries,
@@ -693,7 +698,7 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &str) -> Result<Info, RunErro
                         salvage_completed_tools(&cfg.store, session_id, &assistant_id).await?;
                     let wait = retry::delay(attempt, err.retry_after());
                     tracing::warn!(
-                        session = session_id,
+                        session = session_id.as_str(),
                         message = assistant_id.as_str(),
                         attempt,
                         max = cfg.max_retries,

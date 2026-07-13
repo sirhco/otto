@@ -40,7 +40,7 @@ pub async fn cmd_workflow(cwd: &Path, command: WorkflowCommand) -> Result<()> {
             auto,
         } => {
             if dry_run {
-                return dry_run_plan_file("sdd", cwd, &plan);
+                return dry_run_plan_file("sdd", cwd, &plan).await;
             }
             run_sdd(cwd, plan, auto).await
         }
@@ -50,7 +50,7 @@ pub async fn cmd_workflow(cwd: &Path, command: WorkflowCommand) -> Result<()> {
             auto,
         } => {
             if dry_run {
-                return dry_run_plan_file("plan", cwd, &plan);
+                return dry_run_plan_file("plan", cwd, &plan).await;
             }
             run_plan(cwd, plan, auto).await
         }
@@ -128,8 +128,9 @@ impl WorkflowHarness {
 /// Preview a plan-file-driven workflow (`sdd`/`plan`) without touching the LLM
 /// or the working tree: parse the plan, print the task list, and (for `plan`)
 /// the verification commands that would run after each task.
-fn dry_run_plan_file(kind: &str, cwd: &Path, plan_path: &str) -> Result<()> {
-    let md = std::fs::read_to_string(plan_path)
+async fn dry_run_plan_file(kind: &str, cwd: &Path, plan_path: &str) -> Result<()> {
+    let md = tokio::fs::read_to_string(plan_path)
+        .await
         .with_context(|| format!("failed to read plan {plan_path}"))?;
     let tasks = parse_plan_tasks(&md);
     if tasks.is_empty() {
@@ -228,7 +229,7 @@ async fn run_tdd(cwd: &Path, feature: String, auto: bool) -> Result<()> {
         runner,
         store: runtime.store().clone(),
         directory: runtime.directory().to_path_buf(),
-        parent_session_id: session_id,
+        parent_session_id: session_id.to_string(),
         permission: std::sync::Arc::new(otto_permission::Ruleset::default()),
         progress: Some(harness.progress.clone()),
         subagent: None,
@@ -243,7 +244,8 @@ async fn run_tdd(cwd: &Path, feature: String, auto: bool) -> Result<()> {
 
 /// Drive the native SDD engine over the tasks in `plan_path`.
 async fn run_sdd(cwd: &Path, plan_path: String, auto: bool) -> Result<()> {
-    let md = std::fs::read_to_string(&plan_path)
+    let md = tokio::fs::read_to_string(&plan_path)
+        .await
         .with_context(|| format!("failed to read plan {plan_path}"))?;
     let tasks = parse_plan_tasks(&md);
     if tasks.is_empty() {
@@ -276,7 +278,7 @@ async fn run_sdd(cwd: &Path, plan_path: String, auto: bool) -> Result<()> {
         runner,
         store: runtime.store().clone(),
         directory: runtime.directory().to_path_buf(),
-        parent_session_id: session_id.clone(),
+        parent_session_id: session_id.to_string(),
         permission: std::sync::Arc::new(otto_permission::Ruleset::default()),
         progress: Some(harness.progress.clone()),
         subagent: None,
@@ -301,7 +303,8 @@ async fn run_sdd(cwd: &Path, plan_path: String, auto: bool) -> Result<()> {
 
 /// Drive the native plan-execution engine over the tasks in `plan_path`.
 async fn run_plan(cwd: &Path, plan_path: String, auto: bool) -> Result<()> {
-    let md = std::fs::read_to_string(&plan_path)
+    let md = tokio::fs::read_to_string(&plan_path)
+        .await
         .with_context(|| format!("failed to read plan {plan_path}"))?;
     let tasks = parse_plan_tasks(&md);
     if tasks.is_empty() {
@@ -334,7 +337,7 @@ async fn run_plan(cwd: &Path, plan_path: String, auto: bool) -> Result<()> {
         runner,
         store: runtime.store().clone(),
         directory: runtime.directory().to_path_buf(),
-        parent_session_id: session_id.clone(),
+        parent_session_id: session_id.to_string(),
         permission: std::sync::Arc::new(otto_permission::Ruleset::default()),
         progress: Some(harness.progress.clone()),
         subagent: None,

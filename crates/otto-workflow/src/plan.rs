@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use otto_storage::model::MessageId;
 use otto_tools::{SubagentRequest, SubagentSpawner};
 use tokio_util::sync::CancellationToken;
 
@@ -145,8 +146,8 @@ impl PlanWorkflow {
                  (or DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED).",
                 t.index, t.title, t.body
             ),
-            parent_session_id: parent.to_string(),
-            parent_message_id: String::new(),
+            parent_session_id: parent.into(),
+            parent_message_id: MessageId::default(),
             task_id: None,
             command: None,
             abort: abort.clone(),
