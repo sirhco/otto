@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use otto_hooks::{Decision, HookEvent, HookRunner};
 use serde_json::Value;
 
 use crate::hook::{HookOutcome, ToolHook};
@@ -19,6 +20,10 @@ use crate::truncate::{MAX_BYTES, MAX_LINES, truncate_output};
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
     hooks: Vec<Arc<dyn ToolHook>>,
+    /// External lifecycle-hooks runner (`PreToolUse`/`PostToolUse`); `None`
+    /// disables lifecycle hooks entirely. Distinct from `hooks` above (the
+    /// existing in-process, compiled-in `ToolHook` seam) — the two coexist.
+    lifecycle_hooks: Option<Arc<HookRunner>>,
 }
 
 impl ToolRegistry {
@@ -27,6 +32,7 @@ impl ToolRegistry {
         Self {
             tools: Vec::new(),
             hooks: Vec::new(),
+            lifecycle_hooks: None,
         }
     }
 
@@ -65,6 +71,13 @@ impl ToolRegistry {
     /// every tool call; see [`crate::hook`].
     pub fn register_hook(&mut self, hook: Arc<dyn ToolHook>) {
         self.hooks.push(hook);
+    }
+
+    /// Install the external lifecycle-hooks runner. `None` (the default)
+    /// disables `PreToolUse`/`PostToolUse` firing entirely; the existing
+    /// in-process [`ToolHook`] seam is unaffected either way.
+    pub fn set_lifecycle_hooks(&mut self, runner: Arc<HookRunner>) {
+        self.lifecycle_hooks = Some(runner);
     }
 
     /// Look up a tool by id.
@@ -114,6 +127,28 @@ impl ToolRegistry {
             .get(tool_id)
             .ok_or_else(|| ToolError::Execution(format!("unknown tool: {tool_id}")))?;
 
+        // External lifecycle PreToolUse hook: fires first, ahead of the
+        // in-process ToolHook stage below, so a denying hook blocks before
+        // any built-in arg-rewriting or the tool itself runs. `Ask` has no
+        // interactive escalation path wired yet (that needs the real
+        // Permission service, out of scope here) — treated as `Deny`.
+        if let Some(runner) = &self.lifecycle_hooks {
+            let verdict = runner
+                .fire(HookEvent::PreToolUse {
+                    session_id: ctx.session_id.clone(),
+                    tool_id: tool_id.to_string(),
+                    args: args.clone(),
+                    cwd: ctx.directory.clone(),
+                })
+                .await;
+            if verdict.decision != Decision::Allow {
+                let reason = verdict
+                    .reason
+                    .unwrap_or_else(|| "blocked by pre_tool_use hook".to_string());
+                return Err(ToolError::Execution(reason));
+            }
+        }
+
         // Pre-execute hook seam: each hook may rewrite the args or block the
         // call. Hooks run in registration order, each seeing the prior output.
         let mut args = args;
@@ -124,7 +159,35 @@ impl ToolRegistry {
             }
         }
 
-        let mut result = tool.execute(args, ctx).await?;
+        let exec_result = tool.execute(args.clone(), ctx).await;
+
+        // External lifecycle PostToolUse hook: fires whether the call
+        // succeeded or failed, so a hook can react to tool failures too.
+        let post_verdict = if let Some(runner) = &self.lifecycle_hooks {
+            Some(
+                runner
+                    .fire(HookEvent::PostToolUse {
+                        session_id: ctx.session_id.clone(),
+                        tool_id: tool_id.to_string(),
+                        args: args.clone(),
+                        success: exec_result.is_ok(),
+                        cwd: ctx.directory.clone(),
+                    })
+                    .await,
+            )
+        } else {
+            None
+        };
+
+        let mut result = exec_result?;
+
+        if let Some(message) = post_verdict.and_then(|v| v.system_message) {
+            if let Some(map) = result.metadata.as_object_mut() {
+                map.insert("hookMessage".to_string(), Value::String(message));
+            } else {
+                result.metadata = serde_json::json!({ "hookMessage": message });
+            }
+        }
 
         let opted_out = result
             .metadata
@@ -152,6 +215,7 @@ mod tests {
     use super::*;
     use crate::tool::ToolContext;
     use async_trait::async_trait;
+    use otto_hooks::{HookCommand, HookMatcherGroup, HookRunner, HooksConfig};
 
     struct BigOutput;
     #[async_trait]
@@ -309,6 +373,81 @@ mod tests {
         // untouched: full 5000-line body, no marker.
         assert!(!res.output.contains("lines truncated"));
         assert_eq!(res.metadata["truncated"], Value::Bool(false));
+    }
+
+    fn hook_runner_denying(tool_id_pattern: &str, reason: &str) -> Arc<HookRunner> {
+        let cfg = HooksConfig {
+            pre_tool_use: vec![HookMatcherGroup {
+                matcher: Some(tool_id_pattern.to_string()),
+                hooks: vec![HookCommand {
+                    command: format!("echo '{{\"decision\":\"deny\",\"reason\":\"{reason}\"}}'"),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        };
+        Arc::new(HookRunner::new(cfg))
+    }
+
+    fn hook_runner_with_system_message(message: &str) -> Arc<HookRunner> {
+        let cfg = HooksConfig {
+            post_tool_use: vec![HookMatcherGroup {
+                matcher: None,
+                hooks: vec![HookCommand {
+                    command: format!("echo '{{\"system_message\":\"{message}\"}}'"),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        };
+        Arc::new(HookRunner::new(cfg))
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_deny_blocks_before_the_tool_runs() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(BigOutput));
+        r.set_lifecycle_hooks(hook_runner_denying("big", "blocked by policy"));
+
+        let err = r
+            .execute("big", serde_json::json!({}), &ctx())
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "blocked by policy");
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_non_matching_tool_id_is_unaffected() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(BigOutput));
+        // matcher only targets "edit", not "big" — the call must succeed.
+        r.set_lifecycle_hooks(hook_runner_denying("^edit$", "should never fire"));
+
+        let res = r.execute("big", serde_json::json!({}), &ctx()).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_folds_system_message_into_metadata() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(OptOut));
+        r.set_lifecycle_hooks(hook_runner_with_system_message("fyi"));
+
+        let res = r
+            .execute("optout", serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(res.metadata["hookMessage"], "fyi");
+    }
+
+    #[tokio::test]
+    async fn no_lifecycle_hooks_configured_behaves_exactly_as_before() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(BigOutput));
+        // no set_lifecycle_hooks call at all — must behave identically to
+        // the pre-existing (pre-hooks) execute() path.
+        let res = r.execute("big", serde_json::json!({}), &ctx()).await;
+        assert!(res.is_ok());
     }
 
     /// Echoes back its `command` arg as output, so a test can observe whether a

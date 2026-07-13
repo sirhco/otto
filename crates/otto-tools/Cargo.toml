@@ -21,6 +21,7 @@ regex = "1"
 similar = "2"
 reqwest.workspace = true
 html2md = "0.2"
+otto-hooks.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

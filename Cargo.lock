@@ -1939,6 +1939,7 @@ dependencies = [
  "html2md",
  "ignore",
  "otto-events",
+ "otto-hooks",
  "otto-id",
  "regex",
  "reqwest",
