@@ -103,10 +103,18 @@ impl HookRunner {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+
+        // Run stdin write and stdout read concurrently to avoid deadlock on large payloads.
+        // If we write all stdin first, then read stdout, both sides can block on filled pipe buffers.
+        let write_fut = async move {
             stdin.write_all(&payload).await?;
-        }
-        let output = child.wait_with_output().await?;
+            drop(stdin); // close stdin so the child sees EOF
+            Ok::<(), std::io::Error>(())
+        };
+        let output_fut = child.wait_with_output();
+        let (_, output) = tokio::try_join!(write_fut, output_fut)?;
+
         if output.stdout.is_empty() {
             if !output.status.success() {
                 return Err(HookError::NonzeroExit {
@@ -285,5 +293,39 @@ mod tests {
         // Even though exit code is 1, the JSON on stdout should be honored
         assert_eq!(verdict.decision, Decision::Deny);
         assert_eq!(verdict.reason.as_deref(), Some("hook failed"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_stdin_stdout_handles_large_payloads() {
+        // Test that stdin write and stdout read are concurrent.
+        // Without concurrency, a hook that outputs early and then drains stdin
+        // would deadlock on large payloads (when payload > pipe buffer size).
+        // The hook outputs immediately, then consumes stdin.
+        // Wrapped in a timeout to ensure it doesn't hang.
+        let large_args = serde_json::json!({"command": "echo hi; large_payload_here ".repeat(1000)});
+        let event = HookEvent::PreToolUse {
+            session_id: SessionId::from("ses_test"),
+            tool_id: "bash".to_string(),
+            args: large_args,
+            cwd: std::path::PathBuf::from("/tmp"),
+        };
+        let cfg = cfg_with_pre_tool_use(vec![HookCommand {
+            // Command outputs immediately, then reads stdin until EOF.
+            // Without concurrent read, the large stdin payload would fill the
+            // pipe buffer, blocking the parent's write, while the parent is blocked
+            // waiting for this command to finish (which is blocked reading stdin).
+            command: "sh -c 'echo \"{\\\"decision\\\":\\\"allow\\\"}\" >&1; cat > /dev/null'".to_string(),
+            timeout_ms: Some(5000), // generous timeout
+        }]);
+        let start = std::time::Instant::now();
+        let verdict = HookRunner::new(cfg).fire(event).await;
+        let elapsed = start.elapsed();
+
+        // Should succeed and be fast (well under the 5s timeout).
+        assert_eq!(verdict.decision, Decision::Allow);
+        assert!(
+            elapsed.as_secs() < 2,
+            "concurrent stdin/stdout should handle large payloads without deadlock, took {elapsed:?}"
+        );
     }
 }
