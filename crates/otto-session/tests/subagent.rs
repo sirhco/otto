@@ -554,6 +554,29 @@ async fn subagent_stop_ask_rejected_injects_the_human_message_and_reruns() {
         "rejected once, so the child loop ran twice"
     );
     assert_eq!(result, "final");
+
+    let sessions = store.list_sessions().await.expect("sessions");
+    let child = sessions
+        .iter()
+        .find(|s| s.parent_id.as_deref() == Some(parent_id))
+        .expect("a child session");
+    let msgs = store.messages_with_parts(&child.id).await.expect("history");
+    let synthetic_text: String = msgs
+        .iter()
+        .flat_map(|m| &m.parts)
+        .filter_map(|p| match &p.kind {
+            PartKind::Text {
+                text,
+                synthetic: Some(true),
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        synthetic_text, "keep going, one more step",
+        "the human's Reject message wins over the hook's own reason"
+    );
 }
 
 // -- 0. a policy deny fails the tool call, not the whole turn ----------------

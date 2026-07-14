@@ -652,10 +652,11 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, R
             let finish = la.as_assistant().and_then(|a| a.finish.as_deref());
             let finished_terminal = finish.is_some_and(|f| f != "tool-calls");
             if finished_terminal && !has_tool_calls && last_user.id < la.id {
-                // Stop: informational unless the verdict denies. A deny
-                // synthesizes a follow-up user turn and re-enters the loop
-                // instead of ending the turn — bounded by MAX_ITERATIONS
-                // above, since this `continue` re-enters the same loop.
+                // Stop: informational unless the verdict denies or an ask is
+                // rejected. Either synthesizes a follow-up user turn and
+                // re-enters the loop instead of ending the turn — bounded by
+                // MAX_ITERATIONS above, since this `continue` re-enters the
+                // same loop.
                 if let Some(runner) = &cfg.hooks {
                     let verdict = runner
                         .fire(HookEvent::Stop {
