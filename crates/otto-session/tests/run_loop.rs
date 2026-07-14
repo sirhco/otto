@@ -383,6 +383,123 @@ async fn stop_deny_injects_synthetic_continuation_and_reruns() {
 }
 
 #[tokio::test]
+async fn stop_ask_approved_ends_the_turn_normally() {
+    let (store, _user_id) = seed("hi").await;
+
+    let mut turn = vec![step_start()];
+    turn.extend(text_events("t1", "final response"));
+    turn.push(step_finish(FinishReason::Stop));
+    turn.push(finish(FinishReason::Stop));
+    let (route, calls) = ScriptedRoute::build(vec![turn]);
+
+    let mut cfg = config(store.clone(), route, ToolRegistry::new(), CancellationToken::new());
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
+        stop: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: "echo '{\"decision\":\"ask\",\"reason\":\"confirm stop\"}'".to_string(),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    })));
+
+    let permission = Arc::new(Permission::new(Ruleset::new()));
+    cfg.permission = Arc::new(SessionGate::new(permission.clone(), sid(SES)));
+    let mut asks = permission.subscribe();
+
+    let cfg_for_run = cfg.clone();
+    let handle = tokio::spawn(async move { run_loop(&cfg_for_run, &sid(SES)).await });
+
+    let asked = asks.recv().await.expect("Stop ask surfaces a Permission ask");
+    assert_eq!(asked.permission, "hook");
+    assert_eq!(asked.patterns, vec!["stop".to_string()]);
+    permission.reply(&asked.request_id, Reply::Once);
+
+    handle.await.unwrap().expect("run completes");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "approval ends the turn after one provider call");
+
+    let msgs = store.messages_with_parts(&sid(SES)).await.expect("history");
+    let has_synthetic = msgs.iter().flat_map(|m| &m.parts).any(|p| {
+        matches!(&p.kind, PartKind::Text { synthetic: Some(true), .. })
+    });
+    assert!(!has_synthetic, "approval must not synthesize a continuation");
+}
+
+#[tokio::test]
+async fn stop_ask_rejected_injects_the_human_message_and_reruns() {
+    let (store, _user_id) = seed("hi").await;
+
+    let mut turn1 = vec![step_start()];
+    turn1.extend(text_events("t1", "first response"));
+    turn1.push(step_finish(FinishReason::Stop));
+    turn1.push(finish(FinishReason::Stop));
+
+    let mut turn2 = vec![step_start()];
+    turn2.extend(text_events("t2", "second response"));
+    turn2.push(step_finish(FinishReason::Stop));
+    turn2.push(finish(FinishReason::Stop));
+
+    let (route, calls) = ScriptedRoute::build(vec![turn1, turn2]);
+
+    let mut cfg = config(store.clone(), route, ToolRegistry::new(), CancellationToken::new());
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
+        stop: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: "echo '{\"decision\":\"ask\",\"reason\":\"confirm stop\"}'".to_string(),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    })));
+
+    let permission = Arc::new(Permission::new(Ruleset::new()));
+    cfg.permission = Arc::new(SessionGate::new(permission.clone(), sid(SES)));
+    let mut asks = permission.subscribe();
+
+    let cfg_for_run = cfg.clone();
+    let handle = tokio::spawn(async move { run_loop(&cfg_for_run, &sid(SES)).await });
+
+    let first = asks.recv().await.expect("first Stop ask");
+    permission.reply(
+        &first.request_id,
+        Reply::Reject {
+            message: Some("finish the second part".to_string()),
+        },
+    );
+    let second = asks.recv().await.expect("second Stop ask, after the synthetic continuation");
+    permission.reply(&second.request_id, Reply::Once);
+
+    let info = handle.await.unwrap().expect("run completes");
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "rejected once, so two provider turns ran");
+
+    let parts = parts_of(&store, info.id()).await;
+    let final_text: String = parts
+        .iter()
+        .filter_map(|p| match &p.kind {
+            PartKind::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(final_text, "second response");
+
+    let msgs = store.messages_with_parts(&sid(SES)).await.expect("history");
+    let synthetic_text: String = msgs
+        .iter()
+        .flat_map(|m| &m.parts)
+        .filter_map(|p| match &p.kind {
+            PartKind::Text { text, synthetic: Some(true), .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        synthetic_text, "finish the second part",
+        "the human's Reject message wins over the hook's own reason"
+    );
+}
+
+#[tokio::test]
 async fn user_prompt_submit_deny_blocks_before_any_provider_call() {
     let (store, _user_id) = seed("hi").await;
 

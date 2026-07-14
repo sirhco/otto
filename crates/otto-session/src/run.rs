@@ -662,12 +662,28 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, R
                             session_id: session_id.clone(),
                         })
                         .await;
-                    if verdict.decision != Decision::Allow {
-                        let text = verdict
-                            .reason
-                            .unwrap_or_else(|| DEFAULT_STOP_CONTINUE_PROMPT.to_string());
-                        synthesize_continuation(cfg, session_id, &text).await?;
-                        continue;
+                    match verdict.decision {
+                        Decision::Allow => {}
+                        Decision::Deny => {
+                            let text = verdict
+                                .reason
+                                .unwrap_or_else(|| DEFAULT_STOP_CONTINUE_PROMPT.to_string());
+                            synthesize_continuation(cfg, session_id, &text).await?;
+                            continue;
+                        }
+                        Decision::Ask => {
+                            let req =
+                                otto_tools::build_hook_permission_request("stop", &verdict, None);
+                            let result = cfg.permission.ask(req).await;
+                            let outcome = otto_tools::interpret_hook_ask_result(result, &verdict);
+                            if !outcome.approved {
+                                let text = outcome
+                                    .message
+                                    .unwrap_or_else(|| DEFAULT_STOP_CONTINUE_PROMPT.to_string());
+                                synthesize_continuation(cfg, session_id, &text).await?;
+                                continue;
+                            }
+                        }
                     }
                 }
                 break;
