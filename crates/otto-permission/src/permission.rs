@@ -8,8 +8,9 @@
 //! and blocks until a UI/CLI [`reply`](Permission::reply)s.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use otto_hooks::{HookEvent, HookRunner};
 use otto_tools::{PermissionDenied, PermissionRequest};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot};
@@ -136,6 +137,10 @@ pub struct Permission {
     default_mode: PermissionMode,
     inner: Mutex<Inner>,
     events: broadcast::Sender<Asked>,
+    /// External lifecycle-hooks runner (`Notification`); `None` disables it
+    /// entirely. Installed via [`Self::with_hooks`] before the service is
+    /// wrapped in an `Arc` (`otto-app::Runtime`).
+    hooks: Option<Arc<HookRunner>>,
 }
 
 impl Permission {
@@ -161,7 +166,18 @@ impl Permission {
                 session_rulesets: HashMap::new(),
             }),
             events,
+            hooks: None,
         }
+    }
+
+    /// Install the external lifecycle-hooks runner (`Notification`).
+    /// Consumes and returns `self` so it composes at construction time,
+    /// before the service is wrapped in an `Arc`
+    /// (`Arc::new(Permission::with_mode(..).with_hooks(..))`).
+    #[must_use]
+    pub fn with_hooks(mut self, runner: Arc<HookRunner>) -> Self {
+        self.hooks = Some(runner);
+        self
     }
 
     /// The current mode for `session_id` — its own mode, else the nearest
@@ -317,6 +333,22 @@ impl Permission {
                 patterns: req.patterns.clone(),
                 metadata: req.metadata.clone(),
             });
+
+            // Notification: fire-and-forget (spawned, not awaited) so a slow
+            // or misconfigured hook never adds latency to the permission
+            // path. The verdict is never read.
+            if let Some(runner) = self.hooks.clone() {
+                let notif_session_id = session_id.clone();
+                let message = format!("permission requested: {}", req.permission);
+                tokio::spawn(async move {
+                    runner
+                        .fire(HookEvent::Notification {
+                            session_id: notif_session_id,
+                            message,
+                        })
+                        .await;
+                });
+            }
 
             rx
         };
@@ -476,6 +508,53 @@ mod tests {
             .expect("danger op should emit an Asked event");
         perm2.reply(&asked.request_id, Reply::Once);
         h.await.unwrap().expect("approved once");
+    }
+
+    #[tokio::test]
+    async fn notification_fires_when_a_request_needs_asking() {
+        let marker =
+            std::env::temp_dir().join(format!("otto-notification-marker-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+
+        let hooks_cfg = otto_hooks::HooksConfig {
+            notification: vec![otto_hooks::HookMatcherGroup {
+                matcher: None,
+                hooks: vec![otto_hooks::HookCommand {
+                    command: format!("cat > {}", marker.display()),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        };
+        let perm = Permission::with_mode(Ruleset::new(), PermissionMode::FullAuto)
+            .with_hooks(Arc::new(otto_hooks::HookRunner::new(hooks_cfg)));
+        let mut rx = perm.subscribe();
+        let req = PermissionRequest {
+            permission: "bash".into(),
+            patterns: vec!["rm -rf build".into()],
+            always: vec![],
+            metadata: serde_json::json!({}),
+        };
+
+        let perm = std::sync::Arc::new(perm);
+        let p = perm.clone();
+        let h = tokio::spawn(async move { p.ask("ses_1", req).await });
+        let asked = rx.recv().await.expect("danger op should emit an Asked event");
+        perm.reply(&asked.request_id, Reply::Once);
+        h.await.unwrap().expect("approved once");
+
+        // Notification is fire-and-forget (`tokio::spawn`, not awaited) —
+        // poll briefly rather than asserting immediately.
+        let mut fired = false;
+        for _ in 0..50 {
+            if marker.exists() {
+                fired = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(fired, "Notification hook fired while the request was pending");
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]

@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 otto-id.workspace = true
+otto-hooks.workspace = true
 otto-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true

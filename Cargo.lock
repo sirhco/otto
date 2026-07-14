@@ -1850,6 +1850,7 @@ name = "otto-permission"
 version = "0.3.3"
 dependencies = [
  "async-trait",
+ "otto-hooks",
  "otto-id",
  "otto-tools",
  "serde",
