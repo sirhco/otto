@@ -108,6 +108,11 @@ pub struct Runtime {
     project_id: String,
     version: String,
     lsp: Arc<otto_lsp::Lsp>,
+    /// The single shared lifecycle-hooks runner for this runtime — installed
+    /// into `tools` (`PreToolUse`/`PostToolUse`), `permission`
+    /// (`Notification`), and every `RunConfig`/`SessionSubagentSpawner` this
+    /// runtime builds (`UserPromptSubmit`/`PreCompact`/`SessionStart`).
+    hooks: Arc<otto_hooks::HookRunner>,
 }
 
 impl Runtime {
@@ -142,10 +147,13 @@ impl Runtime {
         otto_llm::registry::install(registry);
 
         let agents = resolve_agents(&agent_config(&config));
-        let permission = Arc::new(Permission::with_mode(
-            permission_ruleset(&config),
-            permission_mode(&config),
+        let hooks = Arc::new(otto_hooks::HookRunner::new(
+            config.hooks.clone().unwrap_or_default(),
         ));
+        let permission = Arc::new(
+            Permission::with_mode(permission_ruleset(&config), permission_mode(&config))
+                .with_hooks(hooks.clone()),
+        );
 
         // Construct the LSP service and inject it into the diagnostics-aware
         // tools (edit/write/apply_patch). Retained on the runtime so the server
@@ -158,9 +166,7 @@ impl Runtime {
             Some(lsp.clone() as Arc<dyn otto_tools::LspHandle>);
         let mut registry = ToolRegistry::with_builtins(lsp_handle);
         registry.register_hook(Arc::new(otto_tools::RtkHook::new(rtk_enabled(&config))));
-        registry.set_lifecycle_hooks(Arc::new(otto_hooks::HookRunner::new(
-            config.hooks.clone().unwrap_or_default(),
-        )));
+        registry.set_lifecycle_hooks(hooks.clone());
         // Best-effort MCP: connect each configured server and register its
         // namespaced tools. A server that fails to connect is skipped, never
         // fatal (mirrors opencode tolerating an unreachable MCP server).
@@ -199,6 +205,7 @@ impl Runtime {
             project_id,
             version: VERSION.to_string(),
             lsp,
+            hooks,
         })
     }
 
@@ -221,10 +228,13 @@ impl Runtime {
         otto_llm::registry::install(otto_llm::models_dev::Registry::embedded());
 
         let agents = resolve_agents(&agent_config(&config));
-        let permission = Arc::new(Permission::with_mode(
-            permission_ruleset(&config),
-            permission_mode(&config),
+        let hooks = Arc::new(otto_hooks::HookRunner::new(
+            config.hooks.clone().unwrap_or_default(),
         ));
+        let permission = Arc::new(
+            Permission::with_mode(permission_ruleset(&config), permission_mode(&config))
+                .with_hooks(hooks.clone()),
+        );
         let lsp: Arc<otto_lsp::Lsp> = otto_lsp::Lsp::new(
             directory.clone(),
             otto_lsp::LspConfigResolved::enabled_default(),
@@ -233,9 +243,7 @@ impl Runtime {
             Some(lsp.clone() as Arc<dyn otto_tools::LspHandle>);
         let mut registry = ToolRegistry::with_builtins(lsp_handle);
         registry.register_hook(Arc::new(otto_tools::RtkHook::new(rtk_enabled(&config))));
-        registry.set_lifecycle_hooks(Arc::new(otto_hooks::HookRunner::new(
-            config.hooks.clone().unwrap_or_default(),
-        )));
+        registry.set_lifecycle_hooks(hooks.clone());
         let tools = Arc::new(registry);
 
         let route_factory: Arc<dyn RouteFactory> = Arc::new(AuthRouteFactory::new(
@@ -258,6 +266,7 @@ impl Runtime {
             project_id,
             version: VERSION.to_string(),
             lsp,
+            hooks,
         })
     }
 
@@ -383,6 +392,28 @@ impl Runtime {
         // holds even in full-auto.
         self.permission
             .set_session_ruleset(&id, agent.permission.clone());
+
+        // SessionStart: informational (cannot block). `additional_context`,
+        // if present, is persisted onto the session's metadata so every
+        // turn's system prompt can splice it in (`build_system`'s
+        // `hook_context` slot, `otto-session::run::run_loop`) — this is the
+        // only place a (non-subagent) session is created, so it is the
+        // single firing point for the whole workspace. Always `New`: no
+        // "resume an existing session" concept exists in the codebase today.
+        let verdict = self
+            .hooks
+            .fire(otto_hooks::HookEvent::SessionStart {
+                session_id: id.clone(),
+                source: otto_hooks::SessionStartSource::New,
+            })
+            .await;
+        let mut metadata = json!({ "agent": agent.name, "permission": agent.permission });
+        if let Some(ctx) = verdict.additional_context
+            && let Some(map) = metadata.as_object_mut()
+        {
+            map.insert("hookContext".to_string(), json!(ctx));
+        }
+
         self.store
             .create_session(&Session {
                 id: id.clone(),
@@ -393,7 +424,7 @@ impl Runtime {
                 version: self.version.clone(),
                 cost: 0.0,
                 tokens: SessionTokens::default(),
-                metadata: Some(json!({ "agent": agent.name, "permission": agent.permission })),
+                metadata: Some(metadata),
                 time_created: now,
                 time_updated: now,
             })
@@ -461,7 +492,7 @@ impl Runtime {
             self.project_id.clone(),
             self.version.clone(),
             tersemode_directive(&self.config),
-            None,
+            Some(self.hooks.clone()),
         )))
     }
 
@@ -486,6 +517,7 @@ impl Runtime {
         let store = self.store.clone();
         let tools = self.tools.clone();
         let permission = self.permission.clone();
+        let hooks = self.hooks.clone();
         let factory = self.route_factory.clone();
         let directory = self.directory.clone();
         let agent = agent.clone();
@@ -662,7 +694,7 @@ impl Runtime {
                 event_tx: Some(event_tx),
                 system_cache: None,
                 tersemode_directive: tersemode,
-                hooks: None,
+                hooks: Some(hooks),
             };
 
             // 5. Drive the loop and return the final assistant message.
