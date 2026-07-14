@@ -316,6 +316,84 @@ async fn subagent_spawn_end_to_end() {
     );
 }
 
+// -- 1z. SubagentStop deny re-injects a synthetic continuation ---------------
+
+#[tokio::test]
+async fn subagent_stop_deny_reruns_the_child_loop() {
+    let store = Store::open_in_memory().await.expect("store");
+    let parent_id = "ses_parent_stop";
+    seed_session(&store, parent_id, "please delegate").await;
+
+    let (child_route, child_calls) =
+        ScriptedRoute::build(vec![text_turn("c1", "first"), text_turn("c2", "final")]);
+    let route_for: RouteFor = {
+        let child_route = child_route.clone();
+        Arc::new(move |_agent: &AgentInfo| (child_route.clone(), model()))
+    };
+
+    let permission = Arc::new(Permission::new(Ruleset::from_config(
+        &json!({ "*": "allow" }),
+    )));
+
+    let marker = std::env::temp_dir().join(format!(
+        "otto-subagent-stop-marker-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let hooks_cfg = otto_hooks::HooksConfig {
+        subagent_stop: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: format!(
+                    "if [ -f {p} ]; then echo '{{\"decision\":\"allow\"}}'; else touch {p} && echo '{{\"decision\":\"deny\",\"reason\":\"keep going child\"}}'; fi",
+                    p = marker.display()
+                ),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    };
+    let hooks = Some(Arc::new(otto_hooks::HookRunner::new(hooks_cfg)));
+
+    let spawner = Arc::new(SessionSubagentSpawner::new(
+        store.clone(),
+        registry(vec![]),
+        permission.clone(),
+        Ruleset::new(),
+        json!({}),
+        route_for,
+        std::env::temp_dir(),
+        "prj_1",
+        "1.0.0",
+        None,
+        hooks,
+    ));
+
+    let result = spawner
+        .spawn(otto_tools::SubagentRequest {
+            parent_session_id: sid(parent_id),
+            parent_message_id: "msg_x".into(),
+            subagent_type: "general".into(),
+            description: "d".into(),
+            prompt: "do X".into(),
+            task_id: None,
+            command: None,
+            abort: CancellationToken::new(),
+            event_tx: None,
+        })
+        .await
+        .expect("spawn completes");
+
+    assert_eq!(
+        child_calls.load(Ordering::SeqCst),
+        2,
+        "denied once, so the child loop ran twice"
+    );
+    assert_eq!(result, "final");
+
+    let _ = std::fs::remove_file(&marker);
+}
+
 // -- 0. a policy deny fails the tool call, not the whole turn ----------------
 
 /// A tool that asks the gate for the `todowrite` permission, mirroring the

@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use otto_agent::{AgentInfo, config as agent_config, derive_subagent_permission};
 use otto_llm::{Model, Route};
-use otto_hooks::HookRunner;
+use otto_hooks::{Decision, HookEvent, HookRunner};
 use otto_permission::{Permission, Ruleset, SessionGate, merge};
 use otto_storage::model::{
     Info, InfoBody, Part, PartKind, SessionId, User, UserModel, UserTime, new_message_id,
@@ -36,6 +36,13 @@ use crate::warm::{WarmCache, WarmKey, compute_warm};
 /// honor `subagent.model` or fall back to the parent's model; the spawner just
 /// asks for `(route, model)` per child.
 pub type RouteFor = Arc<dyn Fn(&AgentInfo) -> (Arc<dyn Route>, Model) + Send + Sync>;
+
+/// Hard cap on `SubagentStop`-deny re-runs of one child loop — a guard
+/// against a misbehaving always-deny hook spinning forever (no opencode
+/// analog; otto safety net, same philosophy as `run::MAX_ITERATIONS`, which
+/// does NOT bound this loop since each `run_loop` call resets its own
+/// counter).
+const MAX_SUBAGENT_STOP_ITERATIONS: u32 = 1000;
 
 /// Current wall-clock time in milliseconds since the Unix epoch.
 fn now_ms() -> i64 {
@@ -311,12 +318,45 @@ impl SubagentSpawner for SessionSubagentSpawner {
             hooks: self.hooks.clone(),
         };
 
-        // 6. Run the child loop and 7. return its last assistant text
-        //    (task.ts:199).
-        let last = run_loop(&cfg, &child_session_id)
-            .await
-            .map_err(|e| ToolError::Execution(format!("subagent run failed: {e}")))?;
+        // 6. Run the child loop, firing SubagentStop when it finishes — a
+        //    deny re-injects a synthetic continuation (same mechanism as
+        //    `run_loop`'s own `Stop` handling) and reruns the child loop.
+        //    Bounded by MAX_SUBAGENT_STOP_ITERATIONS: run_loop's own
+        //    MAX_ITERATIONS does not bound THIS loop, since each call resets
+        //    its own counter.
+        let mut subagent_stop_iterations: u32 = 0;
+        let last = loop {
+            let candidate = run_loop(&cfg, &child_session_id)
+                .await
+                .map_err(|e| ToolError::Execution(format!("subagent run failed: {e}")))?;
 
+            if let Some(runner) = &self.hooks {
+                let verdict = runner
+                    .fire(HookEvent::SubagentStop {
+                        session_id: child_session_id.clone(),
+                        parent_session_id: req.parent_session_id.clone(),
+                    })
+                    .await;
+                if verdict.decision != Decision::Allow {
+                    subagent_stop_iterations += 1;
+                    if subagent_stop_iterations > MAX_SUBAGENT_STOP_ITERATIONS {
+                        return Err(ToolError::Execution(format!(
+                            "subagent_stop hook denied {MAX_SUBAGENT_STOP_ITERATIONS} times in a row without terminating"
+                        )));
+                    }
+                    let text = verdict
+                        .reason
+                        .unwrap_or_else(|| crate::run::DEFAULT_STOP_CONTINUE_PROMPT.to_string());
+                    crate::run::synthesize_continuation(&cfg, &child_session_id, &text)
+                        .await
+                        .map_err(storage_err)?;
+                    continue;
+                }
+            }
+            break candidate;
+        };
+
+        // 7. Return its last assistant text (task.ts:199).
         let parts = self
             .store
             .list_parts(last.id())
