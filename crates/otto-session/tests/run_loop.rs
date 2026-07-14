@@ -307,6 +307,33 @@ async fn parts_of(store: &Store, message_id: &MessageId) -> Vec<Part> {
 // -- tests -------------------------------------------------------------------
 
 #[tokio::test]
+async fn user_prompt_submit_deny_blocks_before_any_provider_call() {
+    let (store, _user_id) = seed("hi").await;
+
+    let mut turn = vec![step_start()];
+    turn.extend(text_events("t1", "should never run"));
+    turn.push(step_finish(FinishReason::Stop));
+    turn.push(finish(FinishReason::Stop));
+    let (route, calls) = ScriptedRoute::build(vec![turn]);
+
+    let mut cfg = config(store, route, ToolRegistry::new(), CancellationToken::new());
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
+        user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: "echo '{\"decision\":\"deny\",\"reason\":\"blocked prompt\"}'".to_string(),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    })));
+
+    let err = run_loop(&cfg, &sid(SES)).await.expect_err("denied");
+    assert_eq!(err.to_string(), "blocked prompt");
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no provider call made");
+}
+
+#[tokio::test]
 async fn end_to_end_tool_cycle() {
     let (store, _user) = seed("please echo").await;
 

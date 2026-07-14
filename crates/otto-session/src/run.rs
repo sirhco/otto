@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use otto_hooks::HookRunner;
+use otto_hooks::{Decision, HookEvent, HookRunner};
 use otto_llm::message::{ContentPart, Message, SystemPart, ToolChoice, ToolDefinition};
 use otto_llm::{LLMRequest, Model, Route};
 use otto_storage::model::{
@@ -484,6 +484,66 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, R
     // multi-step turn gets a fresh 5-attempt budget every step, forever.
     let mut total_retries: u32 = 0;
 
+    // Session-level hook context, spliced into every turn's system prompt at
+    // the same slot `mcp_instructions` uses (`build_system`). Two sources,
+    // newline-joined when both are present:
+    // 1. SessionStart's `additional_context`, persisted once onto the
+    //    session's metadata at creation time
+    //    (`otto-app::Runtime::create_session`).
+    // 2. UserPromptSubmit's `additional_context`, fired exactly once here —
+    //    a `run_loop` call is always exactly one user submission; the loop
+    //    below re-reads history for tool-continuation cycles of the SAME
+    //    prompt, not new submissions, so firing inside the loop would
+    //    misfire on every such cycle.
+    let mut hook_context: Option<String> = None;
+    if let Some(runner) = &cfg.hooks {
+        hook_context = cfg
+            .store
+            .get_session(session_id)
+            .await?
+            .and_then(|s| s.metadata)
+            .and_then(|m| m.get("hookContext").and_then(|v| v.as_str().map(str::to_string)));
+
+        let msgs = filter_compacted(cfg.store.messages_with_parts(session_id).await?);
+        let last_user = latest(&msgs)
+            .user
+            .ok_or_else(|| RunError::NoUserMessage(session_id.to_string()))?;
+        let prompt_text: String = msgs
+            .iter()
+            .rev()
+            .find(|m| m.info.is_user() && m.info.id == last_user.id)
+            .map(|m| {
+                m.parts
+                    .iter()
+                    .filter_map(|p| match &p.kind {
+                        PartKind::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+
+        let verdict = runner
+            .fire(HookEvent::UserPromptSubmit {
+                session_id: session_id.clone(),
+                prompt: prompt_text,
+                cwd: cfg.directory.clone(),
+            })
+            .await;
+        if verdict.decision != Decision::Allow {
+            return Err(RunError::HookDenied(verdict.reason.unwrap_or_else(|| {
+                "blocked by user_prompt_submit hook".to_string()
+            })));
+        }
+        if let Some(ctx) = verdict.additional_context {
+            hook_context = Some(match hook_context.take() {
+                Some(existing) => format!("{existing}\n{ctx}"),
+                None => ctx,
+            });
+        }
+    }
+
     loop {
         iterations += 1;
         if iterations > MAX_ITERATIONS {
@@ -566,6 +626,7 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, R
             platform,
             "",
             None,
+            hook_context.as_deref(),
             cfg.tersemode_directive.as_deref(),
             cfg.system_cache.as_deref(),
         );

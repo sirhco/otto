@@ -197,6 +197,7 @@ pub fn build_system(
     platform: &str,
     date: &str,
     mcp_instructions: Option<&str>,
+    hook_context: Option<&str>,
     user_system: Option<&str>,
     cache: Option<&WarmCache>,
 ) -> Vec<String> {
@@ -208,10 +209,15 @@ pub fn build_system(
     let base = base_prompt(provider, model);
     let mut system_array = environment(provider, model, cwd, is_git, platform, date);
     system_array.extend(instructions(cwd));
-    // env → instructions → mcp → skills (`prompt.ts:1263-1268`). The mcp block,
-    // when present, slots in here; the skills index follows it.
+    // env → instructions → mcp → hooks → skills (`prompt.ts:1263-1268`; the
+    // hook-context slot has no opencode analog — otto extension). The mcp
+    // block, when present, slots in here; SessionStart/UserPromptSubmit hook
+    // context follows it; the skills index follows that.
     if let Some(mcp) = mcp_instructions.filter(|s| !s.is_empty()) {
         system_array.push(mcp.to_string());
+    }
+    if let Some(ctx) = hook_context.filter(|s| !s.is_empty()) {
+        system_array.push(ctx.to_string());
     }
     if let Some(sk) = skills(cwd) {
         system_array.push(sk);
@@ -240,6 +246,7 @@ mod cache_tests {
             false,
             "linux",
             "",
+            None,
             None,
             None,
             Some(&cache),
@@ -284,6 +291,7 @@ mod cache_tests {
             None,
             None,
             None,
+            None,
         );
         assert!(out[0].contains("<available_skills>"), "index injected");
         assert!(out[0].contains("pdf"));
@@ -299,6 +307,7 @@ mod cache_tests {
             false,
             "linux",
             "",
+            None,
             None,
             None,
             None,

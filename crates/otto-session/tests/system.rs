@@ -128,6 +128,7 @@ fn build_system_puts_base_first_and_env_after() {
         "darwin",
         "d",
         None,
+        None,
         Some("USER SYSTEM"),
         None,
     );
@@ -154,6 +155,7 @@ fn build_system_includes_mcp_after_instructions_before_user() {
         "darwin",
         "d",
         Some(mcp_block),
+        None,
         Some("USER SYSTEM"),
         None,
     );
@@ -179,6 +181,7 @@ fn build_system_omits_mcp_when_none() {
         true,
         "darwin",
         "d",
+        None,
         None,
         None,
         None,

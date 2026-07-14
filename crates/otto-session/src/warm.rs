@@ -70,6 +70,7 @@ pub(crate) fn compute_warm(
         std::env::consts::OS,
         "",
         None,
+        None,
         user_system,
         None,
     );
