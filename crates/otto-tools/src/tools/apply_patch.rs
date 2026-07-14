@@ -402,6 +402,7 @@ mod tests {
                 Err(crate::tool::PermissionDenied {
                     permission: req.permission,
                     by_user: true,
+                    message: None,
                 })
             }
         }

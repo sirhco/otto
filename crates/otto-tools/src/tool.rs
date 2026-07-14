@@ -84,6 +84,10 @@ pub struct PermissionDenied {
     /// (agent/config policy): the tool fails with an error the model can
     /// adapt to, and the turn continues.
     pub by_user: bool,
+    /// The human's typed `Reply::Reject` correction, when `by_user` and one
+    /// was given. Always `None` for a policy deny (`by_user: false`) — those
+    /// never go through a human reply.
+    pub message: Option<String>,
 }
 
 impl std::fmt::Display for PermissionDenied {
@@ -91,7 +95,10 @@ impl std::fmt::Display for PermissionDenied {
         if self.by_user {
             // "denied" is load-bearing: the processor's rejection check
             // matches it and stops the turn (a human said no).
-            write!(f, "permission '{}' denied", self.permission)
+            match &self.message {
+                Some(msg) => write!(f, "permission '{}' denied: {msg}", self.permission),
+                None => write!(f, "permission '{}' denied", self.permission),
+            }
         } else {
             // Deliberately avoids the "denied"/"rejected" keywords so a
             // policy deny reads as an ordinary tool failure the model can
@@ -403,5 +410,35 @@ mod tests {
             err.to_string()
                 .ends_with("Please rewrite the input so it satisfies the expected schema.")
         );
+    }
+
+    #[test]
+    fn by_user_denial_display_includes_message_when_present() {
+        let with_msg = PermissionDenied {
+            permission: "hook".to_string(),
+            by_user: true,
+            message: Some("try a different approach".to_string()),
+        };
+        assert_eq!(
+            with_msg.to_string(),
+            "permission 'hook' denied: try a different approach"
+        );
+
+        let without_msg = PermissionDenied {
+            permission: "hook".to_string(),
+            by_user: true,
+            message: None,
+        };
+        assert_eq!(without_msg.to_string(), "permission 'hook' denied");
+    }
+
+    #[test]
+    fn policy_denial_display_ignores_message_field() {
+        let denial = PermissionDenied {
+            permission: "todowrite".to_string(),
+            by_user: false,
+            message: None,
+        };
+        assert!(!denial.to_string().contains("denied"));
     }
 }

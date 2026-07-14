@@ -18,10 +18,10 @@ use tokio::sync::{broadcast, oneshot};
 use crate::mode::{PermissionMode, danger_ruleset, mode_overlay};
 use crate::ruleset::{Action, Rule, Ruleset, evaluate};
 
-/// Session identifier — the same type otto-storage uses for its `Session.id`.
-pub use otto_id::SessionId;
 /// Permission-request identifier (`per_…`, from [`otto_id`]).
 pub use otto_id::PermissionId as RequestId;
+/// Session identifier — the same type otto-storage uses for its `Session.id`.
+pub use otto_id::SessionId;
 
 /// The user's answer to a pending request — port of `PermissionV1.Reply`
 /// (`v1/permission.ts`, `["once", "always", "reject"]`) plus the optional
@@ -76,8 +76,12 @@ pub struct PendingInfo {
 enum Outcome {
     /// The request was approved (once, always, or auto-resolved).
     Approved,
-    /// The request was rejected.
-    Rejected,
+    /// The request was rejected, carrying the human's typed correction
+    /// message when the target request's own reply supplied one (cascaded
+    /// rejections of *other* pending requests in the same session carry
+    /// `None` — the human's message answered the request they replied to,
+    /// not the others).
+    Rejected(Option<String>),
 }
 
 /// One in-flight request, held until a reply resolves its `responder`.
@@ -287,6 +291,7 @@ impl Permission {
                     return Err(PermissionDenied {
                         permission: req.permission.clone(),
                         by_user: false,
+                        message: None,
                     });
                 }
                 let resolved = evaluate(
@@ -299,6 +304,7 @@ impl Permission {
                         return Err(PermissionDenied {
                             permission: req.permission.clone(),
                             by_user: false,
+                            message: None,
                         });
                     }
                     Action::Allow => {}
@@ -355,13 +361,19 @@ impl Permission {
 
         match receiver.await {
             Ok(Outcome::Approved) => Ok(()),
-            // Rejected, or the service dropped (finalizer semantics from
-            // `index.ts:57` — pending requests fail on teardown).
-            // A human answered "reject" (or the service tore down mid-ask) —
-            // the turn-stopping form of denial.
-            Ok(Outcome::Rejected) | Err(_) => Err(PermissionDenied {
+            // A human answered "reject" — the turn-stopping form of denial,
+            // carrying their typed correction if they gave one.
+            Ok(Outcome::Rejected(message)) => Err(PermissionDenied {
                 permission: req.permission,
                 by_user: true,
+                message,
+            }),
+            // The service dropped mid-ask (finalizer semantics from
+            // `index.ts:57` — pending requests fail on teardown).
+            Err(_) => Err(PermissionDenied {
+                permission: req.permission,
+                by_user: true,
+                message: None,
             }),
         }
     }
@@ -386,12 +398,7 @@ impl Permission {
 
         match reply {
             Reply::Reject { message } => {
-                // The correction `message` (opencode's `CorrectedError` feedback,
-                // `index.ts:125`) has no home on the tool seam's `PermissionDenied`
-                // — which carries only `permission` — so it is dropped here. A
-                // richer denial error can thread it once the seam grows a field.
-                let _ = message;
-                let _ = existing.responder.send(Outcome::Rejected);
+                let _ = existing.responder.send(Outcome::Rejected(message));
                 // Cascade reject the rest of the session.
                 let session = existing.session_id.clone();
                 let cascade: Vec<RequestId> = inner
@@ -402,7 +409,7 @@ impl Permission {
                     .collect();
                 for id in cascade {
                     if let Some(p) = inner.pending.remove(&id) {
-                        let _ = p.responder.send(Outcome::Rejected);
+                        let _ = p.responder.send(Outcome::Rejected(None));
                     }
                 }
             }
@@ -539,7 +546,10 @@ mod tests {
         let perm = std::sync::Arc::new(perm);
         let p = perm.clone();
         let h = tokio::spawn(async move { p.ask("ses_1", req).await });
-        let asked = rx.recv().await.expect("danger op should emit an Asked event");
+        let asked = rx
+            .recv()
+            .await
+            .expect("danger op should emit an Asked event");
         perm.reply(&asked.request_id, Reply::Once);
         h.await.unwrap().expect("approved once");
 
@@ -553,7 +563,10 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(fired, "Notification hook fired while the request was pending");
+        assert!(
+            fired,
+            "Notification hook fired while the request was pending"
+        );
         let _ = std::fs::remove_file(&marker);
     }
 
@@ -777,11 +790,15 @@ mod tests {
         );
         {
             let mut inner = perm.inner.lock().unwrap();
-            inner.approved.entry("ses_1".into()).or_default().push(Rule {
-                permission: "edit".into(),
-                pattern: "src/*".into(),
-                action: Action::Allow,
-            });
+            inner
+                .approved
+                .entry("ses_1".into())
+                .or_default()
+                .push(Rule {
+                    permission: "edit".into(),
+                    pattern: "src/*".into(),
+                    action: Action::Allow,
+                });
         }
         perm.ask(
             "ses_1",
@@ -836,5 +853,38 @@ mod tests {
         perm.link_parent("ses_b", "ses_a");
         // Neither has a mode: the walk must terminate at the default.
         assert_eq!(perm.mode("ses_a"), PermissionMode::AcceptEdits);
+    }
+
+    #[tokio::test]
+    async fn reject_message_reaches_permission_denied() {
+        let perm = Permission::new(Ruleset::new()); // default mode: ApproveEach
+        let perm = std::sync::Arc::new(perm);
+        let mut rx = perm.subscribe();
+        let p = perm.clone();
+        let h = tokio::spawn(async move {
+            p.ask(
+                "ses_1",
+                PermissionRequest {
+                    permission: "bash".into(),
+                    patterns: vec!["cargo test".into()],
+                    always: vec![],
+                    metadata: serde_json::json!({}),
+                },
+            )
+            .await
+        });
+        let asked = rx.recv().await.expect("approve-each prompts");
+        perm.reply(
+            &asked.request_id,
+            Reply::Reject {
+                message: Some("try a different approach".to_string()),
+            },
+        );
+        let err = h.await.unwrap().expect_err("rejected");
+        assert_eq!(err.message.as_deref(), Some("try a different approach"));
+        assert_eq!(
+            err.to_string(),
+            "permission 'bash' denied: try a different approach"
+        );
     }
 }

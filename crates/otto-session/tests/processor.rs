@@ -134,6 +134,7 @@ impl PermissionGate for RecordingGate {
             Err(PermissionDenied {
                 permission,
                 by_user: true,
+                message: None,
             })
         } else {
             Ok(())
@@ -769,7 +770,10 @@ async fn empty_stream_is_retryable_empty_stream_error() {
 
     let err = proc.process(ok_stream(events)).await.unwrap_err();
     assert!(
-        matches!(err, otto_session::ProcessorError::Llm(LLMError::EmptyStream)),
+        matches!(
+            err,
+            otto_session::ProcessorError::Llm(LLMError::EmptyStream)
+        ),
         "got {err:?}"
     );
 }
@@ -784,7 +788,10 @@ async fn truly_empty_stream_is_also_empty_stream_error() {
     // closed, or every frame was in an unrecognized shape).
     let err = proc.process(ok_stream(vec![])).await.unwrap_err();
     assert!(
-        matches!(err, otto_session::ProcessorError::Llm(LLMError::EmptyStream)),
+        matches!(
+            err,
+            otto_session::ProcessorError::Llm(LLMError::EmptyStream)
+        ),
         "got {err:?}"
     );
 }
