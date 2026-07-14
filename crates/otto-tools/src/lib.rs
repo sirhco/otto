@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 pub mod hook;
+pub mod hook_escalation;
 pub mod hooks;
 pub mod lsp;
 pub mod patch;
@@ -29,6 +30,9 @@ pub mod tools;
 pub mod truncate;
 
 pub use hook::{HookOutcome, ToolHook};
+pub use hook_escalation::{
+    HookAskOutcome, build_hook_permission_request, interpret_hook_ask_result,
+};
 pub use hooks::RtkHook;
 pub use lsp::LspHandle;
 pub use registry::ToolRegistry;
