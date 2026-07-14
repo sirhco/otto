@@ -203,7 +203,10 @@ fn header(app: &App, frame: &mut Frame, area: Rect) {
             format!("{spin} ● {status} {} ", fmt_elapsed(secs)),
         )
     } else if let Some(f) = &app.flash {
-        (t.accent, format!("✓ {} ", f.msg))
+        match f.kind {
+            crate::state::FlashKind::Success => (t.accent, format!("✓ {} ", f.msg)),
+            crate::state::FlashKind::Warning => (t.status_warn, format!("⚠ {} ", f.msg)),
+        }
     } else {
         (t.status_ok, format!("● {status} "))
     };
@@ -577,7 +580,10 @@ fn render_scrolled(
         .saturating_sub(1);
     let residual = offset.saturating_sub(line_wrap_starts.get(idx).copied().unwrap_or(0));
     let para = Paragraph::new(lines[idx.min(lines.len())..].to_vec()).wrap(Wrap { trim: false });
-    frame.render_widget(para.scroll((residual.min(u32::from(u16::MAX)) as u16, 0)), area);
+    frame.render_widget(
+        para.scroll((residual.min(u32::from(u16::MAX)) as u16, 0)),
+        area,
+    );
 }
 
 /// Restyle the matched substrings of an active search in place. For each line,
@@ -1453,10 +1459,7 @@ mod tests {
             c.lines.len(),
             "one start per assembled line"
         );
-        assert!(
-            c.wrap_total >= target_row,
-            "total covers every line's rows"
-        );
+        assert!(c.wrap_total >= target_row, "total covers every line's rows");
     }
 
     /// A render must publish the scroll bound so `App::scroll_up` clamps
@@ -2547,6 +2550,56 @@ mod tests {
             .collect();
         assert!(!text.contains("copied"), "busy state must win over flash");
         assert!(text.contains("thinking"));
+    }
+
+    #[test]
+    fn header_shows_warning_flash_with_warning_glyph() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = crate::state::App::new();
+        app.status = "ready".into();
+        app.flash_warning("turn in flight — Esc to interrupt it first");
+        let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        term.draw(|f| header(&app, f, f.area())).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("turn in flight"),
+            "warning flash should show in header, got: {text}"
+        );
+        assert!(
+            text.contains('⚠'),
+            "warning flash should use the warning glyph, got: {text}"
+        );
+        assert!(
+            !text.contains('✓'),
+            "warning flash must not use the success checkmark, got: {text}"
+        );
+    }
+
+    #[test]
+    fn header_success_flash_still_uses_checkmark() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = crate::state::App::new();
+        app.status = "ready".into();
+        app.flash("copied"); // default flash() must still be Success
+        let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        term.draw(|f| header(&app, f, f.area())).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains('✓'),
+            "success flash should keep the checkmark, got: {text}"
+        );
     }
 
     #[test]

@@ -459,11 +459,21 @@ pub(crate) struct ItemCacheEntry {
     pub(crate) line_wraps: std::sync::Arc<Vec<u16>>,
 }
 
-/// A transient, auto-fading status confirmation ("copied", "attached", "sent").
-/// Tick-count based (no wall clock) so it stays deterministic and testable.
+/// Whether a [`Flash`] is a positive confirmation or a warning — controls
+/// the glyph/color the header renders it with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlashKind {
+    Success,
+    Warning,
+}
+
+/// A transient, auto-fading status confirmation ("copied", "attached") or
+/// warning ("turn in flight"). Tick-count based (no wall clock) so it stays
+/// deterministic and testable.
 #[derive(Debug, Clone)]
 pub(crate) struct Flash {
     pub(crate) msg: String,
+    pub(crate) kind: FlashKind,
     pub(crate) expires_tick: u32,
 }
 
@@ -581,8 +591,19 @@ impl App {
 
     /// Show a transient confirmation in the status slot for `FLASH_TICKS`.
     pub(crate) fn flash(&mut self, msg: impl Into<String>) {
+        self.flash_with_kind(msg, FlashKind::Success);
+    }
+
+    /// Same as [`Self::flash`] but rendered with a warning glyph/color
+    /// instead of the success checkmark.
+    pub(crate) fn flash_warning(&mut self, msg: impl Into<String>) {
+        self.flash_with_kind(msg, FlashKind::Warning);
+    }
+
+    fn flash_with_kind(&mut self, msg: impl Into<String>, kind: FlashKind) {
         self.flash = Some(Flash {
             msg: msg.into(),
+            kind,
             expires_tick: self.tick.wrapping_add(FLASH_TICKS),
         });
     }

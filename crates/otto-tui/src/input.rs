@@ -440,7 +440,7 @@ impl App {
                 // the same transcript (garbled/duplicated blocks). Keep the
                 // typed text in the editor and tell the user why.
                 if self.turn_in_flight() {
-                    self.flash("turn in flight — Esc to interrupt it first");
+                    self.flash_warning("turn in flight — Esc to interrupt it first");
                     return None;
                 }
                 Some(Msg::Submitted(self.input.take()))
