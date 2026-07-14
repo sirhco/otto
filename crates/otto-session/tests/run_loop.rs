@@ -16,6 +16,7 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use otto_events::{FinishReason, LLMEvent, ToolResultValue};
 use otto_llm::{LLMError, LLMRequest, Model, Route};
+use otto_permission::{Permission, Reply, Ruleset, SessionGate};
 use otto_session::{RunConfig, augment_with_tools, run_loop};
 use otto_storage::model::{
     Info, InfoBody, MessageId, Part, PartKind, SessionId, ToolState, User, UserModel, UserTime,
@@ -405,6 +406,99 @@ async fn user_prompt_submit_deny_blocks_before_any_provider_call() {
 
     let err = run_loop(&cfg, &sid(SES)).await.expect_err("denied");
     assert_eq!(err.to_string(), "blocked prompt");
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no provider call made");
+}
+
+#[tokio::test]
+async fn user_prompt_submit_ask_approved_continues_the_turn() {
+    let (store, _user_id) = seed("hi").await;
+
+    let mut turn = vec![step_start()];
+    turn.extend(text_events("t1", "approved response"));
+    turn.push(step_finish(FinishReason::Stop));
+    turn.push(finish(FinishReason::Stop));
+    let (route, calls) = ScriptedRoute::build(vec![turn]);
+
+    let mut cfg = config(store.clone(), route, ToolRegistry::new(), CancellationToken::new());
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
+        user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: "echo '{\"decision\":\"ask\",\"reason\":\"needs review\"}'".to_string(),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    })));
+
+    let permission = Arc::new(Permission::new(Ruleset::new())); // default mode: ApproveEach
+    cfg.permission = Arc::new(SessionGate::new(permission.clone(), sid(SES)));
+    let mut asks = permission.subscribe();
+
+    let cfg_for_run = cfg.clone();
+    let handle = tokio::spawn(async move { run_loop(&cfg_for_run, &sid(SES)).await });
+
+    let asked = asks
+        .recv()
+        .await
+        .expect("UserPromptSubmit ask surfaces a Permission ask");
+    assert_eq!(asked.permission, "hook");
+    assert_eq!(asked.patterns, vec!["user_prompt_submit".to_string()]);
+    permission.reply(&asked.request_id, Reply::Once);
+
+    let info = handle.await.unwrap().expect("run completes");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "provider call made after approval");
+
+    let parts = parts_of(&store, info.id()).await;
+    let final_text: String = parts
+        .iter()
+        .filter_map(|p| match &p.kind {
+            PartKind::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(final_text, "approved response");
+}
+
+#[tokio::test]
+async fn user_prompt_submit_ask_rejected_blocks_with_the_human_message() {
+    let (store, _user_id) = seed("hi").await;
+
+    let mut turn = vec![step_start()];
+    turn.extend(text_events("t1", "should never run"));
+    turn.push(step_finish(FinishReason::Stop));
+    turn.push(finish(FinishReason::Stop));
+    let (route, calls) = ScriptedRoute::build(vec![turn]);
+
+    let mut cfg = config(store, route, ToolRegistry::new(), CancellationToken::new());
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
+        user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: "echo '{\"decision\":\"ask\",\"reason\":\"needs review\"}'".to_string(),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    })));
+
+    let permission = Arc::new(Permission::new(Ruleset::new()));
+    cfg.permission = Arc::new(SessionGate::new(permission.clone(), sid(SES)));
+    let mut asks = permission.subscribe();
+
+    let cfg_for_run = cfg.clone();
+    let handle = tokio::spawn(async move { run_loop(&cfg_for_run, &sid(SES)).await });
+
+    let asked = asks.recv().await.expect("ask surfaces");
+    permission.reply(
+        &asked.request_id,
+        Reply::Reject {
+            message: Some("try again with more detail".to_string()),
+        },
+    );
+
+    let err = handle.await.unwrap().expect_err("rejected");
+    assert_eq!(err.to_string(), "try again with more detail");
     assert_eq!(calls.load(Ordering::SeqCst), 0, "no provider call made");
 }
 

@@ -589,10 +589,27 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, R
                 cwd: cfg.directory.clone(),
             })
             .await;
-        if verdict.decision != Decision::Allow {
-            return Err(RunError::HookDenied(verdict.reason.unwrap_or_else(|| {
-                "blocked by user_prompt_submit hook".to_string()
-            })));
+        match verdict.decision {
+            Decision::Allow => {}
+            Decision::Deny => {
+                return Err(RunError::HookDenied(verdict.reason.clone().unwrap_or_else(|| {
+                    "blocked by user_prompt_submit hook".to_string()
+                })));
+            }
+            Decision::Ask => {
+                let req = otto_tools::build_hook_permission_request(
+                    "user_prompt_submit",
+                    &verdict,
+                    None,
+                );
+                let result = cfg.permission.ask(req).await;
+                let outcome = otto_tools::interpret_hook_ask_result(result, &verdict);
+                if !outcome.approved {
+                    return Err(RunError::HookDenied(outcome.message.unwrap_or_else(|| {
+                        "blocked by user_prompt_submit hook".to_string()
+                    })));
+                }
+            }
         }
         if let Some(ctx) = verdict.additional_context {
             hook_context = Some(match hook_context.take() {
