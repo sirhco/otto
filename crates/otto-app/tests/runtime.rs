@@ -68,6 +68,43 @@ impl otto_app::RouteFactory for ScriptedRouteFactory {
     }
 }
 
+/// A route that captures every request's assembled system-prompt text, for
+/// asserting hook-injected context reaches the real LLM request. Kept
+/// separate from `ScriptedRoute` (used by many other tests in this file) so
+/// this addition can't affect them.
+struct CapturingRoute {
+    system_texts: Mutex<Vec<String>>,
+    turns: Mutex<VecDeque<Vec<LLMEvent>>>,
+}
+
+impl Route for CapturingRoute {
+    fn id(&self) -> &str {
+        "capturing"
+    }
+    fn stream(&self, req: LLMRequest) -> BoxStream<'static, Result<LLMEvent, LLMError>> {
+        let joined = req
+            .system
+            .iter()
+            .map(|s| s.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.system_texts.lock().unwrap().push(joined);
+        let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+        stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+}
+
+struct CapturingRouteFactory {
+    route: Arc<CapturingRoute>,
+    model: Model,
+}
+
+impl otto_app::RouteFactory for CapturingRouteFactory {
+    fn route_for(&self, _m: &ModelRef) -> AppResult<(Arc<dyn Route>, Model)> {
+        Ok((self.route.clone(), self.model.clone()))
+    }
+}
+
 // -- tools -------------------------------------------------------------------
 
 /// Echoes its `text` argument back as output.
@@ -586,4 +623,87 @@ async fn turn_timeout_aborts_a_hung_run() {
         a.time.completed.is_some(),
         "aborted assistant is finalized"
     );
+}
+
+// -- hook wiring end-to-end ---------------------------------------------------
+
+#[tokio::test]
+async fn session_start_hook_context_reaches_the_system_prompt() {
+    let config = Config {
+        hooks: Some(otto_hooks::HooksConfig {
+            session_start: vec![otto_hooks::HookMatcherGroup {
+                matcher: None,
+                hooks: vec![otto_hooks::HookCommand {
+                    command: "echo '{\"additional_context\":\"REMEMBER: be terse\"}'".to_string(),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let route = Arc::new(CapturingRoute {
+        system_texts: Mutex::new(Vec::new()),
+        turns: Mutex::new(vec![text_turn("t1", "done")].into_iter().collect()),
+    });
+    let factory = Arc::new(CapturingRouteFactory {
+        route: route.clone(),
+        model: Model::new("anthropic", "claude-3", "route_scripted"),
+    });
+    let rt = Runtime::in_memory(config)
+        .await
+        .expect("runtime")
+        .with_route_factory(factory);
+
+    let agent = rt.default_agent().clone();
+    let model = rt.default_model();
+    let session = rt
+        .create_session("Test", &agent, None)
+        .await
+        .expect("session");
+
+    let handle = rt.run(&session, "hi", &agent, &model, CancellationToken::new());
+    handle.join.await.expect("join").expect("run ok");
+
+    let texts = route.system_texts.lock().unwrap();
+    assert!(
+        texts.iter().any(|t| t.contains("REMEMBER: be terse")),
+        "SessionStart's additional_context reached the system prompt: {texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn user_prompt_submit_deny_blocks_before_any_provider_call() {
+    let config = Config {
+        hooks: Some(otto_hooks::HooksConfig {
+            user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
+                matcher: None,
+                hooks: vec![otto_hooks::HookCommand {
+                    command: "echo '{\"decision\":\"deny\",\"reason\":\"blocked prompt\"}'"
+                        .to_string(),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (factory, calls) = ScriptedRouteFactory::new(vec![text_turn("t1", "done")]);
+    let rt = Runtime::in_memory(config)
+        .await
+        .expect("runtime")
+        .with_route_factory(factory);
+
+    let agent = rt.default_agent().clone();
+    let model = rt.default_model();
+    let session = rt
+        .create_session("Test", &agent, None)
+        .await
+        .expect("session");
+
+    let handle = rt.run(&session, "hi", &agent, &model, CancellationToken::new());
+    let err = handle.join.await.expect("join").expect_err("denied");
+
+    assert_eq!(err.to_string(), "blocked prompt");
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no provider call made");
 }
