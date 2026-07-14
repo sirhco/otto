@@ -2,12 +2,15 @@
 //! any crash, bad JSON, or timeout (see the design doc's Failure Handling
 //! section for the rationale).
 
+use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::Duration;
 
+use regex::Regex;
 use tokio::io::AsyncWriteExt;
 
-use crate::config::{HookCommand, HooksConfig};
+use crate::config::{HookCommand, HookMatcherGroup, HooksConfig};
 use crate::event::{Decision, HookEvent, HookVerdict};
 
 /// Default per-command timeout, overridable via `HookCommand::timeout_ms`.
@@ -26,12 +29,45 @@ enum HookError {
 /// Fires configured lifecycle hooks and resolves the combined verdict.
 pub struct HookRunner {
     config: HooksConfig,
+    /// Compiled-regex cache keyed by matcher pattern string, populated
+    /// lazily in [`Self::group_matches`]. `HookMatcherGroup` can't hold a
+    /// compiled `Regex` directly without breaking its
+    /// `Clone`/`PartialEq`/`Serialize`/`Deserialize` derives, so the cache
+    /// lives here instead — avoids recompiling every configured matcher's
+    /// regex on every `fire` call.
+    regex_cache: Mutex<HashMap<String, Regex>>,
 }
 
 impl HookRunner {
     #[must_use]
     pub fn new(config: HooksConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            regex_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether `group` should run for `tool_id`, using (and populating) the
+    /// compiled-regex cache. Same semantics as
+    /// [`HookMatcherGroup::matches`] (`None` matcher/tool_id always matches,
+    /// invalid regex never matches) — this is the cached hot-path
+    /// equivalent used by [`Self::fire`].
+    fn group_matches(&self, group: &HookMatcherGroup, tool_id: Option<&str>) -> bool {
+        let (Some(pattern), Some(id)) = (&group.matcher, tool_id) else {
+            return true;
+        };
+        let mut cache = self.regex_cache.lock().expect("regex cache mutex poisoned");
+        if let Some(re) = cache.get(pattern) {
+            return re.is_match(id);
+        }
+        match Regex::new(pattern) {
+            Ok(re) => {
+                let matched = re.is_match(id);
+                cache.insert(pattern.clone(), re);
+                matched
+            }
+            Err(_) => false,
+        }
     }
 
     /// Run every matching hook for `event` in config order. The first
@@ -41,7 +77,7 @@ impl HookRunner {
     pub async fn fire(&self, event: HookEvent) -> HookVerdict {
         let mut verdict = HookVerdict::default();
         for group in self.config.groups_for(event.kind()) {
-            if !group.matches(event.tool_id()) {
+            if !self.group_matches(group, event.tool_id()) {
                 continue;
             }
             for cmd in &group.hooks {
@@ -327,5 +363,56 @@ mod tests {
             elapsed.as_secs() < 2,
             "concurrent stdin/stdout should handle large payloads without deadlock, took {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn regex_is_cached_after_first_match() {
+        let cfg = HooksConfig {
+            pre_tool_use: vec![HookMatcherGroup {
+                matcher: Some("^bash$".to_string()),
+                hooks: vec![HookCommand {
+                    command: "echo '{}'".to_string(),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        };
+        let runner = HookRunner::new(cfg);
+
+        let _ = runner.fire(pre_tool_use_event()).await;
+        assert_eq!(
+            runner.regex_cache.lock().unwrap().len(),
+            1,
+            "first fire compiles and caches the pattern"
+        );
+
+        let _ = runner.fire(pre_tool_use_event()).await;
+        assert_eq!(
+            runner.regex_cache.lock().unwrap().len(),
+            1,
+            "second fire reuses the cached regex rather than adding a new entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_regex_is_not_cached_and_never_matches() {
+        let cfg = HooksConfig {
+            pre_tool_use: vec![HookMatcherGroup {
+                matcher: Some("(unterminated".to_string()),
+                hooks: vec![HookCommand {
+                    command: "echo '{\"decision\":\"deny\"}'".to_string(),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        };
+        let runner = HookRunner::new(cfg);
+        let verdict = runner.fire(pre_tool_use_event()).await;
+        assert_eq!(
+            verdict.decision,
+            Decision::Allow,
+            "invalid regex never matches, so the denying hook never runs"
+        );
+        assert!(runner.regex_cache.lock().unwrap().is_empty());
     }
 }
