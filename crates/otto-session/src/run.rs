@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
+use otto_hooks::HookRunner;
 use otto_llm::message::{ContentPart, Message, SystemPart, ToolChoice, ToolDefinition};
 use otto_llm::{LLMRequest, Model, Route};
 use otto_storage::model::{
@@ -130,6 +131,12 @@ pub struct RunConfig {
     /// text is baked into the warm cache (see [`crate::warm::compute_warm`]), so
     /// this field is unused on the cached path.
     pub tersemode_directive: Option<String>,
+    /// Optional external lifecycle-hooks runner (`UserPromptSubmit`,
+    /// `PreCompact`, and — in a later plan — `Stop`). `None` disables all
+    /// `otto-hooks` firing for this run. Distinct from `otto-tools`' own
+    /// `PreToolUse`/`PostToolUse` wiring, though in production both point at
+    /// the same shared `Arc<HookRunner>` (`otto-app::Runtime`).
+    pub hooks: Option<Arc<HookRunner>>,
 }
 
 /// Errors raised by [`run_loop`].
@@ -150,6 +157,10 @@ pub enum RunError {
     /// The session had no messages when resolving the last assistant.
     #[error("session {0} has no messages")]
     NoMessages(String),
+    /// A `user_prompt_submit` lifecycle hook denied the turn before any
+    /// provider call was made.
+    #[error("{0}")]
+    HookDenied(String),
     /// The loop exceeded [`MAX_ITERATIONS`] without terminating.
     #[error("run loop exceeded {0} iterations without terminating")]
     IterationCap(u32),

@@ -235,6 +235,7 @@ async fn subagent_spawn_end_to_end() {
         "prj_1",
         "1.0.0",
         None,
+        None,
     ));
 
     // Parent turn 1: a task tool-call; turn 2: text done.
@@ -274,6 +275,7 @@ async fn subagent_spawn_end_to_end() {
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
+        hooks: None,
     };
 
     run_loop(&cfg, &sid(parent_id)).await.expect("parent run_loop");
@@ -397,6 +399,7 @@ async fn ruleset_deny_fails_tool_but_turn_continues() {
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
+        hooks: None,
     };
 
     let last = run_loop(&cfg, &sid(ses)).await.expect("run completes");
@@ -464,6 +467,7 @@ async fn spawned_child_inherits_parent_permission_mode() {
         "prj_1",
         "1.0.0",
         None,
+        None,
     );
 
     let child_result = spawner
@@ -523,6 +527,7 @@ async fn spawn_many_delegates_in_order() {
         "prj_1",
         "1.0.0",
         None,
+        None,
     );
 
     let make_req = |description: &str| otto_tools::SubagentRequest {
@@ -567,6 +572,7 @@ async fn unknown_subagent_type_errors() {
         std::env::temp_dir(),
         "prj_1",
         "1.0.0",
+        None,
         None,
     );
 
@@ -614,6 +620,7 @@ async fn event_tx_forwards_child_run_events() {
         std::env::temp_dir(),
         "prj_1",
         "1.0.0",
+        None,
         None,
     );
 
@@ -695,6 +702,7 @@ async fn nested_subagent_spawn() {
         "prj_1",
         "1.0.0",
         None,
+        None,
     ));
 
     let mut parent_turn1 = vec![step_start()];
@@ -729,6 +737,7 @@ async fn nested_subagent_spawn() {
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
+        hooks: None,
     };
 
     run_loop(&cfg, &sid(parent_id)).await.expect("parent run_loop");
@@ -813,6 +822,7 @@ async fn run_askedit_with_ruleset(ruleset: Value) -> ToolState {
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
+        hooks: None,
     };
     run_loop(&cfg, &sid(ses)).await.expect("run_loop");
     tool_state(&store, &sid(ses), "askedit")
@@ -887,6 +897,7 @@ async fn permission_ask_admits_on_reply_once() {
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
+        hooks: None,
     };
     run_loop(&cfg, &sid(ses)).await.expect("run_loop");
 

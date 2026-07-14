@@ -265,6 +265,7 @@ fn config(store: Store, route: Arc<dyn Route>, tools: ToolRegistry) -> RunConfig
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
+        hooks: None,
     }
 }
 

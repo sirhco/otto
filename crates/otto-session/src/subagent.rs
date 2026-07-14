@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use otto_agent::{AgentInfo, config as agent_config, derive_subagent_permission};
 use otto_llm::{Model, Route};
+use otto_hooks::HookRunner;
 use otto_permission::{Permission, Ruleset, SessionGate, merge};
 use otto_storage::model::{
     Info, InfoBody, Part, PartKind, SessionId, User, UserModel, UserTime, new_message_id,
@@ -72,6 +73,10 @@ pub struct SessionSubagentSpawner {
     /// terse too. `None` disables it. Carried across nested spawns via
     /// [`Self::with_parent_ruleset`]'s clone.
     tersemode_directive: Option<String>,
+    /// Shared lifecycle-hooks runner, threaded into each child's
+    /// `RunConfig` (`UserPromptSubmit`/`PreCompact`). `None` disables hook
+    /// firing for every child spawned by this spawner.
+    hooks: Option<Arc<HookRunner>>,
 }
 
 impl SessionSubagentSpawner {
@@ -100,6 +105,7 @@ impl SessionSubagentSpawner {
         project_id: impl Into<String>,
         version: impl Into<String>,
         tersemode_directive: Option<String>,
+        hooks: Option<Arc<HookRunner>>,
     ) -> Self {
         Self {
             store,
@@ -113,6 +119,7 @@ impl SessionSubagentSpawner {
             version: version.into(),
             warm: Arc::new(Mutex::new(HashMap::new())),
             tersemode_directive,
+            hooks,
         }
     }
 
@@ -301,6 +308,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
             // `system_cache` above), but carried so a nested spawn that rebuilds
             // still has it.
             tersemode_directive: self.tersemode_directive.clone(),
+            hooks: self.hooks.clone(),
         };
 
         // 6. Run the child loop and 7. return its last assistant text

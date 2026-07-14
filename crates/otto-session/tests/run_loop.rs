@@ -243,6 +243,7 @@ fn config(
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
+        hooks: None,
     }
 }
 

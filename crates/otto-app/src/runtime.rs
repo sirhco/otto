@@ -461,6 +461,7 @@ impl Runtime {
             self.project_id.clone(),
             self.version.clone(),
             tersemode_directive(&self.config),
+            None,
         )))
     }
 
@@ -661,6 +662,7 @@ impl Runtime {
                 event_tx: Some(event_tx),
                 system_cache: None,
                 tersemode_directive: tersemode,
+                hooks: None,
             };
 
             // 5. Drive the loop and return the final assistant message.

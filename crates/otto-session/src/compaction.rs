@@ -21,6 +21,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use otto_agent::builtins::PROMPT_COMPACTION;
+use otto_hooks::{CompactTrigger, HookEvent};
 use otto_llm::message::{ContentPart, Message, SystemPart};
 use otto_llm::model::{ModelId, ProviderId};
 use otto_llm::{LLMClient, LLMError, LLMRequest, LLMResponse};
@@ -320,6 +321,23 @@ pub async fn create(
     auto: bool,
     overflow: bool,
 ) -> Result<(), CompactionError> {
+    // PreCompact: informational only (cannot block) — the verdict is
+    // discarded entirely, matching the design doc's "informational" row for
+    // this event.
+    if let Some(runner) = &cfg.hooks {
+        let trigger = if auto {
+            CompactTrigger::Auto
+        } else {
+            CompactTrigger::Manual
+        };
+        let _ = runner
+            .fire(HookEvent::PreCompact {
+                session_id: session_id.clone(),
+                trigger,
+            })
+            .await;
+    }
+
     let provider = &cfg.model.provider;
     let model_id = &cfg.model.id;
 

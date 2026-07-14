@@ -302,6 +302,7 @@ fn config(store: Store, route: Arc<dyn Route>, model: Model) -> RunConfig {
         event_tx: None,
         system_cache: None,
         tersemode_directive: None,
+        hooks: None,
     }
 }
 
@@ -397,6 +398,49 @@ async fn create_summarizes_and_filter_reorders() {
     assert_eq!(out.len(), 5, "compaction, summary, tail(2), continue");
     // The last message is the synthetic auto-continue user.
     assert!(out.last().unwrap().info.is_user());
+}
+
+#[tokio::test]
+async fn pre_compact_hook_fires_with_the_right_trigger() {
+    let ses = "ses_pre_compact";
+    let store = open_session(ses).await;
+
+    let big = "x".repeat(4_000);
+    let u1 = insert_user(&store, ses, &big).await;
+    let _a1 = insert_assistant(&store, ses, &u1, &big, zero_tokens()).await;
+    let u2 = insert_user(&store, ses, "hi").await;
+    let _a2 = insert_assistant(&store, ses, &u2, "ok", zero_tokens()).await;
+
+    let marker = std::env::temp_dir().join(format!(
+        "otto-precompact-marker-{}-{ses}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let hooks_cfg = otto_hooks::HooksConfig {
+        pre_compact: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: format!("cat > {}", marker.display()),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    };
+
+    let (route, _calls) = ScriptedRoute::build(vec![text_turn("s1", "SUMMARY")]);
+    let mut cfg = config(store.clone(), route, model_with_context(None));
+    cfg.preserve_recent_tokens = 10; // only the tiny last turn fits
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(hooks_cfg)));
+
+    compaction::create(&cfg, &sid(ses), true, false)
+        .await
+        .expect("create");
+
+    let payload = std::fs::read_to_string(&marker)
+        .expect("PreCompact hook fired and wrote its stdin payload to the marker file");
+    assert!(payload.contains("\"event\":\"PreCompact\""));
+    assert!(payload.contains("\"trigger\":\"auto\""));
+    let _ = std::fs::remove_file(&marker);
 }
 
 // -- 2. run_loop auto-compaction pre-check -----------------------------------

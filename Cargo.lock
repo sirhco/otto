@@ -1899,6 +1899,7 @@ dependencies = [
  "futures",
  "otto-agent",
  "otto-events",
+ "otto-hooks",
  "otto-id",
  "otto-llm",
  "otto-mcp",
