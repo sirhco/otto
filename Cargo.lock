@@ -1660,7 +1660,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "otto-agent"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "otto-llm",
  "otto-permission",
@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "otto-app"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1699,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "otto-auth"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "base64",
  "dirs",
@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "otto-cli"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1750,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "otto-config"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "dirs",
  "jsonc-parser",
@@ -1764,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "otto-events"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1773,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "otto-hooks"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "otto-id",
  "regex",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "otto-id"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "rand 0.8.6",
  "serde",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "otto-llm"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "bytes",
@@ -1815,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "otto-lsp"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "otto-config",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "otto-mcp"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1847,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "otto-permission"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "otto-hooks",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "otto-server"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1893,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "otto-session"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "otto-storage"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "otto-events",
  "otto-id",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "otto-tools"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1958,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "otto-tui"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1989,7 +1989,7 @@ dependencies = [
 
 [[package]]
 name = "otto-vcs"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2001,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "otto-workflow"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "futures",

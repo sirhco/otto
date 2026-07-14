@@ -4,6 +4,30 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.4.0] - 2026-07-15
+
+### Added
+
+- **Lifecycle hooks** — user-configured external shell commands that fire at
+  points across the session/tool/compaction pipeline, otto's answer to Claude
+  Code's hooks (an otto-native JSON contract, not a literal field-for-field
+  mirror; no opencode analog). Eight events: `SessionStart`,
+  `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`,
+  `SubagentStop`, `Notification`. Each configured hook gets a JSON payload on
+  stdin and returns a verdict (`allow`/`deny`/`ask`, plus optional
+  `reason`/`additional_context`/`system_message`) on stdout; a hook that
+  crashes, times out, or emits unparseable output fails open with a loud
+  warning rather than breaking the turn. `PreToolUse` can block a tool call
+  before it runs; `PostToolUse` can attach a message to the result;
+  `UserPromptSubmit` can block a turn before any provider call and inject
+  extra context into the system prompt; `SessionStart`'s context persists for
+  every turn of the session; a denying `Stop`/`SubagentStop` doesn't just
+  block — it synthesizes a follow-up turn and the agent keeps going instead of
+  stopping; `Notification` fires (fire-and-forget) whenever a permission
+  request starts waiting on a human decision. Configure via the new `hooks`
+  config block: `hooks.<event>[].matcher` (a regex over the tool id, tool
+  events only) + `.hooks[].command`/`.timeout_ms`.
+
 ## [0.3.3] - 2026-07-09
 
 ### Fixed
