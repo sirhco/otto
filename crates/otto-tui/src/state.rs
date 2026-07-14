@@ -1876,12 +1876,12 @@ pub(crate) enum Command {
 /// only, no behavior.
 pub(crate) const COMMANDS: &[(&str, &str, Command)] = &[
     ("New session", "ctrl+n", Command::NewSession),
-    ("Switch session…", "s", Command::SwitchSession),
-    ("Change model…", "m", Command::ChangeModel),
-    ("Change agent…", "g", Command::ChangeAgent),
-    ("Toggle tool detail", "t", Command::ToggleTool),
+    ("Switch session…", "", Command::SwitchSession),
+    ("Change model…", "", Command::ChangeModel),
+    ("Change agent…", "ctrl+g", Command::ChangeAgent),
+    ("Toggle tool detail", "ctrl+t", Command::ToggleTool),
     ("Help", "?", Command::Help),
-    ("Quit", "q", Command::Quit),
+    ("Quit", "ctrl+c", Command::Quit),
     ("Attach file…", "ctrl+f", Command::AttachFile),
     (
         "Workflow: SDD…",
@@ -3944,8 +3944,15 @@ mod tests {
 
     #[test]
     fn every_command_has_a_key_hint() {
+        // Switch session / Change model are intentionally palette-only (no
+        // real key binding); everything else must have one.
         for (label, key, _cmd) in COMMANDS {
-            assert!(!key.is_empty(), "command {label:?} has empty key hint");
+            let palette_only = matches!(*label, "Switch session…" | "Change model…");
+            assert_eq!(
+                key.is_empty(),
+                palette_only,
+                "command {label:?} has unexpected key_hint {key:?}"
+            );
         }
     }
 

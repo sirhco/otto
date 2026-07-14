@@ -2486,6 +2486,30 @@ mod tests {
     }
 
     #[test]
+    fn palette_key_hints_match_real_bindings() {
+        // Every non-empty, non-workflow key_hint in COMMANDS must be a real
+        // chord that appears in HELP_FULL — guards against the hint drifting
+        // out of sync with input.rs's actual dispatch table again.
+        let help_chords: Vec<&str> = HELP_FULL
+            .split(" · ")
+            .filter_map(|seg| seg.split(' ').next())
+            .collect();
+        for &(label, key_hint, _) in crate::state::COMMANDS {
+            if label.starts_with("Workflow:") {
+                continue; // prose, not a real key — intentionally excluded
+            }
+            if key_hint.is_empty() {
+                continue; // palette-only command, correctly has no key
+            }
+            assert!(
+                help_chords.contains(&key_hint),
+                "COMMANDS key_hint {key_hint:?} for {label:?} not found in HELP_FULL \
+                 (chords: {help_chords:?}) — binding likely moved without updating COMMANDS"
+            );
+        }
+    }
+
+    #[test]
     fn header_shows_flash_when_idle() {
         use ratatui::{Terminal, backend::TestBackend};
         let mut app = crate::state::App::new();
