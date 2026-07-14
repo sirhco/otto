@@ -307,6 +307,81 @@ async fn parts_of(store: &Store, message_id: &MessageId) -> Vec<Part> {
 // -- tests -------------------------------------------------------------------
 
 #[tokio::test]
+async fn stop_deny_injects_synthetic_continuation_and_reruns() {
+    let (store, _user_id) = seed("hi").await;
+
+    let mut turn1 = vec![step_start()];
+    turn1.extend(text_events("t1", "first response"));
+    turn1.push(step_finish(FinishReason::Stop));
+    turn1.push(finish(FinishReason::Stop));
+
+    let mut turn2 = vec![step_start()];
+    turn2.extend(text_events("t2", "second response"));
+    turn2.push(step_finish(FinishReason::Stop));
+    turn2.push(finish(FinishReason::Stop));
+
+    let (route, calls) = ScriptedRoute::build(vec![turn1, turn2]);
+
+    // A stateful shell hook: denies the first time it's called (creating a
+    // marker file), allows every time after — proving exactly one
+    // deny-then-continue cycle.
+    let marker =
+        std::env::temp_dir().join(format!("otto-stop-test-marker-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let hooks_cfg = otto_hooks::HooksConfig {
+        stop: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: format!(
+                    "if [ -f {p} ]; then echo '{{\"decision\":\"allow\"}}'; else touch {p} && echo '{{\"decision\":\"deny\",\"reason\":\"keep going\"}}'; fi",
+                    p = marker.display()
+                ),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    };
+
+    let mut cfg = config(store.clone(), route, ToolRegistry::new(), CancellationToken::new());
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(hooks_cfg)));
+
+    let info = run_loop(&cfg, &sid(SES)).await.expect("run completes");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "denied once, so two provider turns ran"
+    );
+
+    let parts = parts_of(&store, info.id()).await;
+    let final_text: String = parts
+        .iter()
+        .filter_map(|p| match &p.kind {
+            PartKind::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(final_text, "second response");
+
+    // A synthetic continuation user message was persisted with the hook's reason.
+    let msgs = store.messages_with_parts(&sid(SES)).await.expect("history");
+    let synthetic_text: String = msgs
+        .iter()
+        .flat_map(|m| &m.parts)
+        .filter_map(|p| match &p.kind {
+            PartKind::Text {
+                text,
+                synthetic: Some(true),
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(synthetic_text, "keep going");
+
+    let _ = std::fs::remove_file(&marker);
+}
+
+#[tokio::test]
 async fn user_prompt_submit_deny_blocks_before_any_provider_call() {
     let (store, _user_id) = seed("hi").await;
 

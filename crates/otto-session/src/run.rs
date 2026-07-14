@@ -25,7 +25,8 @@ use otto_llm::message::{ContentPart, Message, SystemPart, ToolChoice, ToolDefini
 use otto_llm::{LLMRequest, Model, Route};
 use otto_storage::model::{
     Assistant, AssistantError, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part,
-    PartKind, SessionId, TokenCache, Tokens, ToolState, new_message_id,
+    PartKind, SessionId, StartEndTime, TokenCache, Tokens, ToolState, User, UserModel, UserTime,
+    new_message_id, new_part_id,
 };
 use otto_storage::{StorageError, Store, filter_compacted, latest};
 use otto_tools::tool::PermissionGate;
@@ -57,8 +58,15 @@ pub const DEFAULT_MAX_TOTAL_RETRIES: u32 = 20;
 const MAX_STEPS_PROMPT: &str = "CRITICAL - MAXIMUM STEPS REACHED\n\nThe maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.\n\nSTRICT REQUIREMENTS:\n1. Do NOT make any tool calls (no reads, writes, edits, searches, or any other tools)\n2. MUST provide a text response summarizing work done so far\n3. This constraint overrides ALL other instructions, including any user requests for edits or tool use\n\nResponse must include:\n- Statement that maximum steps for this agent have been reached\n- Summary of what has been accomplished so far\n- List of any remaining tasks that were not completed\n- Recommendations for what should be done next\n\nAny attempt to use tools is a critical violation. Respond with text ONLY.";
 
 /// Hard cap on loop iterations — a guard against a misbehaving exit condition
-/// spinning forever (no opencode analog; otto safety net).
+/// spinning forever (no opencode analog; otto safety net). Also bounds a
+/// misbehaving always-deny `Stop` hook: each deny re-enters this same loop
+/// via `continue`, so it counts against this cap too.
 const MAX_ITERATIONS: u32 = 1000;
+
+/// Default synthetic continuation prompt when a denying `Stop`/`SubagentStop`
+/// hook supplies no `reason` (Claude-Code-inspired otto extension; no
+/// opencode analog).
+pub(crate) const DEFAULT_STOP_CONTINUE_PROMPT: &str = "Please continue.";
 
 /// Configuration for one [`run_loop`] invocation — the ambient services and the
 /// per-session model/agent settings that opencode threads through
@@ -308,6 +316,56 @@ fn new_assistant(
             finish: None,
         }),
     }
+}
+
+/// Persist a synthetic user-role message that re-enters the loop as if the
+/// user had sent `text` — the mechanism behind a denying `Stop`/
+/// `SubagentStop` hook (`crate::subagent::SessionSubagentSpawner::spawn`'s
+/// `SubagentStop` handling calls this too). Mirrors `compaction::create`'s
+/// existing auto-continue-message injection (`compaction.rs`), including
+/// marking the part `synthetic: Some(true)` the same way.
+pub(crate) async fn synthesize_continuation(
+    cfg: &RunConfig,
+    session_id: &SessionId,
+    text: &str,
+) -> Result<(), StorageError> {
+    let id = new_message_id();
+    let msg = Info {
+        id: id.clone(),
+        session_id: session_id.clone(),
+        body: InfoBody::User(User {
+            time: UserTime { created: now_ms() },
+            format: None,
+            summary: None,
+            agent: cfg.agent.clone(),
+            model: UserModel {
+                provider_id: cfg.model.provider.0.clone(),
+                model_id: cfg.model.id.0.clone(),
+                variant: None,
+            },
+            system: None,
+            tools: None,
+        }),
+    };
+    cfg.store.insert_message(&msg).await?;
+    cfg.store
+        .insert_part(&Part {
+            id: new_part_id(),
+            session_id: session_id.clone(),
+            message_id: id,
+            kind: PartKind::Text {
+                text: text.to_string(),
+                synthetic: Some(true),
+                ignored: None,
+                time: Some(StartEndTime {
+                    start: now_ms(),
+                    end: Some(now_ms()),
+                }),
+                metadata: None,
+            },
+        })
+        .await?;
+    Ok(())
 }
 
 /// Mark an interrupted assistant message finalized — port of
@@ -577,6 +635,24 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, R
             let finish = la.as_assistant().and_then(|a| a.finish.as_deref());
             let finished_terminal = finish.is_some_and(|f| f != "tool-calls");
             if finished_terminal && !has_tool_calls && last_user.id < la.id {
+                // Stop: informational unless the verdict denies. A deny
+                // synthesizes a follow-up user turn and re-enters the loop
+                // instead of ending the turn — bounded by MAX_ITERATIONS
+                // above, since this `continue` re-enters the same loop.
+                if let Some(runner) = &cfg.hooks {
+                    let verdict = runner
+                        .fire(HookEvent::Stop {
+                            session_id: session_id.clone(),
+                        })
+                        .await;
+                    if verdict.decision != Decision::Allow {
+                        let text = verdict
+                            .reason
+                            .unwrap_or_else(|| DEFAULT_STOP_CONTINUE_PROMPT.to_string());
+                        synthesize_continuation(cfg, session_id, &text).await?;
+                        continue;
+                    }
+                }
                 break;
             }
         }
