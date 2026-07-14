@@ -129,9 +129,8 @@ impl ToolRegistry {
 
         // External lifecycle PreToolUse hook: fires first, ahead of the
         // in-process ToolHook stage below, so a denying hook blocks before
-        // any built-in arg-rewriting or the tool itself runs. `Ask` has no
-        // interactive escalation path wired yet (that needs the real
-        // Permission service, out of scope here) — treated as `Deny`.
+        // any built-in arg-rewriting or the tool itself runs. `Ask` escalates
+        // through the real permission gate; `Deny` blocks outright.
         if let Some(runner) = &self.lifecycle_hooks {
             let verdict = runner
                 .fire(HookEvent::PreToolUse {
@@ -141,11 +140,30 @@ impl ToolRegistry {
                     cwd: ctx.directory.clone(),
                 })
                 .await;
-            if verdict.decision != Decision::Allow {
-                let reason = verdict
-                    .reason
-                    .unwrap_or_else(|| "blocked by pre_tool_use hook".to_string());
-                return Err(ToolError::Execution(reason));
+            match verdict.decision {
+                Decision::Allow => {}
+                Decision::Deny => {
+                    let reason = verdict
+                        .reason
+                        .unwrap_or_else(|| "blocked by pre_tool_use hook".to_string());
+                    return Err(ToolError::Execution(reason));
+                }
+                Decision::Ask => {
+                    let req = crate::hook_escalation::build_hook_permission_request(
+                        "pre_tool_use",
+                        &verdict,
+                        Some(tool_id),
+                    );
+                    let result = ctx.permission.ask(req).await;
+                    let outcome =
+                        crate::hook_escalation::interpret_hook_ask_result(result, &verdict);
+                    if !outcome.approved {
+                        let reason = outcome
+                            .message
+                            .unwrap_or_else(|| "blocked by pre_tool_use hook".to_string());
+                        return Err(ToolError::Execution(reason));
+                    }
+                }
             }
         }
 
@@ -401,6 +419,70 @@ mod tests {
             ..Default::default()
         };
         Arc::new(HookRunner::new(cfg))
+    }
+
+    struct RejectingGate {
+        message: &'static str,
+    }
+    #[async_trait]
+    impl crate::tool::PermissionGate for RejectingGate {
+        async fn ask(
+            &self,
+            req: crate::tool::PermissionRequest,
+        ) -> Result<(), crate::tool::PermissionDenied> {
+            Err(crate::tool::PermissionDenied {
+                permission: req.permission,
+                by_user: true,
+                message: Some(self.message.to_string()),
+            })
+        }
+    }
+
+    fn ctx_with_gate(gate: std::sync::Arc<dyn crate::tool::PermissionGate>) -> ToolContext {
+        ToolContext::builder(std::env::temp_dir())
+            .permission(gate)
+            .build()
+    }
+
+    fn hook_runner_asking(tool_id_pattern: &str, reason: &str) -> Arc<HookRunner> {
+        let cfg = HooksConfig {
+            pre_tool_use: vec![HookMatcherGroup {
+                matcher: Some(tool_id_pattern.to_string()),
+                hooks: vec![HookCommand {
+                    command: format!("echo '{{\"decision\":\"ask\",\"reason\":\"{reason}\"}}'"),
+                    timeout_ms: None,
+                }],
+            }],
+            ..Default::default()
+        };
+        Arc::new(HookRunner::new(cfg))
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_ask_approved_runs_the_tool() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(BigOutput));
+        r.set_lifecycle_hooks(hook_runner_asking("big", "needs review"));
+
+        // ctx() uses the AllowAll gate, which approves any ask.
+        let res = r.execute("big", serde_json::json!({}), &ctx()).await;
+        assert!(res.is_ok(), "AllowAll gate approves the ask, tool runs");
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_ask_rejected_blocks_with_the_human_message() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(BigOutput));
+        r.set_lifecycle_hooks(hook_runner_asking("big", "needs review"));
+
+        let ctx = ctx_with_gate(Arc::new(RejectingGate {
+            message: "reviewer said no",
+        }));
+        let err = r
+            .execute("big", serde_json::json!({}), &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "reviewer said no");
     }
 
     #[tokio::test]
