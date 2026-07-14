@@ -32,6 +32,14 @@ fn selected_theme() -> &'static Mutex<String> {
 
 /// Map a TUI `theme` preset to a bundled syntect theme name. Every arm returns
 /// a key guaranteed present in `ThemeSet::load_defaults()`.
+///
+/// `nord` has no dedicated arm: `ThemeSet::load_defaults()` only bundles
+/// InspiredGitHub, Solarized dark/light, and three base16 variants — no real
+/// Nord theme exists in syntect's default set. `base16-ocean.dark` (a dark
+/// blue-grey palette, the same family as Nord's) is the closest available
+/// approximation, same as it is for `base16`/unknown/`None` — this is a
+/// deliberate choice, not an unmapped gap. A pixel-exact Nord match would
+/// require bundling a custom theme asset, out of scope here.
 fn syntect_theme_name(preset: Option<&str>) -> &'static str {
     match preset.map(|p| p.to_ascii_lowercase()).as_deref() {
         Some("gruvbox") => "base16-eighties.dark",
