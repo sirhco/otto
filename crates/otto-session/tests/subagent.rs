@@ -16,7 +16,7 @@ use futures::stream::{self, BoxStream};
 use otto_agent::AgentInfo;
 use otto_events::{FinishReason, LLMEvent};
 use otto_llm::{LLMError, LLMRequest, Model, Route};
-use otto_permission::{Permission, Ruleset, SessionGate};
+use otto_permission::{Permission, Reply, Ruleset, SessionGate};
 use otto_session::{RouteFor, RunConfig, SessionSubagentSpawner, run_loop};
 use otto_storage::model::{
     Info, InfoBody, MessageId, Part, PartKind, SessionId, ToolState, User, UserModel, UserTime,
@@ -392,6 +392,168 @@ async fn subagent_stop_deny_reruns_the_child_loop() {
     assert_eq!(result, "final");
 
     let _ = std::fs::remove_file(&marker);
+}
+
+// -- 1z-i. SubagentStop ask, approved, ends the child loop -------------------
+
+#[tokio::test]
+async fn subagent_stop_ask_approved_ends_the_child_loop() {
+    let store = Store::open_in_memory().await.expect("store");
+    let parent_id = "ses_parent_stop_ask_ok";
+    seed_session(&store, parent_id, "please delegate").await;
+
+    let (child_route, child_calls) = ScriptedRoute::build(vec![text_turn("c1", "final")]);
+    let route_for: RouteFor = {
+        let child_route = child_route.clone();
+        Arc::new(move |_agent: &AgentInfo| (child_route.clone(), model()))
+    };
+
+    let permission = Arc::new(Permission::new(Ruleset::new())); // default mode: ApproveEach
+    let mut asks = permission.subscribe();
+
+    let hooks_cfg = otto_hooks::HooksConfig {
+        subagent_stop: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: "echo '{\"decision\":\"ask\",\"reason\":\"confirm child stop\"}'"
+                    .to_string(),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    };
+    let hooks = Some(Arc::new(otto_hooks::HookRunner::new(hooks_cfg)));
+
+    let spawner = Arc::new(SessionSubagentSpawner::new(
+        store.clone(),
+        registry(vec![]),
+        permission.clone(),
+        Ruleset::new(),
+        json!({}),
+        route_for,
+        std::env::temp_dir(),
+        "prj_1",
+        "1.0.0",
+        None,
+        hooks,
+    ));
+
+    let spawner_for_spawn = spawner.clone();
+    let handle = tokio::spawn(async move {
+        spawner_for_spawn
+            .spawn(otto_tools::SubagentRequest {
+                parent_session_id: sid(parent_id),
+                parent_message_id: "msg_x".into(),
+                subagent_type: "general".into(),
+                description: "d".into(),
+                prompt: "do X".into(),
+                task_id: None,
+                command: None,
+                abort: CancellationToken::new(),
+                event_tx: None,
+            })
+            .await
+    });
+
+    let asked = asks
+        .recv()
+        .await
+        .expect("SubagentStop ask surfaces a Permission ask");
+    assert_eq!(asked.permission, "hook");
+    assert_eq!(asked.patterns, vec!["subagent_stop".to_string()]);
+    permission.reply(&asked.request_id, Reply::Once);
+
+    let result = handle.await.unwrap().expect("spawn completes");
+    assert_eq!(
+        child_calls.load(Ordering::SeqCst),
+        1,
+        "one child turn; approval ended the loop"
+    );
+    assert_eq!(result, "final");
+}
+
+// -- 1z-ii. SubagentStop ask, rejected, injects the human message and reruns -
+
+#[tokio::test]
+async fn subagent_stop_ask_rejected_injects_the_human_message_and_reruns() {
+    let store = Store::open_in_memory().await.expect("store");
+    let parent_id = "ses_parent_stop_ask_reject";
+    seed_session(&store, parent_id, "please delegate").await;
+
+    let (child_route, child_calls) =
+        ScriptedRoute::build(vec![text_turn("c1", "first"), text_turn("c2", "final")]);
+    let route_for: RouteFor = {
+        let child_route = child_route.clone();
+        Arc::new(move |_agent: &AgentInfo| (child_route.clone(), model()))
+    };
+
+    let permission = Arc::new(Permission::new(Ruleset::new()));
+    let mut asks = permission.subscribe();
+
+    let hooks_cfg = otto_hooks::HooksConfig {
+        subagent_stop: vec![otto_hooks::HookMatcherGroup {
+            matcher: None,
+            hooks: vec![otto_hooks::HookCommand {
+                command: "echo '{\"decision\":\"ask\",\"reason\":\"confirm child stop\"}'"
+                    .to_string(),
+                timeout_ms: None,
+            }],
+        }],
+        ..Default::default()
+    };
+    let hooks = Some(Arc::new(otto_hooks::HookRunner::new(hooks_cfg)));
+
+    let spawner = Arc::new(SessionSubagentSpawner::new(
+        store.clone(),
+        registry(vec![]),
+        permission.clone(),
+        Ruleset::new(),
+        json!({}),
+        route_for,
+        std::env::temp_dir(),
+        "prj_1",
+        "1.0.0",
+        None,
+        hooks,
+    ));
+
+    let spawner_for_spawn = spawner.clone();
+    let handle = tokio::spawn(async move {
+        spawner_for_spawn
+            .spawn(otto_tools::SubagentRequest {
+                parent_session_id: sid(parent_id),
+                parent_message_id: "msg_x".into(),
+                subagent_type: "general".into(),
+                description: "d".into(),
+                prompt: "do X".into(),
+                task_id: None,
+                command: None,
+                abort: CancellationToken::new(),
+                event_tx: None,
+            })
+            .await
+    });
+
+    let first = asks.recv().await.expect("first SubagentStop ask");
+    permission.reply(
+        &first.request_id,
+        Reply::Reject {
+            message: Some("keep going, one more step".to_string()),
+        },
+    );
+    let second = asks
+        .recv()
+        .await
+        .expect("second SubagentStop ask, after the continuation");
+    permission.reply(&second.request_id, Reply::Once);
+
+    let result = handle.await.unwrap().expect("spawn completes");
+    assert_eq!(
+        child_calls.load(Ordering::SeqCst),
+        2,
+        "rejected once, so the child loop ran twice"
+    );
+    assert_eq!(result, "final");
 }
 
 // -- 0. a policy deny fails the tool call, not the whole turn ----------------

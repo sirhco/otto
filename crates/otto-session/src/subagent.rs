@@ -337,16 +337,39 @@ impl SubagentSpawner for SessionSubagentSpawner {
                         parent_session_id: req.parent_session_id.clone(),
                     })
                     .await;
-                if verdict.decision != Decision::Allow {
+                let mut continue_text: Option<String> = None;
+                match verdict.decision {
+                    Decision::Allow => {}
+                    Decision::Deny => {
+                        continue_text = Some(verdict.reason.clone().unwrap_or_else(|| {
+                            crate::run::DEFAULT_STOP_CONTINUE_PROMPT.to_string()
+                        }));
+                    }
+                    Decision::Ask => {
+                        let req_perm = otto_tools::build_hook_permission_request(
+                            "subagent_stop",
+                            &verdict,
+                            None,
+                        );
+                        let result = self
+                            .permission
+                            .ask(child_session_id.clone(), req_perm)
+                            .await;
+                        let outcome = otto_tools::interpret_hook_ask_result(result, &verdict);
+                        if !outcome.approved {
+                            continue_text = Some(outcome.message.unwrap_or_else(|| {
+                                crate::run::DEFAULT_STOP_CONTINUE_PROMPT.to_string()
+                            }));
+                        }
+                    }
+                }
+                if let Some(text) = continue_text {
                     subagent_stop_iterations += 1;
                     if subagent_stop_iterations > MAX_SUBAGENT_STOP_ITERATIONS {
                         return Err(ToolError::Execution(format!(
                             "subagent_stop hook denied {MAX_SUBAGENT_STOP_ITERATIONS} times in a row without terminating"
                         )));
                     }
-                    let text = verdict
-                        .reason
-                        .unwrap_or_else(|| crate::run::DEFAULT_STOP_CONTINUE_PROMPT.to_string());
                     crate::run::synthesize_continuation(&cfg, &child_session_id, &text)
                         .await
                         .map_err(storage_err)?;
