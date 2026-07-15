@@ -206,6 +206,33 @@ async fn undecodable_frames_are_skipped_not_fatal() {
 }
 
 #[tokio::test]
+async fn frame_with_two_undelimited_events_is_recovered() {
+    // Observed against real Vertex AI traffic: the SSE proxy sometimes omits
+    // the blank-line event terminator between two consecutive chunks, so the
+    // (spec-compliant) framer joins them into one `data:` frame containing
+    // two complete, independently-valid JSON events separated by a bare `\n`
+    // — `{"a":1}\n{"b":2}` instead of two separate frames. Both events must
+    // still be processed, not dropped as one undecodable frame.
+    let frames = vec![
+        r#"{"type":"text","id":"t1","text":"Hello"}"#.to_string(),
+        format!(
+            "{}\n{}",
+            r#"{"type":"text","id":"t1","text":" wor"}"#,
+            r#"{"type":"text","id":"t1","text":"ld"}"#
+        ),
+        r#"{"type":"finish"}"#.to_string(),
+    ];
+    let response = client(frames).generate(request()).await.expect("generate");
+    assert_eq!(
+        response.message.content,
+        vec![ContentPart::Text {
+            text: "Hello world".into(),
+            cache: None
+        }]
+    );
+}
+
+#[tokio::test]
 async fn all_garbage_stream_fails_retryably() {
     // Zero decodable frames must fail as ProviderRetryable (retry with
     // backoff), not as a fatal EventDecode and not as a silent empty attempt.

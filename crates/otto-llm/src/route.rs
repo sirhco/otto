@@ -146,26 +146,60 @@ where
 
         while let Some(frame) = frames.next().await {
             let frame = frame?;
-            let event = match protocol.decode_event(&frame) {
-                Ok(event) => event,
+            let events: Vec<P::Event> = match protocol.decode_event(&frame) {
+                Ok(event) => vec![event],
                 Err(e) => {
-                    skipped += 1;
-                    let preview: String = frame.chars().take(120).collect();
-                    tracing::warn!(skipped, error = %e, frame = %preview, "skipping undecodable stream frame");
-                    if skipped >= MAX_SKIPPED_FRAMES {
-                        Err(LLMError::ProviderRetryable(format!(
-                            "{skipped} undecodable stream frames (last: {e})"
-                        )))?;
+                    // Some providers' SSE proxies (observed against real
+                    // Vertex AI traffic) omit the blank-line event terminator
+                    // between consecutive chunks, so the framer's
+                    // spec-compliant multi-line `data:` join merges two
+                    // independent JSON events into one frame
+                    // (`{...}\n{...}`), which fails to parse as a single
+                    // value. Recover by treating each `\n`-separated,
+                    // non-blank line as its own event when every line
+                    // independently decodes; otherwise fall through to the
+                    // original skip-and-count path using the original error.
+                    let lines: Vec<&str> = frame
+                        .split('\n')
+                        .filter(|l| !l.trim().is_empty())
+                        .collect();
+                    let recovered = (lines.len() > 1)
+                        .then(|| {
+                            lines
+                                .iter()
+                                .map(|l| protocol.decode_event(l).ok())
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .flatten();
+                    match recovered {
+                        Some(events) => events,
+                        None => {
+                            skipped += 1;
+                            let preview: String = frame.chars().take(120).collect();
+                            tracing::warn!(skipped, error = %e, frame = %preview, "skipping undecodable stream frame");
+                            if skipped >= MAX_SKIPPED_FRAMES {
+                                Err(LLMError::ProviderRetryable(format!(
+                                    "{skipped} undecodable stream frames (last: {e})"
+                                )))?;
+                            }
+                            continue;
+                        }
                     }
-                    continue;
                 }
             };
             decoded += 1;
-            let is_terminal = protocol.terminal(&event);
-            for out in protocol.step(&mut state, event)? {
-                yield out;
+            let mut saw_terminal = false;
+            for event in events {
+                let is_terminal = protocol.terminal(&event);
+                for out in protocol.step(&mut state, event)? {
+                    yield out;
+                }
+                if is_terminal {
+                    saw_terminal = true;
+                    break;
+                }
             }
-            if is_terminal {
+            if saw_terminal {
                 break;
             }
         }
