@@ -305,6 +305,11 @@ pub struct ProviderOptions {
     pub base_url: Option<String>,
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
+    /// GCP project id — required for `provider.vertex`, ignored elsewhere.
+    pub project: Option<String>,
+    /// GCP region, e.g. `"us-central1"` — optional for `provider.vertex`
+    /// (defaults to `"us-central1"` when unset), ignored elsewhere.
+    pub location: Option<String>,
 }
 
 /// One `provider.<id>` config entry (extra opencode keys — name/npm/env — ignored).
@@ -400,6 +405,39 @@ mod tests {
             Some("https://api.co/v1")
         );
         assert_eq!(ov["myco"].options.api_key.as_deref(), Some("sk-1"));
+    }
+
+    #[test]
+    fn provider_overrides_parses_vertex_project_and_location() {
+        let cfg: Config = serde_json::from_value(serde_json::json!({
+            "provider": {
+                "vertex": {
+                    "options": { "project": "my-gcp-project", "location": "europe-west1" }
+                }
+            }
+        }))
+        .unwrap();
+        let ov = cfg.provider_overrides();
+        assert_eq!(
+            ov["vertex"].options.project.as_deref(),
+            Some("my-gcp-project")
+        );
+        assert_eq!(
+            ov["vertex"].options.location.as_deref(),
+            Some("europe-west1")
+        );
+    }
+
+    #[test]
+    fn provider_overrides_vertex_location_defaults_to_none_when_unset() {
+        let cfg: Config = serde_json::from_value(serde_json::json!({
+            "provider": {
+                "vertex": { "options": { "project": "my-gcp-project" } }
+            }
+        }))
+        .unwrap();
+        let ov = cfg.provider_overrides();
+        assert_eq!(ov["vertex"].options.location, None);
     }
 
     #[test]
