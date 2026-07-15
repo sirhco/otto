@@ -4,6 +4,26 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.7.0] - 2026-07-15
+
+### Added
+
+- **`otto workflow sdd/tdd/plan` is now actually cancellable.** `WfCtx` had
+  no cancellation field at all — every workflow engine constructed its own
+  disconnected `CancellationToken`, so Ctrl+C in the CLI and
+  `POST /workflow/{session}/cancel` on the server (which already built and
+  registered a real, working token!) had zero effect on a running engine.
+  The CLI now wires `Ctrl+C` the same way plain `otto run` does; the server
+  threads its already-existing per-session token through.
+
+### Fixed
+
+- **A single unparseable review verdict crashed the entire `sdd` run**,
+  discarding every other task's already-completed result. `SddWorkflow::drive`
+  now degrades just the affected task (to `NEEDS_CONTEXT` or `BLOCKED`) and
+  continues — the same fix also applies when cancellation cuts a review
+  turn short mid-run.
+
 ## [0.6.1] - 2026-07-15
 
 ### Fixed
