@@ -4,6 +4,36 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.5.0] - 2026-07-15
+
+### Added
+
+- **Hook `ask` verdicts now escalate through a real interactive prompt**
+  instead of being treated identically to `deny`. All four blocking
+  lifecycle-hook events (`PreToolUse`, `UserPromptSubmit`, `Stop`,
+  `SubagentStop`) route an `ask` verdict through the same permission
+  ask/reply flow tool-call permissions already use — the TUI overlay, CLI
+  `y/n/a` prompt, and server `/permission/{id}/reply` all handle a
+  hook-originated ask exactly like a tool-call one, under a new `hook`
+  permission bucket (so existing mode/ruleset config — full-auto,
+  approve-each, danger rules — applies to hook asks for free). A human's
+  typed rejection message now reaches the model/turn the same way a hook's
+  own `reason` does (previously dropped for every kind of permission
+  rejection, not just hooks). `deny` verdicts are unchanged.
+
+### Fixed
+
+- **TUI command palette (`ctrl+k`) showed stale or entirely wrong
+  keybindings** next to several commands — `Switch session…`/
+  `Change model…` displayed keys (`s`/`m`) that don't exist (they're
+  palette-only), and `Change agent…`/`Toggle tool detail`/`Quit` showed
+  bare letters (`g`/`t`/`q`) left over from before those bindings moved to
+  ctrl-chords. Corrected, with a regression test guarding against future
+  drift.
+- **TUI: the mid-turn "turn in flight" warning used the same ✓ checkmark**
+  as success confirmations like "copied"/"attached". It now renders with a
+  distinct ⚠ warning glyph/color.
+
 ## [0.4.0] - 2026-07-15
 
 ### Added
