@@ -70,6 +70,18 @@ impl PlanWorkflow {
         let mut out = Vec::with_capacity(self.tasks.len());
 
         for t in &self.tasks {
+            if abort.is_cancelled() {
+                crate::emit(
+                    &progress,
+                    Some(t.index),
+                    "CANCELLED",
+                    "cancelled before start",
+                );
+                return Ok(PlanReport {
+                    tasks: out,
+                    completed: false,
+                });
+            }
             // Execute the task (single spawn — sequential, so commits are safe).
             let text = self
                 .spawn_task(spawner, t, parent, &abort, &subagent)
@@ -166,7 +178,7 @@ impl crate::Workflow for PlanWorkflow {
             cx.store.clone(),
             &cx.directory,
             &cx.parent_session_id,
-            CancellationToken::new(),
+            cx.abort.clone(),
             cx.progress.clone(),
             cx.subagent.clone(),
         )
@@ -352,6 +364,42 @@ mod tests {
             got.iter()
                 .any(|e| e.task_index == Some(1) && e.status == "VERIFYING"),
             "expected a VERIFYING event for task 1: {got:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_before_the_next_task_and_reports_incomplete() {
+        use otto_tools::{SubagentRequest, SubagentSpawner, ToolError};
+        struct AlwaysDoneSpawner;
+        #[async_trait::async_trait]
+        impl SubagentSpawner for AlwaysDoneSpawner {
+            async fn spawn(&self, _req: SubagentRequest) -> Result<String, ToolError> {
+                Ok("done\n{\"status\": \"DONE\"}".to_string())
+            }
+        }
+        let store = otto_storage::Store::open_in_memory().await.unwrap();
+        let spawner: Arc<dyn SubagentSpawner> = Arc::new(AlwaysDoneSpawner);
+        let dir = tempfile::tempdir().unwrap();
+        let tasks = parse_plan_tasks("### Task 1: A\na\n### Task 2: B\nb\n");
+        let abort = CancellationToken::new();
+        abort.cancel();
+        let wf = PlanWorkflow::new(tasks);
+        let report = wf
+            .drive(
+                &spawner,
+                store,
+                dir.path(),
+                "ses_plancancel",
+                abort,
+                None,
+                None,
+            )
+            .await
+            .expect("cancellation must not be a hard Err");
+        assert!(!report.completed);
+        assert!(
+            report.tasks.is_empty(),
+            "no task should have been dispatched once already cancelled"
         );
     }
 }

@@ -235,7 +235,7 @@ impl crate::Workflow for TddWorkflow {
             cx.runner.as_ref(),
             &cx.directory,
             &cx.parent_session_id,
-            CancellationToken::new(),
+            cx.abort.clone(),
             cx.progress.clone(),
             cx.subagent.clone(),
         )
