@@ -25,9 +25,13 @@ tokio.workspace = true
 tokio-util.workspace = true
 thiserror.workspace = true
 futures.workspace = true
+gcloud-auth.workspace = true
+token-source.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 async-stream.workspace = true
+time = "0.3"

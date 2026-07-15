@@ -24,9 +24,11 @@
 mod route_factory;
 mod runtime;
 mod title;
+mod vertex_auth;
 
 pub use route_factory::{AuthRouteFactory, RouteFactory, default_model};
 pub use runtime::{RunHandle, Runtime};
+pub use vertex_auth::{VertexAuth, VertexTokenCache};
 
 /// Result alias for fallible runtime-assembly operations.
 pub type Result<T> = std::result::Result<T, Error>;
