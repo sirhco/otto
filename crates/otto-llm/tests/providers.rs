@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use otto_llm::Secret;
 use otto_llm::auth::AuthDef;
-use otto_llm::providers::{Anthropic, Azure, Google, OpenAI, OpenAICompatible, Provider};
+use otto_llm::providers::{Anthropic, Azure, Google, OpenAI, OpenAICompatible, Provider, Vertex};
 use otto_llm::transport::HttpTransport;
 
 fn transport() -> Arc<HttpTransport> {
@@ -212,4 +212,40 @@ fn google_without_key_reads_env() {
         }
         other => panic!("expected env-backed x-goog-api-key header, got {other:?}"),
     }
+}
+
+#[test]
+fn vertex_endpoint_uses_project_location_and_bearer_auth() {
+    let t = transport();
+    let p = Vertex::new("my-proj", "us-central1", Secret::literal("tok-123"), t);
+
+    let url = p.endpoint("gemini-2.5-pro").url();
+    assert_eq!(
+        url,
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    );
+
+    let mut headers = std::collections::BTreeMap::new();
+    p.auth().apply(&mut headers).expect("apply auth");
+    assert_eq!(
+        headers.get("authorization").map(String::as_str),
+        Some("Bearer tok-123")
+    );
+    assert!(!headers.contains_key("x-goog-api-key"));
+
+    assert_eq!(p.route("gemini-2.5-pro").id(), "gemini");
+    assert_eq!(p.id(), "vertex");
+}
+
+#[test]
+fn vertex_endpoint_reflects_a_different_location() {
+    let p = Vertex::new(
+        "my-proj",
+        "europe-west1",
+        Secret::literal("tok"),
+        transport(),
+    );
+    let url = p.endpoint("gemini-2.5-flash").url();
+    assert!(url.starts_with("https://europe-west1-aiplatform.googleapis.com/"));
+    assert!(url.contains("/locations/europe-west1/"));
 }

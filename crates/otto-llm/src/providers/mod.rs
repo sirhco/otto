@@ -23,6 +23,7 @@ mod copilot;
 mod google;
 mod openai;
 mod openai_compatible;
+mod vertex;
 
 use std::sync::Arc;
 
@@ -37,6 +38,7 @@ pub use copilot::Copilot;
 pub use google::Google;
 pub use openai::OpenAI;
 pub use openai_compatible::OpenAICompatible;
+pub use vertex::Vertex;
 
 /// A configured provider that can build routes and clients for its models.
 ///

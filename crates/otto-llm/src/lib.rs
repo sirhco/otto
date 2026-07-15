@@ -42,7 +42,7 @@ pub use message::{ContentPart, Message, Role, SystemPart, ToolChoice, ToolDefini
 pub use model::{Model, ModelCapabilities, ModelCost, ModelId, ModelLimits, ProviderId};
 pub use protocol::Protocol;
 pub use providers::{
-    Anthropic, Azure, Bedrock, Copilot, Google, OpenAI, OpenAICompatible, Provider,
+    Anthropic, Azure, Bedrock, Copilot, Google, OpenAI, OpenAICompatible, Provider, Vertex,
 };
 pub use registry::{lookup, model_or_default, parse_model};
 pub use request::{
