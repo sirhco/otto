@@ -8,6 +8,7 @@ use otto_permission::Ruleset;
 use otto_storage::Store;
 use otto_tools::SubagentSpawner;
 use otto_vcs::worktree::Worktree;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::WfError;
 use crate::runner::TestRunner;
@@ -25,6 +26,13 @@ pub struct WfCtx {
     pub permission: Arc<Ruleset>,
     pub progress: Option<ProgressSink>,
     pub subagent: Option<SubagentSink>,
+    /// Cancelled when the caller wants a running workflow to stop starting
+    /// new work. A genuinely cancellable token from the caller (CLI:
+    /// `tokio::signal::ctrl_c()`; server: the per-session token
+    /// `POST /workflow/{session}/cancel` cancels) — NOT a fresh
+    /// `CancellationToken::new()` constructed inside a `Workflow::run` impl,
+    /// which nothing external could ever cancel.
+    pub abort: CancellationToken,
 }
 
 /// A single workflow progress event (side-channel; never gates control flow).
