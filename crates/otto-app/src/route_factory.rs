@@ -8,7 +8,7 @@ use otto_agent::ModelRef;
 use otto_auth::{AuthMap, Credential};
 use otto_llm::{
     Anthropic, AwsCredentials, Azure, Bedrock, Copilot, Google, HttpTransport, Model, OpenAI,
-    OpenAICompatible, Provider, Route, Secret,
+    OpenAICompatible, Provider, Route, Secret, Vertex,
 };
 
 use crate::{Error, Result};
@@ -31,6 +31,12 @@ pub struct ProviderOverride {
     /// doesn't know (local ollama models) before the provider silently
     /// truncates the prompt.
     pub model_limits: HashMap<String, ModelLimitsOverride>,
+    /// GCP project id (`provider.vertex.options.project`). Only meaningful
+    /// for the `vertex` provider id.
+    pub project: Option<String>,
+    /// GCP region (`provider.vertex.options.location`). Only meaningful for
+    /// the `vertex` provider id.
+    pub location: Option<String>,
 }
 
 /// One config-declared `limits` block (see [`ProviderOverride::model_limits`]).
@@ -83,6 +89,7 @@ pub struct AuthRouteFactory {
     auth: AuthMap,
     transport: Arc<HttpTransport>,
     providers: HashMap<String, ProviderOverride>,
+    vertex_auth: Option<Arc<dyn crate::vertex_auth::VertexAuth>>,
 }
 
 impl AuthRouteFactory {
@@ -99,7 +106,20 @@ impl AuthRouteFactory {
             auth,
             transport,
             providers,
+            vertex_auth: None,
         }
+    }
+
+    /// Attach the live GCP token source for Vertex AI routes. Left unset
+    /// when `provider.vertex` isn't configured — no `gcloud-auth` cost for
+    /// runtimes that never use Vertex.
+    #[must_use]
+    pub fn with_vertex_auth(
+        mut self,
+        vertex_auth: Arc<dyn crate::vertex_auth::VertexAuth>,
+    ) -> Self {
+        self.vertex_auth = Some(vertex_auth);
+        self
     }
 
     /// The key material for `provider`, if stored. `None` lets the provider fall
@@ -203,6 +223,34 @@ impl RouteFactory for AuthRouteFactory {
                     )
                 })?;
                 let p = Bedrock::new(creds);
+                (Arc::from(p.route(model_id)), p.model(model_id))
+            }
+            "vertex" => {
+                let ov = self
+                    .providers
+                    .get("vertex")
+                    .and_then(|ov| ov.project.clone());
+                let project = ov.ok_or_else(|| {
+                    Error::Route(
+                        "vertex: no project configured (set provider.vertex.options.project)"
+                            .to_string(),
+                    )
+                })?;
+                let location = self
+                    .providers
+                    .get("vertex")
+                    .and_then(|ov| ov.location.clone())
+                    .unwrap_or_else(|| "us-central1".to_string());
+                let auth = self.vertex_auth.as_ref().ok_or_else(|| {
+                    Error::Route("vertex: credentials not initialized".to_string())
+                })?;
+                let token = auth.current_token()?;
+                let p = Vertex::new(
+                    project,
+                    location,
+                    Secret::literal(token),
+                    self.transport.clone(),
+                );
                 (Arc::from(p.route(model_id)), p.model(model_id))
             }
             "github-copilot" => {
@@ -320,6 +368,8 @@ mod tests {
                 base_url: "http://localhost:11434/v1".to_string(),
                 api_key: None,
                 model_limits,
+                project: None,
+                location: None,
             },
         );
         let factory = AuthRouteFactory::new(AuthMap::new(), test_transport(), providers);
@@ -349,6 +399,8 @@ mod tests {
                 base_url: "http://localhost:11434/v1".to_string(),
                 api_key: None,
                 model_limits: HashMap::new(),
+                project: None,
+                location: None,
             },
         );
         let factory = AuthRouteFactory::new(AuthMap::new(), test_transport(), providers);
@@ -380,6 +432,8 @@ mod tests {
                 base_url: "http://litellm:4000/v1".to_string(),
                 api_key: Some("sk-litellm".to_string()),
                 model_limits: HashMap::new(),
+                project: None,
+                location: None,
             },
         );
         let factory = AuthRouteFactory::new(AuthMap::new(), test_transport(), providers);
@@ -398,6 +452,94 @@ mod tests {
         let p = otto_llm::providers::Anthropic::new(None, test_transport())
             .with_base_url("http://litellm:4000/v1");
         assert_eq!(p.endpoint().url(), "http://litellm:4000/v1/messages");
+    }
+
+    /// A fake [`VertexAuth`] for tests — returns a fixed token, no ADC, no
+    /// network, no background task.
+    struct FakeVertexAuth(&'static str);
+
+    impl crate::vertex_auth::VertexAuth for FakeVertexAuth {
+        fn current_token(&self) -> Result<String> {
+            Ok(self.0.to_string())
+        }
+    }
+
+    /// `provider.vertex.options.project`/`location` reach the Vertex arm,
+    /// which builds the GCP project/location URL and stamps the cached
+    /// token as a Bearer header.
+    #[test]
+    fn vertex_arm_builds_endpoint_from_project_and_location() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "vertex".to_string(),
+            ProviderOverride {
+                base_url: String::new(),
+                api_key: None,
+                model_limits: HashMap::new(),
+                project: Some("my-proj".to_string()),
+                location: Some("europe-west1".to_string()),
+            },
+        );
+        let factory = AuthRouteFactory::new(AuthMap::new(), test_transport(), providers)
+            .with_vertex_auth(Arc::new(FakeVertexAuth("fake-tok")));
+
+        let (route, model) = factory
+            .route_for(&ModelRef::parse("vertex/gemini-2.5-pro"))
+            .expect("route builds");
+        assert_eq!(route.id(), "gemini");
+        assert_eq!(model.route_id, "gemini");
+
+        let p = otto_llm::providers::Vertex::new(
+            "my-proj",
+            "europe-west1",
+            otto_llm::Secret::literal("fake-tok"),
+            test_transport(),
+        );
+        assert_eq!(
+            p.endpoint("gemini-2.5-pro").url(),
+            "https://europe-west1-aiplatform.googleapis.com/v1/projects/my-proj/locations/europe-west1/publishers/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+        );
+    }
+
+    /// Missing `provider.vertex.options.project` is a clear config error, not
+    /// a panic or a silently-broken route.
+    #[test]
+    fn vertex_arm_errors_when_project_missing() {
+        let factory = AuthRouteFactory::new(AuthMap::new(), test_transport(), HashMap::new())
+            .with_vertex_auth(Arc::new(FakeVertexAuth("fake-tok")));
+
+        let err = match factory.route_for(&ModelRef::parse("vertex/gemini-2.5-pro")) {
+            Ok(_) => panic!("should error without project configured"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("project"), "message was: {err}");
+    }
+
+    /// No `VertexTokenCache`/fake installed at all (e.g. `vertex` never
+    /// configured) also errors clearly rather than panicking.
+    #[test]
+    fn vertex_arm_errors_when_no_auth_installed() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "vertex".to_string(),
+            ProviderOverride {
+                base_url: String::new(),
+                api_key: None,
+                model_limits: HashMap::new(),
+                project: Some("my-proj".to_string()),
+                location: None,
+            },
+        );
+        let factory = AuthRouteFactory::new(AuthMap::new(), test_transport(), providers);
+
+        let err = match factory.route_for(&ModelRef::parse("vertex/gemini-2.5-pro")) {
+            Ok(_) => panic!("should error with no VertexAuth installed"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("credentials"),
+            "message was: {err}"
+        );
     }
 
     /// Pins that a non-empty base URL actually reaches the resolved request

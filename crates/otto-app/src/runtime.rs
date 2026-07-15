@@ -72,6 +72,8 @@ fn provider_overrides(config: &Config) -> HashMap<String, ProviderOverride> {
                     base_url,
                     api_key: entry.options.api_key,
                     model_limits,
+                    project: None,
+                    location: None,
                 },
             ))
         })
