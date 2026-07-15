@@ -350,7 +350,7 @@ impl SddWorkflow {
                         } else {
                             TaskStatus::Blocked
                         };
-                        let note = format!("review failed: {e}");
+                        let note = format!("review verdict unusable: {e}");
                         result.status = degraded;
                         ledger.record(t.index, degraded, &note).await?;
                         crate::emit(&progress, Some(t.index), degraded.as_wire(), &note);

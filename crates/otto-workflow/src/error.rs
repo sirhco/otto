@@ -27,8 +27,6 @@ pub enum WfError {
     Gate(String),
     #[error(transparent)]
     Tool(#[from] otto_tools::ToolError),
-    #[error("cancelled")]
-    Cancelled,
 }
 
 /// The status an implementer/judgment subagent reports (SDD's 4-status
@@ -151,11 +149,5 @@ mod tests {
             Some(TaskStatus::Cancelled)
         );
         assert_eq!(TaskStatus::Cancelled.as_wire(), "CANCELLED");
-    }
-
-    #[test]
-    fn wf_error_cancelled_displays() {
-        let e = WfError::Cancelled;
-        assert_eq!(e.to_string(), "cancelled");
     }
 }
