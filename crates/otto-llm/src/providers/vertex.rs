@@ -6,6 +6,8 @@
 //! (GCP project/location URL) and auth (`Authorization: Bearer`, resolved
 //! upstream from Application Default Credentials — see
 //! `otto-app`'s `vertex_auth` module, not present in this crate).
+//!
+//! otto extension: no opencode analog (opencode has no native Vertex AI provider).
 
 use std::sync::Arc;
 

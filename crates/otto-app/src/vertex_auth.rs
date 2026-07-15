@@ -6,6 +6,8 @@
 //! fetch as part of (async) `Runtime::load`, then a background task keeps a
 //! `tokio::sync::watch` channel fresh; [`VertexTokenCache::current_token`]
 //! reads it with a non-blocking `.borrow().clone()`.
+//!
+//! otto extension: no opencode analog (opencode has no ADC/service-account auth path).
 
 use std::sync::Arc;
 use std::time::Duration;
