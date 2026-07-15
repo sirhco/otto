@@ -580,10 +580,7 @@ fn render_scrolled(
         .saturating_sub(1);
     let residual = offset.saturating_sub(line_wrap_starts.get(idx).copied().unwrap_or(0));
     let para = Paragraph::new(lines[idx.min(lines.len())..].to_vec()).wrap(Wrap { trim: false });
-    frame.render_widget(
-        para.scroll((residual.min(u32::from(u16::MAX)) as u16, 0)),
-        area,
-    );
+    frame.render_widget(para.scroll((residual.min(u32::from(u16::MAX)) as u16, 0)), area);
 }
 
 /// Restyle the matched substrings of an active search in place. For each line,
@@ -1459,7 +1456,10 @@ mod tests {
             c.lines.len(),
             "one start per assembled line"
         );
-        assert!(c.wrap_total >= target_row, "total covers every line's rows");
+        assert!(
+            c.wrap_total >= target_row,
+            "total covers every line's rows"
+        );
     }
 
     /// A render must publish the scroll bound so `App::scroll_up` clamps
