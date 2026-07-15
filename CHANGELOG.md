@@ -4,6 +4,33 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.6.0] - 2026-07-15
+
+### Added
+
+- **Native Google Vertex AI provider** (`vertex/<model>`, Gemini models
+  only) — authenticates via GCP Application Default Credentials (the
+  `gcloud-auth` crate) instead of a static API key, reusing the existing
+  Gemini wire protocol against Vertex's project/location endpoint
+  (`https://{location}-aiplatform.googleapis.com/...`). An async
+  ADC-backed token cache refreshes the bearer token in the background (a
+  `tokio::sync::watch` channel bridges it into the fully-synchronous route
+  builder), fetching an initial token at startup so bad/missing GCP
+  credentials fail immediately rather than on the first chat turn.
+  Configure with `provider.vertex.options.project` (required) and
+  `.location` (optional, defaults `us-central1`):
+  ```json
+  {
+    "model": "vertex/gemini-2.5-pro",
+    "provider": {
+      "vertex": {
+        "options": { "project": "my-gcp-project", "location": "us-central1" },
+        "models": { "gemini-2.5-pro": { "limits": { "context": 1048576, "output": 8192 } } }
+      }
+    }
+  }
+  ```
+
 ## [0.5.0] - 2026-07-15
 
 ### Added
