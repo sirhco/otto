@@ -26,6 +26,11 @@ const VERTEX_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const REFRESH_MARGIN_SECS: i64 = 300;
 /// Backoff before retrying a failed background refresh.
 const RETRY_BACKOFF_SECS: u64 = 30;
+/// Never sleep less than this between refresh attempts, even for a
+/// short-TTL token (workload-identity-federation / downscoped tokens can
+/// have TTLs shorter than `REFRESH_MARGIN_SECS`) — prevents a busy loop
+/// hammering the token endpoint.
+const MIN_REFRESH_SLEEP_SECS: u64 = 5;
 
 /// Resolves a live GCP bearer token for Vertex AI requests. Implemented by
 /// [`VertexTokenCache`] (real ADC-backed); tests inject a fake.
@@ -150,7 +155,8 @@ async fn refresh_loop(
         let sleep_secs = match current.expiry_unix_secs {
             Some(expiry) => (expiry - now_unix_secs() - REFRESH_MARGIN_SECS).max(0) as u64,
             None => REFRESH_MARGIN_SECS as u64,
-        };
+        }
+        .max(MIN_REFRESH_SLEEP_SECS);
         tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
         match fetch(&source).await {
             Ok(token) => {
@@ -295,5 +301,37 @@ mod tests {
             .expect("cache builds");
         let err = cache.current_token().expect_err("should be expired");
         assert!(err.to_string().contains("expired"), "message was: {err}");
+    }
+
+    /// A short-TTL token (below `REFRESH_MARGIN_SECS`) must not make the
+    /// background refresh loop spin: the `MIN_REFRESH_SLEEP_SECS` floor
+    /// should keep it from re-fetching in a tight loop. We can't observe
+    /// "zero" refreshes directly (the loop is timing-based and will
+    /// eventually refresh), but shortly after construction the fake's call
+    /// counter should still read 1 (just the initial fetch) rather than
+    /// having already spun through many cycles.
+    #[tokio::test]
+    async fn short_ttl_token_does_not_busy_loop_the_background_refresh() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let almost_expired = time::OffsetDateTime::now_utc().unix_timestamp() + 1;
+        let source: Arc<dyn TokenSource> = Arc::new(FakeTokenSource {
+            access_token: "short-ttl-token".to_string(),
+            expiry_unix_secs: Some(almost_expired),
+            calls: calls.clone(),
+        });
+
+        let cache = VertexTokenCache::from_source(source)
+            .await
+            .expect("cache builds");
+        assert_eq!(cache.current_token().unwrap(), "short-ttl-token");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the background loop must not busy-spin refetching a short-TTL token; \
+             the MIN_REFRESH_SLEEP_SECS floor should keep it asleep for this window"
+        );
     }
 }

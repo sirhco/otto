@@ -26,7 +26,6 @@ tokio-util.workspace = true
 thiserror.workspace = true
 futures.workspace = true
 gcloud-auth.workspace = true
-token-source.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
