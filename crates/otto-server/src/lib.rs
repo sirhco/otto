@@ -545,7 +545,13 @@ async fn session_prompt(
         return Err(ApiError::bad_request("empty prompt"));
     }
     // Session must exist before we spend a turn on it.
-    if state.runtime.store().get_session(&SessionId::from(&id)).await?.is_none() {
+    if state
+        .runtime
+        .store()
+        .get_session(&SessionId::from(&id))
+        .await?
+        .is_none()
+    {
         return Err(ApiError::not_found(format!("session {id} not found")));
     }
 
@@ -607,8 +613,9 @@ async fn session_prompt(
         match resolved {
             Ok(parts) => extra_parts.extend(parts),
             Err(message) => {
-                return Ok((StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
-                    .into_response());
+                return Ok(
+                    (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+                );
             }
         }
     }
@@ -1025,6 +1032,12 @@ async fn workflow_run(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?,
     );
+    let events = state.events.clone();
+    let abort = CancellationToken::new();
+    // Register the run's abort token BEFORE spawning so a cancel that races the
+    // spawn still finds it; `spawn_workflow` removes it when the run ends.
+    let generation = state.workflows.insert(&session_id, abort.clone());
+
     let cx = otto_workflow::WfCtx {
         spawner,
         worktree,
@@ -1035,13 +1048,8 @@ async fn workflow_run(
         permission: Arc::new(otto_permission::Ruleset::default()),
         progress: None,
         subagent: None,
+        abort: abort.clone(),
     };
-
-    let events = state.events.clone();
-    let abort = CancellationToken::new();
-    // Register the run's abort token BEFORE spawning so a cancel that races the
-    // spawn still finds it; `spawn_workflow` removes it when the run ends.
-    let generation = state.workflows.insert(&session_id, abort.clone());
     spawn_workflow(
         kind,
         body.arg,
