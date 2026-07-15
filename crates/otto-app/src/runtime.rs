@@ -48,6 +48,8 @@ fn provider_overrides(config: &Config) -> HashMap<String, ProviderOverride> {
                 .base_url
                 .filter(|u| !u.trim().is_empty())
                 .unwrap_or_default();
+            let project = entry.options.project.filter(|p| !p.trim().is_empty());
+            let location = entry.options.location.filter(|l| !l.trim().is_empty());
             let model_limits: HashMap<String, crate::route_factory::ModelLimitsOverride> = entry
                 .models
                 .into_iter()
@@ -63,7 +65,7 @@ fn provider_overrides(config: &Config) -> HashMap<String, ProviderOverride> {
                     })
                 })
                 .collect();
-            if base_url.is_empty() && model_limits.is_empty() {
+            if base_url.is_empty() && model_limits.is_empty() && project.is_none() {
                 return None;
             }
             Some((
@@ -72,12 +74,39 @@ fn provider_overrides(config: &Config) -> HashMap<String, ProviderOverride> {
                     base_url,
                     api_key: entry.options.api_key,
                     model_limits,
-                    project: None,
-                    location: None,
+                    project,
+                    location,
                 },
             ))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `provider.vertex.options.project`/`location` survive
+    /// `provider_overrides()` into the `ProviderOverride` map, even though
+    /// `vertex` never has a `baseURL` (the pre-existing filter used to drop
+    /// any entry with an empty `baseURL`, which would have silently
+    /// discarded every Vertex config).
+    #[test]
+    fn provider_overrides_keeps_vertex_entry_without_base_url() {
+        let cfg: Config = serde_json::from_value(serde_json::json!({
+            "provider": {
+                "vertex": {
+                    "options": { "project": "my-proj", "location": "europe-west1" }
+                }
+            }
+        }))
+        .unwrap();
+        let overrides = provider_overrides(&cfg);
+        let vertex = overrides.get("vertex").expect("vertex entry kept");
+        assert_eq!(vertex.project.as_deref(), Some("my-proj"));
+        assert_eq!(vertex.location.as_deref(), Some("europe-west1"));
+        assert_eq!(vertex.base_url, "");
+    }
 }
 
 /// The result of [`Runtime::run`]: the streaming events and the join handle for
@@ -187,11 +216,20 @@ impl Runtime {
         }
         let tools = Arc::new(registry);
 
-        let route_factory: Arc<dyn RouteFactory> = Arc::new(AuthRouteFactory::new(
+        let overrides = provider_overrides(&config);
+        let mut route_factory_builder = AuthRouteFactory::new(
             auth.all().unwrap_or_default(),
             transport.clone(),
-            provider_overrides(&config),
-        ));
+            overrides.clone(),
+        );
+        if overrides
+            .get("vertex")
+            .is_some_and(|ov| ov.project.is_some())
+        {
+            let vertex_cache = crate::vertex_auth::VertexTokenCache::new().await?;
+            route_factory_builder = route_factory_builder.with_vertex_auth(Arc::new(vertex_cache));
+        }
+        let route_factory: Arc<dyn RouteFactory> = Arc::new(route_factory_builder);
 
         let project_id = project_id_for(&directory);
         Ok(Runtime {
