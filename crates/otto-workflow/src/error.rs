@@ -27,6 +27,8 @@ pub enum WfError {
     Gate(String),
     #[error(transparent)]
     Tool(#[from] otto_tools::ToolError),
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// The status an implementer/judgment subagent reports (SDD's 4-status
@@ -38,6 +40,10 @@ pub enum TaskStatus {
     DoneWithConcerns,
     NeedsContext,
     Blocked,
+    /// Engine-assigned only — never expected as a status a subagent reports
+    /// for itself. Set when `drive()` detects the run was cancelled before a
+    /// task's review/fix could start.
+    Cancelled,
 }
 
 impl TaskStatus {
@@ -48,6 +54,7 @@ impl TaskStatus {
             TaskStatus::DoneWithConcerns => "DONE_WITH_CONCERNS",
             TaskStatus::NeedsContext => "NEEDS_CONTEXT",
             TaskStatus::Blocked => "BLOCKED",
+            TaskStatus::Cancelled => "CANCELLED",
         }
     }
     #[must_use]
@@ -57,6 +64,7 @@ impl TaskStatus {
             "DONE_WITH_CONCERNS" => Some(TaskStatus::DoneWithConcerns),
             "NEEDS_CONTEXT" => Some(TaskStatus::NeedsContext),
             "BLOCKED" => Some(TaskStatus::Blocked),
+            "CANCELLED" => Some(TaskStatus::Cancelled),
             _ => None,
         }
     }
@@ -130,5 +138,24 @@ mod tests {
         assert!(matches!(d, Step::Done));
         let g: Step<u8> = Step::Gate(GateFail { reason: "x".into() });
         assert!(matches!(g, Step::Gate(_)));
+    }
+
+    #[test]
+    fn task_status_cancelled_round_trips() {
+        assert_eq!(
+            serde_json::from_str::<TaskStatus>("\"CANCELLED\"").unwrap(),
+            TaskStatus::Cancelled
+        );
+        assert_eq!(
+            TaskStatus::from_wire(TaskStatus::Cancelled.as_wire()),
+            Some(TaskStatus::Cancelled)
+        );
+        assert_eq!(TaskStatus::Cancelled.as_wire(), "CANCELLED");
+    }
+
+    #[test]
+    fn wf_error_cancelled_displays() {
+        let e = WfError::Cancelled;
+        assert_eq!(e.to_string(), "cancelled");
     }
 }
