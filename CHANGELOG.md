@@ -4,6 +4,18 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.6.1] - 2026-07-15
+
+### Fixed
+
+- **Vertex AI turns retry-looped until budget exhaustion (looked like a
+  hang)** — Vertex's `alt=sse` proxy sometimes omits the blank-line event
+  terminator between consecutive chunks, so the SSE framer merged two
+  independent JSON events into one frame, which failed to parse and got
+  classified as a retryable provider failure. The stream decoder now
+  recovers by splitting a failed frame on newlines and decoding each line
+  independently when every line parses on its own.
+
 ## [0.6.0] - 2026-07-15
 
 ### Added
