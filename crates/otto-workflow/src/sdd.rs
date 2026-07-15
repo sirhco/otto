@@ -193,11 +193,15 @@ impl SddWorkflow {
         }
     }
 
-    /// Drive the full SDD loop against explicit collaborators.
+    /// Drive the full SDD loop against explicit collaborators. An
+    /// unparseable review verdict or a mid-run cancellation degrades the
+    /// affected task's status rather than failing the whole run — this
+    /// always returns `Ok` unless a genuine infrastructure failure (ledger
+    /// write, duplicate task index) occurs.
     ///
     /// # Errors
-    /// Returns [`WfError`] on a ledger write failure or an unparseable review
-    /// verdict.
+    /// Returns [`WfError`] on a ledger write failure or a duplicate task
+    /// index.
     pub async fn drive(
         &self,
         spawner: &Arc<dyn SubagentSpawner>,
@@ -220,6 +224,30 @@ impl SddWorkflow {
         }
 
         let ledger = Ledger::new(store, parent, "sdd");
+
+        // Nothing to salvage if we were already cancelled before starting —
+        // mark every task Cancelled and dispatch nothing.
+        if abort.is_cancelled() {
+            let mut out = Vec::with_capacity(self.tasks.len());
+            for t in &self.tasks {
+                ledger
+                    .record(t.index, TaskStatus::Cancelled, "cancelled before start")
+                    .await?;
+                crate::emit(
+                    &progress,
+                    Some(t.index),
+                    "CANCELLED",
+                    "cancelled before start",
+                );
+                out.push(TaskResult {
+                    index: t.index,
+                    status: TaskStatus::Cancelled,
+                    reviewed: false,
+                    approved: false,
+                });
+            }
+            return Ok(SddReport { tasks: out });
+        }
 
         // --- Phase A: fan out ALL implementers in one parallel batch ---
         // Announce every task as running BEFORE the batch await. `spawn_many`
@@ -288,11 +316,47 @@ impl SddWorkflow {
                 out.push(result);
                 continue;
             }
+            if abort.is_cancelled() {
+                result.status = TaskStatus::Cancelled;
+                ledger
+                    .record(t.index, TaskStatus::Cancelled, "cancelled before review")
+                    .await?;
+                crate::emit(
+                    &progress,
+                    Some(t.index),
+                    "CANCELLED",
+                    "cancelled before review",
+                );
+                out.push(result);
+                continue;
+            }
             result.reviewed = true;
             let mut round = 0u32;
             loop {
                 crate::emit(&progress, Some(t.index), "REVIEWING", "");
-                let verdict = self.review(spawner, t, parent, &abort, &subagent).await?;
+                let verdict = match self.review(spawner, t, parent, &abort, &subagent).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // An unparseable verdict (bad JSON, or a turn cut
+                        // short by cancellation) must not abort the whole
+                        // run — degrade this ONE task and let the others
+                        // finish. Mirrors the implementer path's existing
+                        // "unclear output -> NeedsContext" philosophy; a
+                        // genuine spawn/infra failure inside review() gets
+                        // Blocked instead, matching the implementer path's
+                        // Ok/Err distinction.
+                        let degraded = if matches!(e, WfError::Parse(_)) {
+                            TaskStatus::NeedsContext
+                        } else {
+                            TaskStatus::Blocked
+                        };
+                        let note = format!("review failed: {e}");
+                        result.status = degraded;
+                        ledger.record(t.index, degraded, &note).await?;
+                        crate::emit(&progress, Some(t.index), degraded.as_wire(), &note);
+                        break;
+                    }
+                };
                 if verdict.approved {
                     result.approved = true;
                     result.status = TaskStatus::Done;
@@ -325,8 +389,16 @@ impl SddWorkflow {
                     "FIXING",
                     &format!("round {round}"),
                 );
-                self.fix(spawner, t, &verdict.findings, parent, &abort, &subagent)
-                    .await?;
+                if let Err(e) = self
+                    .fix(spawner, t, &verdict.findings, parent, &abort, &subagent)
+                    .await
+                {
+                    let note = format!("fix failed: {e}");
+                    result.status = TaskStatus::Blocked;
+                    ledger.record(t.index, TaskStatus::Blocked, &note).await?;
+                    crate::emit(&progress, Some(t.index), "BLOCKED", &note);
+                    break;
+                }
             }
             out.push(result);
         }
@@ -462,7 +534,7 @@ impl crate::Workflow for SddWorkflow {
             &cx.spawner,
             cx.store.clone(),
             &cx.parent_session_id,
-            CancellationToken::new(),
+            cx.abort.clone(),
             cx.progress.clone(),
             cx.subagent.clone(),
         )
@@ -717,5 +789,135 @@ mod tests {
         assert!(matches!(err, WfError::Gate(_)), "got {err:?}");
         // Nothing was dispatched.
         assert_eq!(*concrete.batches.lock().unwrap(), 0);
+    }
+
+    /// A spawner whose review response is configurable per task: task 1's
+    /// review returns unparseable text, task 2's review approves normally.
+    /// Implementer prompts always succeed.
+    struct FlakyReviewSpawner {
+        batches: Mutex<u32>,
+    }
+    #[async_trait::async_trait]
+    impl SubagentSpawner for FlakyReviewSpawner {
+        async fn spawn(&self, req: SubagentRequest) -> Result<String, ToolError> {
+            if req.prompt.contains("Review the task") {
+                if req.prompt.contains("Task 1:") {
+                    Ok("I couldn't finish reviewing this.".to_string())
+                } else {
+                    Ok("looks good\n{\"approved\": true, \"findings\": []}".to_string())
+                }
+            } else {
+                Ok("implemented it\n{\"status\": \"DONE\"}".to_string())
+            }
+        }
+        async fn spawn_many(&self, reqs: Vec<SubagentRequest>) -> Vec<Result<String, ToolError>> {
+            *self.batches.lock().unwrap() += 1;
+            let mut out = Vec::with_capacity(reqs.len());
+            for r in reqs {
+                out.push(self.spawn(r).await);
+            }
+            out
+        }
+    }
+
+    #[tokio::test]
+    async fn unparseable_verdict_degrades_one_task_not_the_whole_run() {
+        let store = otto_storage::Store::open_in_memory().await.unwrap();
+        let spawner: Arc<dyn SubagentSpawner> = Arc::new(FlakyReviewSpawner {
+            batches: Mutex::new(0),
+        });
+        let tasks = parse_plan_tasks("### Task 1: A\nbuild a\n### Task 2: B\nbuild b\n");
+        let wf = SddWorkflow::new(tasks);
+        let report = wf
+            .drive(
+                &spawner,
+                store,
+                "ses_flaky",
+                CancellationToken::new(),
+                None,
+                None,
+            )
+            .await
+            .expect("drive must not error on a bad verdict");
+        assert_eq!(report.tasks.len(), 2, "both tasks must still be reported");
+        let t1 = report.tasks.iter().find(|t| t.index == 1).unwrap();
+        assert_eq!(t1.status, TaskStatus::NeedsContext);
+        assert!(!t1.approved);
+        let t2 = report.tasks.iter().find(|t| t.index == 2).unwrap();
+        assert_eq!(t2.status, TaskStatus::Done);
+        assert!(t2.approved);
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_marks_every_task_cancelled_and_dispatches_nothing() {
+        let store = otto_storage::Store::open_in_memory().await.unwrap();
+        let concrete = Arc::new(BatchSpawner {
+            prompts: Mutex::new(vec![]),
+            batches: Mutex::new(0),
+        });
+        let spawner: Arc<dyn SubagentSpawner> = concrete.clone();
+        let tasks = parse_plan_tasks("### Task 1: A\na\n### Task 2: B\nb\n");
+        let abort = CancellationToken::new();
+        abort.cancel();
+        let wf = SddWorkflow::new(tasks);
+        let report = wf
+            .drive(&spawner, store, "ses_cancel", abort, None, None)
+            .await
+            .expect("drive must not error on cancellation");
+        assert_eq!(report.tasks.len(), 2);
+        assert!(
+            report
+                .tasks
+                .iter()
+                .all(|t| t.status == TaskStatus::Cancelled)
+        );
+        assert_eq!(
+            *concrete.batches.lock().unwrap(),
+            0,
+            "nothing should be dispatched once already cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_implementer_phase_stops_review_phase() {
+        // The fake spawner cancels the token as a side effect of its
+        // spawn_many call, simulating "the user hit Ctrl+C while the
+        // implementers were running" without depending on real timing.
+        struct CancelDuringBatchSpawner {
+            abort: CancellationToken,
+        }
+        #[async_trait::async_trait]
+        impl SubagentSpawner for CancelDuringBatchSpawner {
+            async fn spawn(&self, _req: SubagentRequest) -> Result<String, ToolError> {
+                Ok("implemented it\n{\"status\": \"DONE\"}".to_string())
+            }
+            async fn spawn_many(
+                &self,
+                reqs: Vec<SubagentRequest>,
+            ) -> Vec<Result<String, ToolError>> {
+                self.abort.cancel();
+                let mut out = Vec::with_capacity(reqs.len());
+                for r in reqs {
+                    out.push(self.spawn(r).await);
+                }
+                out
+            }
+        }
+        let store = otto_storage::Store::open_in_memory().await.unwrap();
+        let abort = CancellationToken::new();
+        let spawner: Arc<dyn SubagentSpawner> = Arc::new(CancelDuringBatchSpawner {
+            abort: abort.clone(),
+        });
+        let tasks = parse_plan_tasks("### Task 1: A\na\n");
+        let wf = SddWorkflow::new(tasks);
+        let report = wf
+            .drive(&spawner, store, "ses_mid", abort, None, None)
+            .await
+            .expect("drive must not error");
+        // The implementer phase already ran (it reported DONE), but the
+        // review phase must see the cancellation and skip its dispatch.
+        let t1 = &report.tasks[0];
+        assert_eq!(t1.status, TaskStatus::Cancelled);
+        assert!(!t1.reviewed);
     }
 }
