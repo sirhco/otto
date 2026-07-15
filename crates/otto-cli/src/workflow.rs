@@ -83,6 +83,17 @@ impl WorkflowHarness {
                 .set_mode(session_id, PermissionMode::FullAuto);
         }
         let abort = CancellationToken::new();
+        // Ctrl-C cancels the running workflow (mirrors otto-cli/src/run.rs's
+        // plain `otto run` wiring) — this same token is also handed to
+        // WfCtx.abort by every call site below, so a cancel actually stops
+        // the engine from starting new dispatches, not just the permission
+        // pump's teardown.
+        let ctrl_abort = abort.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                ctrl_abort.cancel();
+            }
+        });
         let pump = spawn_permission_pump(
             runtime.permission().clone(),
             Arc::new(TtyResponder {
@@ -233,6 +244,7 @@ async fn run_tdd(cwd: &Path, feature: String, auto: bool) -> Result<()> {
         permission: std::sync::Arc::new(otto_permission::Ruleset::default()),
         progress: Some(harness.progress.clone()),
         subagent: None,
+        abort: harness.abort.clone(),
     };
     let result = TddWorkflow::new(feature).run(&cx).await;
     drop(cx);
@@ -282,6 +294,7 @@ async fn run_sdd(cwd: &Path, plan_path: String, auto: bool) -> Result<()> {
         permission: std::sync::Arc::new(otto_permission::Ruleset::default()),
         progress: Some(harness.progress.clone()),
         subagent: None,
+        abort: harness.abort.clone(),
     };
     let result = SddWorkflow::new(tasks).run(&cx).await;
     drop(cx);
@@ -341,6 +354,7 @@ async fn run_plan(cwd: &Path, plan_path: String, auto: bool) -> Result<()> {
         permission: std::sync::Arc::new(otto_permission::Ruleset::default()),
         progress: Some(harness.progress.clone()),
         subagent: None,
+        abort: harness.abort.clone(),
     };
     let result = PlanWorkflow::new(tasks).run(&cx).await;
     drop(cx);
