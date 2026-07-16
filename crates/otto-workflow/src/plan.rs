@@ -164,6 +164,7 @@ impl PlanWorkflow {
             command: None,
             abort: abort.clone(),
             event_tx: crate::tap_subagent(t.index, subagent),
+            directory: None,
         };
         spawner.spawn(req).await.map_err(WfError::from)
     }

@@ -50,6 +50,7 @@ async fn spawn_text(
         // low-value structured-JSON node whose activity is not worth streaming
         // to the TUI. Leave `event_tx: None` so no tap is attached.
         event_tx: None,
+        directory: None,
     };
     spawner.spawn(req).await.map_err(WfError::from)
 }

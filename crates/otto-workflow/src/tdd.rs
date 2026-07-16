@@ -209,6 +209,7 @@ impl TddWorkflow {
             // The TDD cycle is single-track (no per-task index), so all node
             // activity is tagged under task index 0.
             event_tx: crate::tap_subagent(0, subagent),
+            directory: None,
         };
         spawner.spawn(req).await.map_err(WfError::from)
     }
