@@ -4,6 +4,18 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.8.0] - 2026-07-16
+
+### Added
+
+- **`otto workflow sdd` dispatches implementers in parallel again — safely.**
+  v0.7.1 made Phase A sequential to stop implementers from clobbering a
+  shared working tree. Each task's implementer now runs in its own isolated
+  git worktree instead, dispatched all at once; a successful task's changes
+  are folded back into the shared tree afterward. A merge conflict (two
+  tasks touching overlapping lines) degrades only that one task to
+  `BLOCKED` rather than corrupting the shared tree or failing the run.
+
 ## [0.7.1] - 2026-07-16
 
 ### Fixed
