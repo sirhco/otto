@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::VcsError;
 use crate::git::{git_root, run_git};
 use crate::project_slug;
@@ -284,6 +286,49 @@ impl Worktree {
         run_git(dir, &["clean", "-ffdx"]).await?;
         Ok(true)
     }
+
+    /// Merge `from_directory`'s uncommitted working-tree changes —
+    /// including new/untracked files — into this manager's primary
+    /// `git_root`, as an unstaged working-tree edit. Nothing is committed or
+    /// left staged in either tree. Used by `SddWorkflow`'s Phase A to fold
+    /// each isolated implementer worktree back into the shared tree before
+    /// review.
+    ///
+    /// Returns `true` if there was anything to merge, `false` if
+    /// `from_directory` was already clean relative to its own `HEAD`.
+    ///
+    /// # Errors
+    /// [`VcsError::GitFailed`] if the diff does not apply cleanly onto
+    /// `git_root` (e.g. two worktrees touched overlapping lines) — the
+    /// apply is atomic, so a failure never partially modifies `git_root`.
+    pub async fn merge_working_tree(&self, from_directory: &str) -> Result<bool, VcsError> {
+        let from = Path::new(from_directory);
+        run_git(from, &["add", "-A"]).await?;
+        let patch = run_git(from, &["diff", "--cached"]).await?;
+        // Always unstage again, regardless of outcome — from_directory is a
+        // disposable worktree the caller removes right after this call
+        // either way, but leaving it un-staged keeps state predictable if
+        // it isn't removed immediately.
+        let _ = run_git(from, &["reset"]).await;
+        if patch.trim().is_empty() {
+            return Ok(false);
+        }
+        let patch_path = merge_patch_path(from_directory);
+        std::fs::write(&patch_path, format!("{patch}\n"))
+            .map_err(|e| VcsError::Other(e.to_string()))?;
+        let result = run_git(
+            &self.git_root,
+            &[
+                "apply",
+                "--whitespace=nowarn",
+                &patch_path.to_string_lossy(),
+            ],
+        )
+        .await;
+        let _ = std::fs::remove_file(&patch_path);
+        result?;
+        Ok(true)
+    }
 }
 
 /// Slugify a user-provided name into a branch/dir-safe token.
@@ -307,6 +352,15 @@ fn slugify(raw: &str) -> String {
     } else {
         out
     }
+}
+
+/// A temp-dir path unique to `from_directory`, used to stage the merge
+/// patch on disk (`git apply` needs a real file path; `run_git` has no
+/// stdin support). Hashed rather than reusing `from_directory`'s own name so
+/// it stays filesystem-safe regardless of what the caller names a worktree.
+fn merge_patch_path(from_directory: &str) -> PathBuf {
+    let hash = Sha256::digest(from_directory.as_bytes());
+    std::env::temp_dir().join(format!("otto-vcs-merge-{hash:x}.patch"))
 }
 
 #[cfg(test)]
@@ -441,6 +495,97 @@ mod tests {
         )
         .await;
         assert!(branch_check.is_err());
+    }
+
+    #[tokio::test]
+    async fn merge_working_tree_applies_new_and_modified_files() {
+        if !git_available().await {
+            return;
+        }
+        let repo = init_repo().await;
+        let data = tempfile::tempdir().unwrap();
+        let wt = Worktree::discover(repo.path(), data.path()).await.unwrap();
+        let info = wt
+            .create(CreateInput {
+                name: Some("merge-src".into()),
+            })
+            .await
+            .unwrap();
+        let src = std::path::Path::new(&info.directory);
+        std::fs::write(src.join("f.txt"), "modified").unwrap();
+        std::fs::write(src.join("new.txt"), "brand new").unwrap();
+
+        let changed = wt.merge_working_tree(&info.directory).await.unwrap();
+        assert!(changed);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("f.txt")).unwrap(),
+            "modified"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("new.txt")).unwrap(),
+            "brand new"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_working_tree_returns_false_when_clean() {
+        if !git_available().await {
+            return;
+        }
+        let repo = init_repo().await;
+        let data = tempfile::tempdir().unwrap();
+        let wt = Worktree::discover(repo.path(), data.path()).await.unwrap();
+        let info = wt
+            .create(CreateInput {
+                name: Some("clean".into()),
+            })
+            .await
+            .unwrap();
+
+        let changed = wt.merge_working_tree(&info.directory).await.unwrap();
+        assert!(!changed);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("f.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_working_tree_errors_on_conflict_without_corrupting_git_root() {
+        if !git_available().await {
+            return;
+        }
+        let repo = init_repo().await;
+        let data = tempfile::tempdir().unwrap();
+        let wt = Worktree::discover(repo.path(), data.path()).await.unwrap();
+        let a = wt
+            .create(CreateInput {
+                name: Some("a".into()),
+            })
+            .await
+            .unwrap();
+        let b = wt
+            .create(CreateInput {
+                name: Some("b".into()),
+            })
+            .await
+            .unwrap();
+        std::fs::write(std::path::Path::new(&a.directory).join("f.txt"), "AAA").unwrap();
+        std::fs::write(std::path::Path::new(&b.directory).join("f.txt"), "BBB").unwrap();
+
+        assert!(wt.merge_working_tree(&a.directory).await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("f.txt")).unwrap(),
+            "AAA"
+        );
+
+        let err = wt.merge_working_tree(&b.directory).await.unwrap_err();
+        assert!(matches!(err, VcsError::GitFailed { .. }), "got {err:?}");
+        // The failed apply must not have partially modified git_root.
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("f.txt")).unwrap(),
+            "AAA"
+        );
     }
 
     /// Build a repo cloned from a local bare origin (so `git fetch origin`
