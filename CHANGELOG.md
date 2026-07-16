@@ -4,6 +4,17 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.7.1] - 2026-07-16
+
+### Fixed
+
+- **`otto workflow sdd` could clobber files** — Phase A fanned out every
+  task's implementer in one parallel batch, all writing into the same
+  shared working tree at once; a real report of lost/overwritten work
+  confirmed this. Implementers now dispatch one at a time, eliminating the
+  concurrent-write race. (Per-task worktree isolation — parallel dispatch,
+  safely — remains a larger, separate follow-up.)
+
 ## [0.7.0] - 2026-07-15
 
 ### Added
