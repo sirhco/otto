@@ -164,21 +164,21 @@ struct Verdict {
 
 /// The SDD engine over a list of plan tasks.
 ///
-/// # v1 concurrency constraint (SHARED working tree)
+/// # Working tree (shared, sequential)
 ///
-/// In v1 the implementers fan out in parallel (`spawn_many`) into the SINGLE
-/// SHARED working tree — there is NO per-task worktree isolation. Two
-/// consequences follow, and callers MUST respect them:
+/// Implementers run one at a time — Phase A dispatches sequentially, not in
+/// parallel — into a SINGLE SHARED working tree. Sequential dispatch means no
+/// two implementers ever write concurrently, so tasks touching overlapping
+/// files is safe. Implementers still do NOT commit or stage: the engine
+/// leaves ALL changes in the working tree for the review→fix phase; nothing
+/// is version-controlled by the agents. Run `otto workflow sdd` on a
+/// dedicated feature branch so the accumulated working-tree changes are easy
+/// to inspect and commit yourself.
 ///
-/// 1. Tasks MUST touch disjoint files. Concurrent implementers editing the same
-///    file will clobber one another.
-/// 2. Implementers do NOT commit or stage. The engine leaves ALL changes in the
-///    working tree for the review→fix phase; nothing is version-controlled by
-///    the agents. Run `otto workflow sdd` on a dedicated feature branch so the
-///    accumulated working-tree changes are easy to inspect and commit yourself.
-///
-/// Per-task worktree isolation (so implementers can safely commit in parallel)
-/// is a deferred (P5) seam.
+/// Per-task worktree isolation (parallel dispatch, each task in its own git
+/// worktree) was considered and deferred — it needs a directory-override
+/// capability in `SubagentRequest`/`SessionSubagentSpawner` that doesn't
+/// exist today, a larger cross-crate change than this sequential fix.
 pub struct SddWorkflow {
     pub tasks: Vec<PlanTask>,
     pub max_fix_rounds: u32,
@@ -249,31 +249,36 @@ impl SddWorkflow {
             return Ok(SddReport { tasks: out });
         }
 
-        // --- Phase A: fan out ALL implementers in one parallel batch ---
-        // Announce every task as running BEFORE the batch await. `spawn_many`
-        // blocks until the whole batch finishes, and the per-task emits below
-        // only fire afterward — so without this, an observer (the TUI status
-        // panel) sees nothing for the entire implementer phase (the longest,
-        // most permission-heavy part of a run). Emitting up front populates the
-        // panel immediately; the `IMPLEMENTED` emit overwrites each as it lands.
+        // --- Phase A: dispatch implementers one at a time (sequential) ---
+        // Sequential, not parallel: two implementers writing into the shared
+        // working tree at the same time could clobber each other's changes.
+        // Dispatching one at a time also means Phase A can now check
+        // cancellation between tasks (a batch call can't be interrupted
+        // mid-batch) — any task not yet dispatched when cancelled is marked
+        // Cancelled and never spawned.
+        let mut statuses = Vec::with_capacity(self.tasks.len());
         for t in &self.tasks {
+            if abort.is_cancelled() {
+                ledger
+                    .record(t.index, TaskStatus::Cancelled, "cancelled before start")
+                    .await?;
+                crate::emit(
+                    &progress,
+                    Some(t.index),
+                    "CANCELLED",
+                    "cancelled before start",
+                );
+                statuses.push(TaskStatus::Cancelled);
+                continue;
+            }
             crate::emit(
                 &progress,
                 Some(t.index),
                 "RUNNING",
                 "implementer dispatched",
             );
-        }
-        let reqs: Vec<SubagentRequest> = self
-            .tasks
-            .iter()
-            .map(|t| self.implementer_req(t, parent, &abort, &subagent))
-            .collect();
-        let results = spawner.spawn_many(reqs).await;
-
-        // Parse each implementer status; record to the ledger.
-        let mut statuses = Vec::with_capacity(self.tasks.len());
-        for (t, res) in self.tasks.iter().zip(results) {
+            let req = self.implementer_req(t, parent, &abort, &subagent);
+            let res = spawner.spawn(req).await;
             // Distinguish "the implementer reported a status" from "its output
             // had no status marker at all" (typical of a turn cut short by a
             // rejected permission ask) — the old blanket "implemented" note
@@ -651,7 +656,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sdd_fans_out_once_and_records_ledger() {
+    async fn sdd_dispatches_implementers_sequentially_and_records_ledger() {
         let store = otto_storage::Store::open_in_memory().await.unwrap();
         let concrete = Arc::new(BatchSpawner {
             prompts: Mutex::new(vec![]),
@@ -674,17 +679,103 @@ mod tests {
         assert_eq!(report.tasks.len(), 2);
         assert!(report.tasks.iter().all(|t| t.status == TaskStatus::Done));
         assert!(report.tasks.iter().all(|t| t.approved));
-        // The implementers were dispatched in exactly ONE spawn_many batch.
+        // Implementers must dispatch one at a time via spawn(), never batched.
         assert_eq!(
             *concrete.batches.lock().unwrap(),
-            1,
-            "implementers must fan out in ONE batch"
+            0,
+            "spawn_many must never be called for the implementer phase"
         );
         // Ledger has both tasks recorded as DONE.
         let led = Ledger::new(store, "ses_1", "sdd");
         let recs = led.tasks().await.unwrap();
         assert_eq!(recs.len(), 2);
         assert!(recs.iter().all(|r| r.status == TaskStatus::Done));
+    }
+
+    #[tokio::test]
+    async fn implementer_dispatch_order_matches_task_order() {
+        struct OrderRecordingSpawner {
+            order: Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl SubagentSpawner for OrderRecordingSpawner {
+            async fn spawn(&self, req: SubagentRequest) -> Result<String, ToolError> {
+                self.order.lock().unwrap().push(req.description.clone());
+                Ok("done\n{\"status\": \"DONE\"}".to_string())
+            }
+        }
+        let store = otto_storage::Store::open_in_memory().await.unwrap();
+        let concrete = Arc::new(OrderRecordingSpawner {
+            order: Mutex::new(vec![]),
+        });
+        let spawner: Arc<dyn SubagentSpawner> = concrete.clone();
+        let tasks = parse_plan_tasks("### Task 1: A\na\n### Task 2: B\nb\n### Task 3: C\nc\n");
+        let wf = SddWorkflow::new(tasks);
+        wf.drive(
+            &spawner,
+            store,
+            "ses_order",
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // Implementer descriptions are "sdd task {index}" (see implementer_req)
+        // — the recorded order must match task order exactly, proving
+        // sequential (not concurrent/reordered) dispatch. Phase B's
+        // review/fix dispatches also land in `order` (description
+        // "sdd node", from spawn_one) since this mock doesn't distinguish
+        // implementer vs. review prompts — filter down to just the
+        // implementer entries before asserting order.
+        let order = concrete.order.lock().unwrap().clone();
+        let implementer_order: Vec<&String> =
+            order.iter().filter(|d| d.starts_with("sdd task")).collect();
+        assert_eq!(
+            implementer_order,
+            vec!["sdd task 1", "sdd task 2", "sdd task 3"]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_between_tasks_stops_further_implementer_dispatch() {
+        struct CancelAfterFirstSpawner {
+            abort: CancellationToken,
+            calls: Mutex<u32>,
+        }
+        #[async_trait::async_trait]
+        impl SubagentSpawner for CancelAfterFirstSpawner {
+            async fn spawn(&self, _req: SubagentRequest) -> Result<String, ToolError> {
+                *self.calls.lock().unwrap() += 1;
+                self.abort.cancel();
+                Ok("done\n{\"status\": \"DONE\"}".to_string())
+            }
+        }
+        let store = otto_storage::Store::open_in_memory().await.unwrap();
+        let abort = CancellationToken::new();
+        let concrete = Arc::new(CancelAfterFirstSpawner {
+            abort: abort.clone(),
+            calls: Mutex::new(0),
+        });
+        let spawner: Arc<dyn SubagentSpawner> = concrete.clone();
+        let tasks = parse_plan_tasks("### Task 1: A\na\n### Task 2: B\nb\n");
+        let wf = SddWorkflow::new(tasks);
+        let report = wf
+            .drive(&spawner, store, "ses_cancel_mid", abort, None, None)
+            .await
+            .expect("drive must not error");
+        assert_eq!(
+            *concrete.calls.lock().unwrap(),
+            1,
+            "only task 1 should have been dispatched before cancellation was observed"
+        );
+        // Task 1's implementer succeeded, but Phase B's existing (unchanged)
+        // cancellation check still demotes it to Cancelled — any task not
+        // yet REVIEWED when cancellation is detected gets Cancelled, even if
+        // its own implementer already finished. That's pre-existing,
+        // intentional behavior, not something this task changes.
+        assert_eq!(report.tasks[0].status, TaskStatus::Cancelled);
+        assert_eq!(report.tasks[1].status, TaskStatus::Cancelled);
     }
 
     #[tokio::test]
@@ -880,27 +971,20 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_during_implementer_phase_stops_review_phase() {
-        // The fake spawner cancels the token as a side effect of its
-        // spawn_many call, simulating "the user hit Ctrl+C while the
-        // implementers were running" without depending on real timing.
+        // The fake spawner cancels the token as a side effect of its spawn
+        // call, simulating "the user hit Ctrl+C while the (only) implementer
+        // was running" without depending on real timing. Phase A now
+        // dispatches sequentially via spawn() (never spawn_many()), so the
+        // cancellation trigger lives there to still exercise "cancelled
+        // during the implementer phase".
         struct CancelDuringBatchSpawner {
             abort: CancellationToken,
         }
         #[async_trait::async_trait]
         impl SubagentSpawner for CancelDuringBatchSpawner {
             async fn spawn(&self, _req: SubagentRequest) -> Result<String, ToolError> {
-                Ok("implemented it\n{\"status\": \"DONE\"}".to_string())
-            }
-            async fn spawn_many(
-                &self,
-                reqs: Vec<SubagentRequest>,
-            ) -> Vec<Result<String, ToolError>> {
                 self.abort.cancel();
-                let mut out = Vec::with_capacity(reqs.len());
-                for r in reqs {
-                    out.push(self.spawn(r).await);
-                }
-                out
+                Ok("implemented it\n{\"status\": \"DONE\"}".to_string())
             }
         }
         let store = otto_storage::Store::open_in_memory().await.unwrap();
