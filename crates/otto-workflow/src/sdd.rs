@@ -1,6 +1,6 @@
-//! Native subagent-driven-development: parse a plan into tasks, fan the
-//! implementers out through `spawn_many` (parallel), then run a bounded
-//! per-task review→fix loop, recording every status to the ledger.
+//! Native subagent-driven-development: parse a plan into tasks, dispatch the
+//! implementers one at a time into the shared working tree, then run a
+//! bounded per-task review→fix loop, recording every status to the ledger.
 
 use std::sync::Arc;
 
@@ -804,8 +804,9 @@ mod tests {
         while let Ok(ev) = rx.try_recv() {
             got.push(ev);
         }
-        // Every task is announced RUNNING up front (before the batch await), so
-        // the status panel populates during the implementer phase.
+        // Each task is announced RUNNING immediately before its own
+        // (sequential) dispatch, so the status panel updates continuously
+        // through the implementer phase.
         assert!(got.iter().any(|e| e.status == "RUNNING"));
         // At least one IMPLEMENTED and one DONE per task streamed.
         assert!(got.iter().any(|e| e.status == "IMPLEMENTED"));
