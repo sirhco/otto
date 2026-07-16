@@ -1220,6 +1220,7 @@ async fn run_engine(
                     abort,
                     cx.progress.clone(),
                     cx.subagent.clone(),
+                    &cx.worktree,
                 )
                 .await
                 .map(|_| format!("{n} task(s) processed"))

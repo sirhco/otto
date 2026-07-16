@@ -1,11 +1,14 @@
 //! Native subagent-driven-development: parse a plan into tasks, dispatch the
-//! implementers one at a time into the shared working tree, then run a
-//! bounded per-task review→fix loop, recording every status to the ledger.
+//! implementers in parallel into isolated per-task worktrees, merge each
+//! success back into the shared working tree, then run a bounded per-task
+//! review→fix loop, recording every status to the ledger.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use otto_storage::model::MessageId;
 use otto_tools::{SubagentRequest, SubagentSpawner};
+use otto_vcs::worktree::{CreateInput, RemoveInput, Worktree};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
@@ -164,21 +167,29 @@ struct Verdict {
 
 /// The SDD engine over a list of plan tasks.
 ///
-/// # Working tree (shared, sequential)
+/// # Working tree (isolated per task, parallel)
 ///
-/// Implementers run one at a time — Phase A dispatches sequentially, not in
-/// parallel — into a SINGLE SHARED working tree. Sequential dispatch means no
-/// two implementers ever write concurrently, so tasks touching overlapping
-/// files is safe. Implementers still do NOT commit or stage: the engine
-/// leaves ALL changes in the working tree for the review→fix phase; nothing
-/// is version-controlled by the agents. Run `otto workflow sdd` on a
+/// Phase A dispatches every task's implementer at once, each into its OWN
+/// git worktree (`otto/sdd-task-<index>`, created off the shared tree's
+/// current `HEAD`) — no two implementers ever see each other's uncommitted
+/// changes while they work. Once an implementer reports a terminal status,
+/// its worktree's changes (including new/untracked files) are folded back
+/// into the shared working tree one at a time via
+/// [`otto_vcs::worktree::Worktree::merge_working_tree`] — sequential,
+/// because applying a patch against one shared tree can't itself be
+/// parallelized. A task whose changes fail to merge (e.g. two tasks touched
+/// overlapping lines — plans are still expected, unenforced, to keep tasks
+/// on disjoint files) degrades to `Blocked` with the git failure recorded,
+/// rather than corrupting the shared tree or failing the whole run. Every
+/// worktree is removed once its task is done, win or lose. Implementers
+/// still do NOT commit or stage: the engine leaves the shared tree's
+/// changes unstaged for the review→fix phase. Run `otto workflow sdd` on a
 /// dedicated feature branch so the accumulated working-tree changes are easy
 /// to inspect and commit yourself.
 ///
-/// Per-task worktree isolation (parallel dispatch, each task in its own git
-/// worktree) was considered and deferred — it needs a directory-override
-/// capability in `SubagentRequest`/`SessionSubagentSpawner` that doesn't
-/// exist today, a larger cross-crate change than this sequential fix.
+/// Phase B (review→fix) is unaffected — it runs sequentially, per task,
+/// directly against the shared working tree (worktrees only exist during
+/// Phase A).
 pub struct SddWorkflow {
     pub tasks: Vec<PlanTask>,
     pub max_fix_rounds: u32,
@@ -199,9 +210,14 @@ impl SddWorkflow {
     /// always returns `Ok` unless a genuine infrastructure failure (ledger
     /// write, duplicate task index) occurs.
     ///
+    /// `worktree` roots Phase A's per-task isolation — every implementer
+    /// gets its own worktree under `worktree.data_root`, merged back into
+    /// `worktree.git_root` on success.
+    ///
     /// # Errors
     /// Returns [`WfError`] on a ledger write failure or a duplicate task
     /// index.
+    #[allow(clippy::too_many_arguments)]
     pub async fn drive(
         &self,
         spawner: &Arc<dyn SubagentSpawner>,
@@ -210,6 +226,7 @@ impl SddWorkflow {
         abort: CancellationToken,
         progress: Option<crate::ProgressSink>,
         subagent: Option<crate::SubagentSink>,
+        worktree: &Arc<Worktree>,
     ) -> Result<SddReport, WfError> {
         // Guard: the ledger keys rows on `session:kind:index`, so duplicate
         // task indices would silently overwrite one another. Reject up front,
@@ -249,15 +266,23 @@ impl SddWorkflow {
             return Ok(SddReport { tasks: out });
         }
 
-        // --- Phase A: dispatch implementers one at a time (sequential) ---
-        // Sequential, not parallel: two implementers writing into the shared
-        // working tree at the same time could clobber each other's changes.
-        // Dispatching one at a time also means Phase A can now check
-        // cancellation between tasks (a batch call can't be interrupted
-        // mid-batch) — any task not yet dispatched when cancelled is marked
-        // Cancelled and never spawned.
-        let mut statuses = Vec::with_capacity(self.tasks.len());
-        for t in &self.tasks {
+        // --- Phase A: create isolated worktrees, dispatch implementers in
+        // parallel, merge each success back into the shared directory ---
+        //
+        // Worktree creation is cheap, local git plumbing and stays
+        // sequential — concurrent `git worktree add` against the same repo
+        // is an unnecessary correctness risk for no real speedup. The
+        // expensive, latency-bound part (the implementer LLM turns) is what
+        // actually benefits from running in parallel, via `spawn_many`.
+        struct Dispatched {
+            task_index: usize,
+            worktree_dir: String,
+        }
+        let mut reqs = Vec::new();
+        let mut dispatched = Vec::new();
+        let mut statuses: Vec<Option<TaskStatus>> = vec![None; self.tasks.len()];
+
+        for (i, t) in self.tasks.iter().enumerate() {
             if abort.is_cancelled() {
                 ledger
                     .record(t.index, TaskStatus::Cancelled, "cancelled before start")
@@ -268,44 +293,114 @@ impl SddWorkflow {
                     "CANCELLED",
                     "cancelled before start",
                 );
-                statuses.push(TaskStatus::Cancelled);
+                statuses[i] = Some(TaskStatus::Cancelled);
                 continue;
             }
-            crate::emit(
-                &progress,
-                Some(t.index),
-                "RUNNING",
-                "implementer dispatched",
-            );
-            let req = self.implementer_req(t, parent, &abort, &subagent);
-            let res = spawner.spawn(req).await;
-            // Distinguish "the implementer reported a status" from "its output
-            // had no status marker at all" (typical of a turn cut short by a
-            // rejected permission ask) — the old blanket "implemented" note
-            // made those silent failures look like finished work.
+            match worktree
+                .create(CreateInput {
+                    name: Some(format!("sdd-task-{}", t.index)),
+                })
+                .await
+            {
+                Ok(info) => {
+                    crate::emit(
+                        &progress,
+                        Some(t.index),
+                        "RUNNING",
+                        "implementer dispatched",
+                    );
+                    reqs.push(self.implementer_req(
+                        t,
+                        parent,
+                        &abort,
+                        &subagent,
+                        PathBuf::from(&info.directory),
+                    ));
+                    dispatched.push(Dispatched {
+                        task_index: i,
+                        worktree_dir: info.directory,
+                    });
+                }
+                Err(e) => {
+                    let note = format!("failed to create an isolated worktree: {e}");
+                    ledger.record(t.index, TaskStatus::Blocked, &note).await?;
+                    crate::emit(&progress, Some(t.index), "BLOCKED", &note);
+                    statuses[i] = Some(TaskStatus::Blocked);
+                }
+            }
+        }
+
+        let results = if dispatched.is_empty() {
+            Vec::new()
+        } else {
+            spawner.spawn_many(reqs).await
+        };
+
+        for (
+            Dispatched {
+                task_index,
+                worktree_dir,
+            },
+            res,
+        ) in dispatched.into_iter().zip(results)
+        {
+            let t = &self.tasks[task_index];
             let (status, note) = match res {
                 Ok(text) => match try_parse_status(&text) {
-                    Some(s) => (s, "implemented"),
+                    Some(s) => (s, "implemented".to_string()),
                     None => (
                         TaskStatus::NeedsContext,
-                        "no status marker in output (possibly a rejected permission ask ended the turn early)",
+                        "no status marker in output (possibly a rejected permission ask ended the turn early)".to_string(),
                     ),
                 },
-                Err(_) => (TaskStatus::Blocked, "implementer failed to spawn/run"),
+                Err(_) => (TaskStatus::Blocked, "implementer failed to spawn/run".to_string()),
             };
-            ledger.record(t.index, status, note).await?;
-            // Happy-path tasks proceed into the review loop (which re-emits
-            // REVIEWING→DONE), so "IMPLEMENTED" is just a phase marker. A task
-            // that BLOCKED or NEEDS_CONTEXT skips the review loop below, making
-            // this its ONLY progress event — surface its real terminal status.
+
+            let (status, note) = if matches!(
+                status,
+                TaskStatus::Done | TaskStatus::DoneWithConcerns
+            ) {
+                match worktree.merge_working_tree(&worktree_dir).await {
+                    Ok(_) => (status, note),
+                    Err(e) => (
+                        TaskStatus::Blocked,
+                        format!(
+                            "implementer succeeded but its changes failed to merge into the shared working tree: {e}"
+                        ),
+                    ),
+                }
+            } else {
+                (status, note)
+            };
+
+            if let Err(e) = worktree
+                .remove(RemoveInput {
+                    directory: worktree_dir.clone(),
+                })
+                .await
+            {
+                tracing::warn!(
+                    task = t.index,
+                    worktree = %worktree_dir,
+                    error = %e,
+                    "sdd: failed to remove isolated worktree (leaked, harmless)"
+                );
+            }
+
+            ledger.record(t.index, status, &note).await?;
             let phase = if matches!(status, TaskStatus::Done | TaskStatus::DoneWithConcerns) {
                 "IMPLEMENTED"
             } else {
                 status.as_wire()
             };
-            crate::emit(&progress, Some(t.index), phase, status.as_wire());
-            statuses.push(status);
+            crate::emit(&progress, Some(t.index), phase, &note);
+            statuses[task_index] = Some(status);
         }
+
+        let statuses: Vec<TaskStatus> = statuses
+            .into_iter()
+            .map(|s| s.expect("every task index is assigned a status exactly once above"))
+            .collect();
 
         // --- Phase B: per-task review→fix (only for completed tasks) ---
         let mut out = Vec::with_capacity(self.tasks.len());
@@ -417,6 +512,7 @@ impl SddWorkflow {
         parent: &str,
         abort: &CancellationToken,
         subagent: &Option<crate::SubagentSink>,
+        directory: PathBuf,
     ) -> SubagentRequest {
         SubagentRequest {
             subagent_type: "general".to_string(),
@@ -425,8 +521,10 @@ impl SddWorkflow {
                 "Implement this task. Write the code, add the tests, and run the \
                  test suite to confirm they pass. DO NOT run any git commands \
                  (no add / stage / commit) — the workflow manages version \
-                 control and other implementers are editing the same working \
-                 tree concurrently. Leave your changes in the working tree.\n\n\
+                 control. You have your own isolated working tree for this \
+                 task; nothing you do here is visible to other implementers \
+                 until the workflow merges your changes back. Leave your \
+                 changes in the working tree.\n\n\
                  ## Task {}: {}\n{}\n\n\
                  End your reply with one JSON line: {{\"status\": \"DONE\"}} \
                  (or DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED).",
@@ -438,6 +536,7 @@ impl SddWorkflow {
             event_tx: crate::tap_subagent(t.index, subagent),
             command: None,
             abort: abort.clone(),
+            directory: Some(directory),
         }
     }
 
@@ -507,6 +606,7 @@ async fn spawn_one(
         command: None,
         abort: abort.clone(),
         event_tx: crate::tap_subagent(task_index, subagent),
+        directory: None,
     };
     spawner.spawn(req).await.map_err(WfError::from)
 }
@@ -542,6 +642,7 @@ impl crate::Workflow for SddWorkflow {
             cx.abort.clone(),
             cx.progress.clone(),
             cx.subagent.clone(),
+            &cx.worktree,
         )
         .await
     }
@@ -552,7 +653,38 @@ mod tests {
     use super::*;
     use crate::error::TaskStatus;
     use otto_tools::ToolError;
+    use otto_vcs::worktree::Worktree;
     use std::sync::Mutex;
+
+    /// Build a temp git repo with one commit and a `Worktree` rooted there.
+    /// Mirrors `otto_vcs::worktree::tests::init_repo` — duplicated locally
+    /// since that helper is private to `otto-vcs`'s own test module and
+    /// otto-vcs exposes no cross-crate test-support surface (not worth
+    /// adding for one ~10-line helper).
+    async fn init_repo() -> (tempfile::TempDir, tempfile::TempDir, Arc<Worktree>) {
+        let repo = tempfile::tempdir().unwrap();
+        let p = repo.path();
+        otto_vcs::git::run_git(p, &["init", "-q", "-b", "main"])
+            .await
+            .unwrap();
+        otto_vcs::git::run_git(p, &["config", "user.email", "t@t.t"])
+            .await
+            .unwrap();
+        otto_vcs::git::run_git(p, &["config", "user.name", "t"])
+            .await
+            .unwrap();
+        otto_vcs::git::run_git(p, &["config", "commit.gpgsign", "false"])
+            .await
+            .unwrap();
+        std::fs::write(p.join("f.txt"), "hello").unwrap();
+        otto_vcs::git::run_git(p, &["add", "."]).await.unwrap();
+        otto_vcs::git::run_git(p, &["commit", "-q", "-m", "init"])
+            .await
+            .unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let worktree = Arc::new(Worktree::new(p.to_path_buf(), data.path().to_path_buf()));
+        (repo, data, worktree)
+    }
 
     #[test]
     fn parse_plan_splits_on_task_headings() {
@@ -617,8 +749,12 @@ mod tests {
     }
 
     /// Records every prompt; returns a DONE implementer status for all
-    /// implementer prompts and an "approved" verdict for review prompts.
-    /// Also records how many spawn_many BATCH calls happened.
+    /// implementer prompts and an "approved" verdict for review prompts. If
+    /// tapped (Task 3's event_tx), forwards one canned tool call so the
+    /// tap→sink path is exercised end-to-end. If given a real `directory`
+    /// (Phase A implementer dispatch), writes a file there so Phase A's
+    /// merge-back has something real to merge. Also records how many
+    /// spawn_many BATCH calls happened.
     struct BatchSpawner {
         prompts: Mutex<Vec<String>>,
         batches: Mutex<u32>,
@@ -627,9 +763,6 @@ mod tests {
     impl SubagentSpawner for BatchSpawner {
         async fn spawn(&self, req: SubagentRequest) -> Result<String, ToolError> {
             self.prompts.lock().unwrap().push(req.prompt.clone());
-            // If the request was tapped (Task 3), forward one canned tool call
-            // so the tap→sink path is exercised end-to-end. Untapped requests
-            // (event_tx = None) send nothing → byte-identical to before.
             if let Some(tx) = &req.event_tx {
                 let _ = tx.send(otto_events::LLMEvent::ToolCall {
                     id: "1".to_string(),
@@ -642,6 +775,10 @@ mod tests {
             if req.prompt.contains("Review the task") {
                 Ok("looks good\n{\"approved\": true, \"findings\": []}".to_string())
             } else {
+                if let Some(dir) = &req.directory {
+                    let file = req.description.replace(' ', "_").replace(':', "");
+                    std::fs::write(dir.join(format!("{file}.txt")), "implemented").unwrap();
+                }
                 Ok("implemented it\n{\"status\": \"DONE\"}".to_string())
             }
         }
@@ -656,7 +793,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sdd_dispatches_implementers_sequentially_and_records_ledger() {
+    async fn sdd_dispatches_implementers_in_parallel_with_isolated_worktrees() {
+        if !otto_vcs::git::git_available().await {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let (repo, _data, worktree) = init_repo().await;
         let store = otto_storage::Store::open_in_memory().await.unwrap();
         let concrete = Arc::new(BatchSpawner {
             prompts: Mutex::new(vec![]),
@@ -673,19 +815,25 @@ mod tests {
                 CancellationToken::new(),
                 None,
                 None,
+                &worktree,
             )
             .await
             .unwrap();
         assert_eq!(report.tasks.len(), 2);
         assert!(report.tasks.iter().all(|t| t.status == TaskStatus::Done));
         assert!(report.tasks.iter().all(|t| t.approved));
-        // Implementers must dispatch one at a time via spawn(), never batched.
+        // Implementers must dispatch as ONE parallel batch, not one-at-a-time.
         assert_eq!(
             *concrete.batches.lock().unwrap(),
-            0,
-            "spawn_many must never be called for the implementer phase"
+            1,
+            "spawn_many must be called exactly once for the implementer phase"
         );
-        // Ledger has both tasks recorded as DONE.
+        // Each implementer wrote into ITS OWN isolated worktree; both files
+        // are now present in the shared repo root after merge-back.
+        assert!(repo.path().join("sdd_task_1.txt").exists());
+        assert!(repo.path().join("sdd_task_2.txt").exists());
+        // No worktrees are left behind after a successful run.
+        assert!(worktree.list().await.unwrap().is_empty());
         let led = Ledger::new(store, "ses_1", "sdd");
         let recs = led.tasks().await.unwrap();
         assert_eq!(recs.len(), 2);
@@ -694,6 +842,11 @@ mod tests {
 
     #[tokio::test]
     async fn implementer_dispatch_order_matches_task_order() {
+        if !otto_vcs::git::git_available().await {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let (_repo, _data, worktree) = init_repo().await;
         struct OrderRecordingSpawner {
             order: Mutex<Vec<String>>,
         }
@@ -718,6 +871,7 @@ mod tests {
             CancellationToken::new(),
             None,
             None,
+            &worktree,
         )
         .await
         .unwrap();
@@ -738,48 +892,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_between_tasks_stops_further_implementer_dispatch() {
-        struct CancelAfterFirstSpawner {
-            abort: CancellationToken,
-            calls: Mutex<u32>,
-        }
-        #[async_trait::async_trait]
-        impl SubagentSpawner for CancelAfterFirstSpawner {
-            async fn spawn(&self, _req: SubagentRequest) -> Result<String, ToolError> {
-                *self.calls.lock().unwrap() += 1;
-                self.abort.cancel();
-                Ok("done\n{\"status\": \"DONE\"}".to_string())
-            }
-        }
-        let store = otto_storage::Store::open_in_memory().await.unwrap();
-        let abort = CancellationToken::new();
-        let concrete = Arc::new(CancelAfterFirstSpawner {
-            abort: abort.clone(),
-            calls: Mutex::new(0),
-        });
-        let spawner: Arc<dyn SubagentSpawner> = concrete.clone();
-        let tasks = parse_plan_tasks("### Task 1: A\na\n### Task 2: B\nb\n");
-        let wf = SddWorkflow::new(tasks);
-        let report = wf
-            .drive(&spawner, store, "ses_cancel_mid", abort, None, None)
-            .await
-            .expect("drive must not error");
-        assert_eq!(
-            *concrete.calls.lock().unwrap(),
-            1,
-            "only task 1 should have been dispatched before cancellation was observed"
-        );
-        // Task 1's implementer succeeded, but Phase B's existing (unchanged)
-        // cancellation check still demotes it to Cancelled — any task not
-        // yet REVIEWED when cancellation is detected gets Cancelled, even if
-        // its own implementer already finished. That's pre-existing,
-        // intentional behavior, not something this task changes.
-        assert_eq!(report.tasks[0].status, TaskStatus::Cancelled);
-        assert_eq!(report.tasks[1].status, TaskStatus::Cancelled);
-    }
-
-    #[tokio::test]
     async fn drive_emits_progress_when_sink_present() {
+        if !otto_vcs::git::git_available().await {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let (_repo, _data, worktree) = init_repo().await;
         use tokio::sync::mpsc;
         let store = otto_storage::Store::open_in_memory().await.unwrap();
         let concrete = std::sync::Arc::new(BatchSpawner {
@@ -797,6 +915,7 @@ mod tests {
             CancellationToken::new(),
             Some(tx),
             None,
+            &worktree,
         )
         .await
         .unwrap();
@@ -816,6 +935,11 @@ mod tests {
 
     #[tokio::test]
     async fn drive_taps_subagent_activity() {
+        if !otto_vcs::git::git_available().await {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let (_repo, _data, worktree) = init_repo().await;
         use tokio::sync::mpsc;
         let store = otto_storage::Store::open_in_memory().await.unwrap();
         let concrete = Arc::new(BatchSpawner {
@@ -833,6 +957,7 @@ mod tests {
             CancellationToken::new(),
             None,
             Some(act_tx),
+            &worktree,
         )
         .await
         .unwrap();
@@ -867,6 +992,7 @@ mod tests {
             },
         ];
         let wf = SddWorkflow::new(tasks);
+        let worktree = Arc::new(Worktree::new(PathBuf::new(), PathBuf::new()));
         let err = wf
             .drive(
                 &spawner,
@@ -875,6 +1001,7 @@ mod tests {
                 CancellationToken::new(),
                 None,
                 None,
+                &worktree,
             )
             .await
             .unwrap_err();
@@ -914,6 +1041,11 @@ mod tests {
 
     #[tokio::test]
     async fn unparseable_verdict_degrades_one_task_not_the_whole_run() {
+        if !otto_vcs::git::git_available().await {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let (_repo, _data, worktree) = init_repo().await;
         let store = otto_storage::Store::open_in_memory().await.unwrap();
         let spawner: Arc<dyn SubagentSpawner> = Arc::new(FlakyReviewSpawner {
             batches: Mutex::new(0),
@@ -928,6 +1060,7 @@ mod tests {
                 CancellationToken::new(),
                 None,
                 None,
+                &worktree,
             )
             .await
             .expect("drive must not error on a bad verdict");
@@ -942,6 +1075,11 @@ mod tests {
 
     #[tokio::test]
     async fn already_cancelled_marks_every_task_cancelled_and_dispatches_nothing() {
+        if !otto_vcs::git::git_available().await {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let (_repo, _data, worktree) = init_repo().await;
         let store = otto_storage::Store::open_in_memory().await.unwrap();
         let concrete = Arc::new(BatchSpawner {
             prompts: Mutex::new(vec![]),
@@ -953,7 +1091,7 @@ mod tests {
         abort.cancel();
         let wf = SddWorkflow::new(tasks);
         let report = wf
-            .drive(&spawner, store, "ses_cancel", abort, None, None)
+            .drive(&spawner, store, "ses_cancel", abort, None, None, &worktree)
             .await
             .expect("drive must not error on cancellation");
         assert_eq!(report.tasks.len(), 2);
@@ -968,41 +1106,170 @@ mod tests {
             0,
             "nothing should be dispatched once already cancelled"
         );
+        assert!(
+            worktree.list().await.unwrap().is_empty(),
+            "already-cancelled must create zero worktrees"
+        );
     }
 
     #[tokio::test]
-    async fn cancellation_during_implementer_phase_stops_review_phase() {
-        // The fake spawner cancels the token as a side effect of its spawn
-        // call, simulating "the user hit Ctrl+C while the (only) implementer
-        // was running" without depending on real timing. Phase A now
-        // dispatches sequentially via spawn() (never spawn_many()), so the
-        // cancellation trigger lives there to still exercise "cancelled
-        // during the implementer phase".
-        struct CancelDuringBatchSpawner {
+    async fn cancellation_during_batch_still_completes_and_merges_dispatched_tasks() {
+        // Once Phase A's batch dispatch has started, cancellation can no
+        // longer stop already-in-flight implementers (spawn_many can't be
+        // interrupted mid-batch) — their work still completes and merges
+        // back rather than being discarded. Phase B's existing, unchanged
+        // cancellation check then sees the run as cancelled and skips
+        // review for every task.
+        if !otto_vcs::git::git_available().await {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let (repo, _data, worktree) = init_repo().await;
+        struct CancelDuringSpawner {
             abort: CancellationToken,
+            calls: Mutex<u32>,
         }
         #[async_trait::async_trait]
-        impl SubagentSpawner for CancelDuringBatchSpawner {
-            async fn spawn(&self, _req: SubagentRequest) -> Result<String, ToolError> {
+        impl SubagentSpawner for CancelDuringSpawner {
+            async fn spawn(&self, req: SubagentRequest) -> Result<String, ToolError> {
+                *self.calls.lock().unwrap() += 1;
                 self.abort.cancel();
-                Ok("implemented it\n{\"status\": \"DONE\"}".to_string())
+                if let Some(dir) = &req.directory {
+                    let name = req.description.replace(' ', "_");
+                    std::fs::write(dir.join(format!("{name}.txt")), "x").unwrap();
+                }
+                Ok("done\n{\"status\": \"DONE\"}".to_string())
             }
         }
         let store = otto_storage::Store::open_in_memory().await.unwrap();
         let abort = CancellationToken::new();
-        let spawner: Arc<dyn SubagentSpawner> = Arc::new(CancelDuringBatchSpawner {
+        let concrete = Arc::new(CancelDuringSpawner {
             abort: abort.clone(),
+            calls: Mutex::new(0),
         });
+        let spawner: Arc<dyn SubagentSpawner> = concrete.clone();
+        let tasks = parse_plan_tasks("### Task 1: A\na\n### Task 2: B\nb\n");
+        let wf = SddWorkflow::new(tasks);
+        let report = wf
+            .drive(
+                &spawner,
+                store,
+                "ses_cancel_mid",
+                abort,
+                None,
+                None,
+                &worktree,
+            )
+            .await
+            .expect("drive must not error");
+        // Both tasks were already batched before cancellation fired inside
+        // the first spawn() call — the default serial spawn_many still
+        // dispatches task 2 too (no per-item abort check mid-batch).
+        assert_eq!(*concrete.calls.lock().unwrap(), 2);
+        // Both implementers' work landed in the shared repo root...
+        assert!(repo.path().join("sdd_task_1.txt").exists());
+        assert!(repo.path().join("sdd_task_2.txt").exists());
+        // ...but Phase B's pre-existing cancellation check still demotes
+        // both to Cancelled — dispatched-but-unreviewed is treated as
+        // Cancelled, same as before this feature.
+        assert_eq!(report.tasks[0].status, TaskStatus::Cancelled);
+        assert_eq!(report.tasks[1].status, TaskStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn worktree_creation_failure_blocks_the_task_without_dispatching_it() {
+        if !otto_vcs::git::git_available().await {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let (repo, data, _worktree) = init_repo().await;
+        // Make data_root an ordinary FILE so `create_dir_all` (inside
+        // Worktree::create) fails deterministically.
+        let bad_data_root = data.path().join("not-a-dir");
+        std::fs::write(&bad_data_root, "x").unwrap();
+        let worktree = Arc::new(Worktree::new(repo.path().to_path_buf(), bad_data_root));
+
+        let store = otto_storage::Store::open_in_memory().await.unwrap();
+        let concrete = Arc::new(BatchSpawner {
+            prompts: Mutex::new(vec![]),
+            batches: Mutex::new(0),
+        });
+        let spawner: Arc<dyn SubagentSpawner> = concrete.clone();
         let tasks = parse_plan_tasks("### Task 1: A\na\n");
         let wf = SddWorkflow::new(tasks);
         let report = wf
-            .drive(&spawner, store, "ses_mid", abort, None, None)
+            .drive(
+                &spawner,
+                store,
+                "ses_wt_fail",
+                CancellationToken::new(),
+                None,
+                None,
+                &worktree,
+            )
             .await
-            .expect("drive must not error");
-        // The implementer phase already ran (it reported DONE), but the
-        // review phase must see the cancellation and skip its dispatch.
-        let t1 = &report.tasks[0];
-        assert_eq!(t1.status, TaskStatus::Cancelled);
-        assert!(!t1.reviewed);
+            .unwrap();
+        assert_eq!(report.tasks[0].status, TaskStatus::Blocked);
+        // Nothing was ever dispatched — the implementer never ran.
+        assert_eq!(*concrete.batches.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn merge_conflict_blocks_only_the_conflicting_task() {
+        if !otto_vcs::git::git_available().await {
+            eprintln!("skipping: git not on PATH");
+            return;
+        }
+        let (repo, _data, worktree) = init_repo().await;
+        struct ConflictingSpawner;
+        #[async_trait::async_trait]
+        impl SubagentSpawner for ConflictingSpawner {
+            async fn spawn(&self, req: SubagentRequest) -> Result<String, ToolError> {
+                if req.prompt.contains("Review the task") {
+                    return Ok("looks good\n{\"approved\": true, \"findings\": []}".to_string());
+                }
+                if let Some(dir) = &req.directory {
+                    // Both tasks rewrite the SAME line of the SAME tracked
+                    // file, based on the same original content ("hello") —
+                    // an unavoidable conflict once one side's change has
+                    // already been merged.
+                    let content = if req.description == "sdd task 1" {
+                        "AAA"
+                    } else {
+                        "BBB"
+                    };
+                    std::fs::write(dir.join("f.txt"), content).unwrap();
+                }
+                Ok("implemented\n{\"status\": \"DONE\"}".to_string())
+            }
+        }
+        let store = otto_storage::Store::open_in_memory().await.unwrap();
+        let spawner: Arc<dyn SubagentSpawner> = Arc::new(ConflictingSpawner);
+        let tasks = parse_plan_tasks("### Task 1: A\na\n### Task 2: B\nb\n");
+        let wf = SddWorkflow::new(tasks);
+        let report = wf
+            .drive(
+                &spawner,
+                store,
+                "ses_conflict",
+                CancellationToken::new(),
+                None,
+                None,
+                &worktree,
+            )
+            .await
+            .unwrap();
+        let t1 = report.tasks.iter().find(|t| t.index == 1).unwrap();
+        let t2 = report.tasks.iter().find(|t| t.index == 2).unwrap();
+        // Task 1 merges first (dispatched/merged in task order) and
+        // succeeds; task 2's patch no longer applies cleanly once task 1's
+        // change has already landed, so it degrades to Blocked instead of
+        // corrupting the tree.
+        assert_eq!(t1.status, TaskStatus::Done);
+        assert_eq!(t2.status, TaskStatus::Blocked);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("f.txt")).unwrap(),
+            "AAA"
+        );
     }
 }
