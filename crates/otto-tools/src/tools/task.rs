@@ -119,6 +119,7 @@ impl Tool for TaskTool {
             command: params.command,
             abort: ctx.abort.clone(),
             event_tx,
+            directory: None,
         };
 
         let text = spawner.spawn(req).await?;

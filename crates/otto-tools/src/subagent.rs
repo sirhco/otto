@@ -10,6 +10,7 @@
 //! owns `run_loop`; here we only define the contract the tool calls.
 
 use otto_id::{MessageId, SessionId};
+use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 use crate::tool::ToolError;
@@ -43,6 +44,13 @@ pub struct SubagentRequest {
     /// Optional live event tap forwarded into the child run's `RunConfig.event_tx`.
     /// `None` (the default for the `task` tool + tests) leaves the child untapped.
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<otto_events::LLMEvent>>,
+    /// Root the child session's tool execution in this directory instead of
+    /// the spawner's own configured directory. `None` (the default for the
+    /// `task` tool) is byte-identical to pre-existing behavior. Otto
+    /// extension — no opencode analog — added so a caller like
+    /// otto-workflow's SDD engine can give each spawned implementer its own
+    /// isolated git worktree.
+    pub directory: Option<PathBuf>,
 }
 
 /// The seam the `task` tool calls to run a subagent turn — port of the inline
@@ -93,6 +101,7 @@ mod tests {
             command: None,
             abort: CancellationToken::new(),
             event_tx: None,
+            directory: None,
         }
     }
 
