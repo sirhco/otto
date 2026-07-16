@@ -161,6 +161,15 @@ fn storage_err(e: otto_storage::StorageError) -> ToolError {
 #[async_trait::async_trait]
 impl SubagentSpawner for SessionSubagentSpawner {
     async fn spawn(&self, req: SubagentRequest) -> Result<String, ToolError> {
+        // The request's directory override (otto-workflow's SDD engine
+        // points this at an isolated per-task git worktree) when present,
+        // else this spawner's own configured directory — byte-identical to
+        // pre-existing behavior when `req.directory` is `None`.
+        let effective_directory = req
+            .directory
+            .clone()
+            .unwrap_or_else(|| self.directory.clone());
+
         // 1. Resolve the subagent (task.ts:116-119).
         let subagent =
             agent_config::get(&self.config_agents, &req.subagent_type).ok_or_else(|| {
@@ -201,7 +210,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
                         id: id.clone(),
                         project_id: self.project_id.clone(),
                         parent_id: Some(req.parent_session_id.clone()),
-                        directory: self.directory.display().to_string(),
+                        directory: effective_directory.display().to_string(),
                         title: format!("{} (@{} subagent)", req.description, subagent.name),
                         version: self.version.clone(),
                         cost: 0.0,
@@ -281,7 +290,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
             Arc::new(self.with_parent_ruleset(child_ruleset));
         let system_cache = Some(compute_warm(
             &self.warm,
-            &self.directory,
+            &effective_directory,
             &model,
             &subagent.name,
             subagent.prompt.as_deref(),
@@ -295,7 +304,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
             model,
             agent: subagent.name.clone(),
             agent_prompt: subagent.prompt.clone(),
-            directory: self.directory.clone(),
+            directory: effective_directory.clone(),
             max_steps: subagent.steps,
             abort: req.abort.clone(),
             subagent: Some(child_spawner),

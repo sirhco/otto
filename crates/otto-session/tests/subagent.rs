@@ -380,6 +380,7 @@ async fn subagent_stop_deny_reruns_the_child_loop() {
             command: None,
             abort: CancellationToken::new(),
             event_tx: None,
+            directory: None,
         })
         .await
         .expect("spawn completes");
@@ -451,6 +452,7 @@ async fn subagent_stop_ask_approved_ends_the_child_loop() {
                 command: None,
                 abort: CancellationToken::new(),
                 event_tx: None,
+                directory: None,
             })
             .await
     });
@@ -530,6 +532,7 @@ async fn subagent_stop_ask_rejected_injects_the_human_message_and_reruns() {
                 command: None,
                 abort: CancellationToken::new(),
                 event_tx: None,
+                directory: None,
             })
             .await
     });
@@ -744,6 +747,7 @@ async fn spawned_child_inherits_parent_permission_mode() {
             command: None,
             abort: CancellationToken::new(),
             event_tx: None,
+            directory: None,
         })
         .await
         .expect("child spawn");
@@ -803,6 +807,7 @@ async fn spawn_many_delegates_in_order() {
         command: None,
         abort: CancellationToken::new(),
         event_tx: None,
+        directory: None,
     };
     let reqs = vec![make_req("one"), make_req("two")];
 
@@ -850,6 +855,7 @@ async fn unknown_subagent_type_errors() {
             command: None,
             abort: CancellationToken::new(),
             event_tx: None,
+            directory: None,
         })
         .await
         .unwrap_err();
@@ -899,6 +905,7 @@ async fn event_tx_forwards_child_run_events() {
             command: None,
             abort: CancellationToken::new(),
             event_tx: Some(tx),
+            directory: None,
         })
         .await
         .expect("child run");
@@ -1168,4 +1175,62 @@ async fn permission_ask_admits_on_reply_once() {
         ToolState::Completed { output, .. } => assert_eq!(output, "edited"),
         other => panic!("expected completed after reply Once, got {other:?}"),
     }
+}
+
+// -- 5. directory override ----------------------------------------------------
+
+#[tokio::test]
+async fn spawn_honors_directory_override() {
+    let store = Store::open_in_memory().await.expect("store");
+    let parent_id = "ses_parent_dir_override";
+    seed_session(&store, parent_id, "please delegate").await;
+
+    let (child_route, _child_calls) = ScriptedRoute::build(vec![text_turn("c1", "final")]);
+    let route_for: RouteFor = {
+        let child_route = child_route.clone();
+        Arc::new(move |_agent: &AgentInfo| (child_route.clone(), model()))
+    };
+    let permission = Arc::new(Permission::new(Ruleset::from_config(
+        &json!({ "*": "allow" }),
+    )));
+
+    let spawner_directory = std::env::temp_dir().join("otto-session-spawner-base");
+    let override_directory = std::env::temp_dir().join("otto-session-spawner-override");
+
+    let spawner = Arc::new(SessionSubagentSpawner::new(
+        store.clone(),
+        registry(vec![]),
+        permission.clone(),
+        Ruleset::new(),
+        json!({}),
+        route_for,
+        spawner_directory.clone(),
+        "prj_1",
+        "1.0.0",
+        None,
+        None,
+    ));
+
+    spawner
+        .spawn(otto_tools::SubagentRequest {
+            parent_session_id: sid(parent_id),
+            parent_message_id: "msg_x".into(),
+            subagent_type: "general".into(),
+            description: "d".into(),
+            prompt: "do X".into(),
+            task_id: None,
+            command: None,
+            abort: CancellationToken::new(),
+            event_tx: None,
+            directory: Some(override_directory.clone()),
+        })
+        .await
+        .expect("spawn completes");
+
+    let sessions = store.list_sessions().await.expect("sessions");
+    let child = sessions
+        .iter()
+        .find(|s| s.parent_id.as_deref() == Some(parent_id))
+        .expect("a child session");
+    assert_eq!(child.directory, override_directory.display().to_string());
 }
