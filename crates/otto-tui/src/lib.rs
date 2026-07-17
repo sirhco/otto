@@ -1,5 +1,6 @@
 //! otto TUI — a ratatui terminal client for `otto serve`.
 
+pub mod appearance;
 pub mod client;
 pub mod input;
 pub mod narration;
