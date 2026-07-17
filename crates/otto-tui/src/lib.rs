@@ -80,7 +80,34 @@ pub async fn run(opts: TuiOptions) -> Result<()> {
     // block startup). NO_COLOR always wins over a configured preset.
     let cfg_theme = otto_config::load(&opts.cwd).ok().and_then(|c| c.theme);
     let no_color = std::env::var_os("NO_COLOR").is_some();
-    app.theme = crate::theme::Theme::select_with(no_color, cfg_theme.as_deref());
+    app.color_depth = crate::appearance::detect_color_depth();
+
+    let mut ssh_detected = false;
+    if cfg_theme.as_deref() == Some("auto") && !no_color {
+        app.dark_theme = crate::appearance::quantize(&crate::theme::Theme::dark(), app.color_depth);
+        app.light_theme =
+            crate::appearance::quantize(&crate::theme::Theme::preset("light"), app.color_depth);
+
+        let mode = match crate::appearance::os_theme::detect_os_theme().await {
+            Some(m) => m,
+            None if crate::appearance::os_theme::is_ssh_session() => {
+                ssh_detected = true;
+                crate::appearance::os_theme::detect_os_theme_ssh()
+                    .await
+                    .unwrap_or(crate::appearance::ThemeMode::Dark)
+            }
+            None => crate::appearance::ThemeMode::Dark,
+        };
+        app.theme_mode = Some(mode);
+        app.theme = match mode {
+            crate::appearance::ThemeMode::Light => app.light_theme.clone(),
+            crate::appearance::ThemeMode::Dark => app.dark_theme.clone(),
+        };
+    } else {
+        let selected = crate::theme::Theme::select_with(no_color, cfg_theme.as_deref());
+        app.theme = crate::appearance::quantize(&selected, app.color_depth);
+    }
+    let should_poll = should_poll_os_theme(cfg_theme.as_deref(), no_color, ssh_detected);
     crate::render::highlight::select_syntect_theme(cfg_theme.as_deref());
     // Load catalogs + sessions up front (best-effort).
     if let Ok(agents) = client.agents().await {
@@ -119,6 +146,12 @@ pub async fn run(opts: TuiOptions) -> Result<()> {
                     }
                     Event::Resize(_, _) => {
                         let _ = tx.send(Msg::Resize);
+                    }
+                    Event::FocusGained => {
+                        let _ = tx.send(Msg::FocusChanged(true));
+                    }
+                    Event::FocusLost => {
+                        let _ = tx.send(Msg::FocusChanged(false));
                     }
                     _ => {}
                 }
@@ -177,8 +210,27 @@ pub async fn run(opts: TuiOptions) -> Result<()> {
             }
         });
     }
+    // OS-appearance live-poll pump — only spawned in `theme = "auto"` mode
+    // with a live-pollable detection method (see `should_poll_os_theme`).
+    if should_poll {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let mode = crate::appearance::os_theme::detect_os_theme().await;
+                if tx.send(Msg::OsThemeChanged(mode)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
 
     let mut terminal = enter_terminal()?;
+    if let Some(hex) = app.theme.accent_hex() {
+        let _ = set_cursor_color(&hex);
+    }
 
     // Arm the startup splash (an `App::splash` tick countdown drained by the
     // event loop) unless opted out or the terminal can't fit even the banner.
@@ -251,6 +303,17 @@ async fn event_loop(
                         }
                         reenter_terminal(terminal)?;
                         terminal.draw(|f| view::view(app, f))?;
+                    }
+                }
+                LoopAction::Notify => {
+                    let _ = notify_turn_finished();
+                }
+                LoopAction::ResetTitle => {
+                    let _ = reset_title();
+                }
+                LoopAction::CursorColor => {
+                    if let Some(hex) = app.theme.accent_hex() {
+                        let _ = set_cursor_color(&hex);
                     }
                 }
             }
@@ -501,7 +564,11 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     // native drag-select, which is how users copy transcript/code text.
     // Wheel-scroll is not worth that trade-off — keyboard PageUp/PageDown/End
     // (input.rs) cover scrolling instead.
-    execute!(out, EnterAlternateScreen)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        crossterm::event::EnableFocusChange
+    )?;
     if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
         use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
         if execute!(
@@ -522,7 +589,12 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(
         use crossterm::event::PopKeyboardEnhancementFlags;
         let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     }
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    let _ = reset_cursor_color();
+    execute!(
+        terminal.backend_mut(),
+        crossterm::event::DisableFocusChange,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -533,7 +605,11 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(
 #[cfg(unix)]
 fn reenter_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        crossterm::event::EnableFocusChange
+    )?;
     if should_pop_kbd() {
         use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
         let _ = execute!(
@@ -624,6 +700,15 @@ fn reset_cursor_color() -> io::Result<()> {
     out.flush()
 }
 
+/// Whether `run()` should spawn the live OS-appearance poll pump: only in
+/// `theme = "auto"` mode, only when `NO_COLOR` isn't forcing `mono()`
+/// regardless of detection, and only when startup detection did NOT fall
+/// back to the SSH one-shot path (a live re-poll there would race the
+/// `crossterm::EventStream` read).
+fn should_poll_os_theme(cfg_theme: Option<&str>, no_color: bool, ssh_detected: bool) -> bool {
+    cfg_theme == Some("auto") && !no_color && !ssh_detected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,6 +785,24 @@ mod tests {
     #[test]
     fn cursor_color_reset_sequence_is_osc112() {
         assert_eq!(CURSOR_COLOR_RESET_SEQUENCE, "\x1b]112\x07");
+    }
+
+    #[test]
+    fn should_poll_os_theme_only_when_auto_and_not_ssh_detected() {
+        assert!(should_poll_os_theme(Some("auto"), false, false));
+        assert!(
+            !should_poll_os_theme(Some("auto"), false, true),
+            "ssh one-shot only"
+        );
+        assert!(
+            !should_poll_os_theme(Some("nord"), false, false),
+            "not auto mode"
+        );
+        assert!(
+            !should_poll_os_theme(Some("auto"), true, false),
+            "NO_COLOR wins"
+        );
+        assert!(!should_poll_os_theme(None, false, false));
     }
 }
 
