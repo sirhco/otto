@@ -138,6 +138,17 @@ impl Theme {
                 warn: Color::Rgb(0xEB, 0xCB, 0x8B),
                 err: Color::Rgb(0xBF, 0x61, 0x6A),
             }),
+            // Light — a light-background counterpart for OS-appearance
+            // auto-detection (`theme = "auto"`). Not derived from `dark()`
+            // like `mono()` is: needs its own palette, not a stripped one.
+            "light" => from_palette(Palette {
+                text: Color::Rgb(0x24, 0x29, 0x2E),
+                muted: Color::Rgb(0x6E, 0x77, 0x81),
+                accent: Color::Rgb(0x03, 0x66, 0xD6),
+                ok: Color::Rgb(0x22, 0x86, 0x3A),
+                warn: Color::Rgb(0xB0, 0x80, 0x00),
+                err: Color::Rgb(0xD7, 0x3A, 0x49),
+            }),
             _ => Self::dark(),
         }
     }
@@ -153,6 +164,18 @@ impl Theme {
                 Some(name) => Self::preset(name),
                 None => Self::dark(),
             }
+        }
+    }
+
+    /// The accent color as an uppercase 6-digit hex string (no `#`), for OSC
+    /// 12 terminal cursor coloring. `None` for named/indexed colors (the
+    /// plain `dark()`/`mono()` presets) — there's no cursor-color equivalent
+    /// for a named ANSI color.
+    #[must_use]
+    pub fn accent_hex(&self) -> Option<String> {
+        match self.accent.fg {
+            Some(Color::Rgb(r, g, b)) => Some(format!("{r:02X}{g:02X}{b:02X}")),
+            _ => None,
         }
     }
 }
@@ -298,5 +321,32 @@ mod tests {
             Theme::select_with(false, None).accent.fg,
             Theme::dark().accent.fg
         );
+    }
+
+    #[test]
+    fn preset_light_is_distinct_and_colored() {
+        let l = Theme::preset("light");
+        assert!(l.accent.fg.is_some());
+        assert_ne!(l.accent.fg, Theme::dark().accent.fg);
+    }
+
+    #[test]
+    fn accent_hex_for_rgb_preset() {
+        // Nord's accent: Rgb(0x88, 0xC0, 0xD0).
+        assert_eq!(
+            Theme::preset("nord").accent_hex(),
+            Some("88C0D0".to_string())
+        );
+    }
+
+    #[test]
+    fn accent_hex_none_for_named_color() {
+        // `dark()`'s accent is the named `Color::Cyan`, not RGB.
+        assert_eq!(Theme::dark().accent_hex(), None);
+    }
+
+    #[test]
+    fn accent_hex_none_for_mono() {
+        assert_eq!(Theme::mono().accent_hex(), None);
     }
 }
