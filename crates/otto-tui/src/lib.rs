@@ -566,6 +566,64 @@ fn osc52_copy(s: &str) -> io::Result<()> {
     out.flush()
 }
 
+/// Build the OSC 9 "system notification" escape sequence. Broadly supported
+/// (iTerm2, WezTerm, Warp, Ghostty); terminals that don't recognize OSC 9
+/// safely ignore it.
+fn notify_sequence(text: &str) -> String {
+    format!("\x1b]9;{text}\x07")
+}
+
+/// Build a terminal-title-set (OSC 0) escape sequence.
+fn title_sequence(text: &str) -> String {
+    format!("\x1b]0;{text}\x07")
+}
+
+/// Write the turn-finished OS notification and set a "done" terminal title.
+fn notify_turn_finished() -> io::Result<()> {
+    use std::io::Write;
+    let mut out = io::stdout();
+    write!(
+        out,
+        "{}{}",
+        notify_sequence("otto: turn finished"),
+        title_sequence("otto — done")
+    )?;
+    out.flush()
+}
+
+/// Reset the terminal title to the plain `otto` title.
+fn reset_title() -> io::Result<()> {
+    use std::io::Write;
+    let mut out = io::stdout();
+    write!(out, "{}", title_sequence("otto"))?;
+    out.flush()
+}
+
+/// Build the OSC 12 "set cursor color" escape sequence for an uppercase
+/// 6-digit hex string (no `#`), e.g. `"88C0D0"`.
+fn cursor_color_sequence(hex: &str) -> String {
+    format!("\x1b]12;#{hex}\x07")
+}
+
+/// Reset the terminal cursor color to its default (OSC 112).
+const CURSOR_COLOR_RESET_SEQUENCE: &str = "\x1b]112\x07";
+
+/// Set the terminal cursor color (OSC 12) to `hex` (e.g. `"88C0D0"`, no `#`).
+fn set_cursor_color(hex: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut out = io::stdout();
+    write!(out, "{}", cursor_color_sequence(hex))?;
+    out.flush()
+}
+
+/// Reset the terminal cursor color to its default.
+fn reset_cursor_color() -> io::Result<()> {
+    use std::io::Write;
+    let mut out = io::stdout();
+    write!(out, "{CURSOR_COLOR_RESET_SEQUENCE}")?;
+    out.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,6 +678,28 @@ mod tests {
         let seq = osc52_sequence("hello");
         assert!(seq.starts_with("\x1b]52;c;"));
         assert!(seq.ends_with('\x07'));
+    }
+
+    #[test]
+    fn notify_sequence_is_osc9() {
+        let seq = notify_sequence("otto: turn finished");
+        assert_eq!(seq, "\x1b]9;otto: turn finished\x07");
+    }
+
+    #[test]
+    fn title_sequence_is_osc0() {
+        let seq = title_sequence("otto — done");
+        assert_eq!(seq, "\x1b]0;otto — done\x07");
+    }
+
+    #[test]
+    fn cursor_color_sequence_is_osc12() {
+        assert_eq!(cursor_color_sequence("88C0D0"), "\x1b]12;#88C0D0\x07");
+    }
+
+    #[test]
+    fn cursor_color_reset_sequence_is_osc112() {
+        assert_eq!(CURSOR_COLOR_RESET_SEQUENCE, "\x1b]112\x07");
     }
 }
 
