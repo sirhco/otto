@@ -123,7 +123,9 @@ pub struct Config {
     pub shell: Option<String>,
 
     /// Named TUI color theme preset (e.g. "catppuccin", "gruvbox", "nord",
-    /// "base16"). Unknown names fall back to the default dark theme.
+    /// "base16", "light"). Unknown names fall back to the default dark
+    /// theme. `"auto"` follows the OS's light/dark appearance setting
+    /// instead of a fixed preset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
 
