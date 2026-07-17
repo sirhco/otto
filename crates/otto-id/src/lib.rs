@@ -365,6 +365,11 @@ id_type!(
     PermissionId,
     Prefix::Permission
 );
+id_type!(
+    /// A question request id (`que_...`), distinct from every other id type.
+    QuestionId,
+    Prefix::Question
+);
 
 #[cfg(test)]
 mod tests {
