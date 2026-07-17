@@ -972,12 +972,24 @@ fn question_overlay(
         },
         theme.text_muted,
     )));
-    let body = lines
-        .iter()
-        .map(|l| l.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    overlay_text(frame, area, " Question ", &body, theme);
+    // Not routed through `overlay_text`: that helper takes a plain `&str`
+    // body (fine for permission's 2-line prompt) and a fixed 6-row height,
+    // both wrong here — flattening `lines` to a string would strip the
+    // arrow-key highlight's styling, and a multi-option question routinely
+    // needs more than 6 rows. Render the styled `Line`s directly instead,
+    // sized to content (mirrors `list_overlay`'s dynamic-height approach).
+    let h = (lines.len() as u16 + 2).max(3).min(area.height);
+    let r = centered(area, 50, h);
+    frame.render_widget(Clear, r);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .title(" Question ")
+                .borders(Borders::ALL)
+                .border_style(theme.border_focus),
+        ),
+        r,
+    );
 }
 
 fn list_overlay(
