@@ -432,6 +432,15 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         });
         return;
     }
+    if let Msg::QuestionReply { id, reply } = &msg {
+        let id = id.clone();
+        let reply = reply.clone();
+        let client = client.clone();
+        tokio::spawn(async move {
+            let _ = client.reply_question(&id, &reply).await;
+        });
+        return;
+    }
     if let Msg::CyclePermissionMode = &msg {
         // compute the next mode from the current one
         let next = match app.permission_mode.as_str() {

@@ -128,10 +128,7 @@ pub fn view(app: &App, frame: &mut Frame) {
         // the input row (`input()`) as a search bar and jump-scrolls the
         // transcript (`transcript()`); nothing extra to draw here.
         Overlay::Search(_) => {}
-        // Compile-only stub: Task 7 (otto-tui plumbing) added the variant but
-        // owns no rendering; Task 8 replaces this with the real interactive
-        // question overlay.
-        Overlay::Question(_) => {}
+        Overlay::Question(qs) => question_overlay(frame, area, qs, &app.theme),
     }
 }
 
@@ -932,6 +929,55 @@ fn permission_overlay(
         patterns.join(", ")
     );
     overlay_text(frame, area, " Permission ", &body, theme);
+}
+
+fn question_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    qs: &crate::state::QuestionSession,
+    theme: &crate::theme::Theme,
+) {
+    let q = &qs.questions[qs.current];
+    let progress = format!("({}/{})", qs.current + 1, qs.questions.len());
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!("{} {progress}", q.header),
+            theme.accent,
+        )),
+        Line::from(q.question.as_str()),
+        Line::from(""),
+    ];
+    for (i, opt) in q.options.iter().enumerate() {
+        let marker = if q.multiple {
+            if qs.cursor.contains(&i) { "[x]" } else { "[ ]" }
+        } else if qs.cursor.first() == Some(&i) {
+            "(•)"
+        } else {
+            "( )"
+        };
+        let text = format!("{marker} {} — {}", opt.label, opt.description);
+        let line = if i == qs.highlight {
+            Line::from(Span::styled(text, theme.selection))
+        } else {
+            Line::from(text)
+        };
+        lines.push(line);
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        if q.multiple {
+            "↑/↓ move · space toggle · enter confirm · esc cancel"
+        } else {
+            "↑/↓ move · enter select · esc cancel"
+        },
+        theme.text_muted,
+    )));
+    let body = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    overlay_text(frame, area, " Question ", &body, theme);
 }
 
 fn list_overlay(
