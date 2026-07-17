@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use otto_id::{MessageId, SessionId};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -150,6 +151,67 @@ impl PermissionGate for AllowAll {
     }
 }
 
+/// One selectable option in a `question` tool prompt (`QuestionV1.Option`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuestionOption {
+    /// Display text (1-5 words, concise).
+    pub label: String,
+    /// Explanation of this choice.
+    pub description: String,
+}
+
+/// One question in a `question` tool call's batch (`QuestionV1.Prompt`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct QuestionPrompt {
+    /// The complete question text.
+    pub question: String,
+    /// Very short label (max 30 chars).
+    pub header: String,
+    /// Available choices.
+    pub options: Vec<QuestionOption>,
+    /// Whether multiple options may be selected.
+    #[serde(default)]
+    pub multiple: bool,
+}
+
+/// The user's answer to a question-tool ask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionOutcome {
+    /// One selected-index-list per question, in order (each inner `Vec`
+    /// non-empty; exactly one element unless that question's `multiple` was
+    /// `true`).
+    Answered(Vec<Vec<usize>>),
+    /// The user declined to answer.
+    Cancelled,
+}
+
+/// The question-tool interactive seam. Mirrors [`PermissionGate`] but has no
+/// allow/deny policy dimension — every ask reaches a human (or auto-cancels
+/// non-interactively); there is nothing analogous to a config/agent ruleset
+/// for a free-choice question.
+#[async_trait::async_trait]
+pub trait QuestionGate: Send + Sync {
+    /// Ask the user to answer `questions`. Always resolves — there is no
+    /// error path, only [`QuestionOutcome::Answered`] or
+    /// [`QuestionOutcome::Cancelled`].
+    async fn ask(&self, questions: Vec<QuestionPrompt>) -> QuestionOutcome;
+}
+
+/// A question gate that cancels every ask. Default for contexts before a
+/// real interactive gate is wired (tests, headless tool-only usage) —
+/// preserves today's "question tool doesn't work without a real client"
+/// behavior, just via [`QuestionOutcome::Cancelled`] instead of a hard
+/// `Err`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DenyAllQuestions;
+
+#[async_trait::async_trait]
+impl QuestionGate for DenyAllQuestions {
+    async fn ask(&self, _questions: Vec<QuestionPrompt>) -> QuestionOutcome {
+        QuestionOutcome::Cancelled
+    }
+}
+
 /// Live-progress seam — mirrors opencode's `ctx.metadata({ title, metadata })`
 /// (`tool.ts:44`). Fire-and-forget: tools stream partial state, the host may
 /// render it. [`NoopSink`] discards updates.
@@ -186,6 +248,8 @@ pub struct ToolContext {
     pub abort: CancellationToken,
     /// Permission seam.
     pub permission: Arc<dyn PermissionGate>,
+    /// Question-tool interactive seam.
+    pub question: Arc<dyn QuestionGate>,
     /// Live-progress seam.
     pub metadata: Arc<dyn MetadataSink>,
     /// Subagent-spawn seam — `Some` only while a run loop is driving tool
@@ -213,6 +277,7 @@ impl ToolContext {
             directory: directory.into(),
             abort: CancellationToken::new(),
             permission: None,
+            question: None,
             metadata: None,
             subagent: None,
             event_tx: None,
@@ -229,6 +294,7 @@ pub struct ToolContextBuilder {
     directory: PathBuf,
     abort: CancellationToken,
     permission: Option<Arc<dyn PermissionGate>>,
+    question: Option<Arc<dyn QuestionGate>>,
     metadata: Option<Arc<dyn MetadataSink>>,
     subagent: Option<Arc<dyn SubagentSpawner>>,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<otto_events::LLMEvent>>,
@@ -270,6 +336,13 @@ impl ToolContextBuilder {
         self
     }
 
+    /// Set the question-tool gate.
+    #[must_use]
+    pub fn question(mut self, gate: Arc<dyn QuestionGate>) -> Self {
+        self.question = Some(gate);
+        self
+    }
+
     /// Set the metadata sink.
     #[must_use]
     pub fn metadata(mut self, sink: Arc<dyn MetadataSink>) -> Self {
@@ -304,6 +377,7 @@ impl ToolContextBuilder {
             directory: self.directory,
             abort: self.abort,
             permission: self.permission.unwrap_or_else(|| Arc::new(AllowAll)),
+            question: self.question.unwrap_or_else(|| Arc::new(DenyAllQuestions)),
             metadata: self.metadata.unwrap_or_else(|| Arc::new(NoopSink)),
             subagent: self.subagent,
             event_tx: self.event_tx,
@@ -440,5 +514,31 @@ mod tests {
             message: None,
         };
         assert!(!denial.to_string().contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn deny_all_questions_always_cancels() {
+        let gate = DenyAllQuestions;
+        let outcome = gate
+            .ask(vec![QuestionPrompt {
+                question: "pick one".into(),
+                header: "choice".into(),
+                options: vec![QuestionOption {
+                    label: "A".into(),
+                    description: "first".into(),
+                }],
+                multiple: false,
+            }])
+            .await;
+        assert_eq!(outcome, QuestionOutcome::Cancelled);
+    }
+
+    #[test]
+    fn tool_context_defaults_to_deny_all_questions() {
+        let ctx = ToolContext::builder(std::env::temp_dir()).build();
+        // No behavioral assertion beyond "it builds" — DenyAllQuestions'
+        // behavior itself is covered by the test above; this just confirms
+        // the builder's default wiring compiles and doesn't panic.
+        let _ = ctx.question;
     }
 }
