@@ -25,7 +25,7 @@ use otto_storage::model::{
     new_message_id, new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
-use otto_tools::{AllowAll, ToolRegistry};
+use otto_tools::{AllowAll, DenyAllQuestions, ToolRegistry};
 use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::model::{
@@ -249,6 +249,7 @@ fn config(store: Store, route: Arc<dyn Route>, tools: ToolRegistry) -> RunConfig
         route,
         tools: Arc::new(tools),
         permission: Arc::new(AllowAll),
+        question: Arc::new(DenyAllQuestions),
         model: Model::new("anthropic", "claude-3", "route_scripted"),
         agent: "build".into(),
         agent_prompt: Some("SYSTEM".into()),

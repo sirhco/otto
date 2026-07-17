@@ -16,9 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use otto_agent::{AgentInfo, config as agent_config, derive_subagent_permission};
-use otto_llm::{Model, Route};
 use otto_hooks::{Decision, HookEvent, HookRunner};
+use otto_llm::{Model, Route};
 use otto_permission::{Permission, Ruleset, SessionGate, merge};
+use otto_question::Question;
 use otto_storage::model::{
     Info, InfoBody, Part, PartKind, SessionId, User, UserModel, UserTime, new_message_id,
     new_part_id,
@@ -60,6 +61,7 @@ pub struct SessionSubagentSpawner {
     store: Store,
     tools: Arc<ToolRegistry>,
     permission: Arc<Permission>,
+    question: Arc<Question>,
     /// The parent session's permission ruleset — the `parentSessionPermission`
     /// fed to `deriveSubagentSessionPermission` (task.ts:125-128). For a nested
     /// spawn this is the enclosing child's derived ruleset.
@@ -105,6 +107,7 @@ impl SessionSubagentSpawner {
         store: Store,
         tools: Arc<ToolRegistry>,
         permission: Arc<Permission>,
+        question: Arc<Question>,
         parent_ruleset: Ruleset,
         config_agents: serde_json::Value,
         route_for: RouteFor,
@@ -118,6 +121,7 @@ impl SessionSubagentSpawner {
             store,
             tools,
             permission,
+            question,
             parent_ruleset,
             config_agents,
             route_for,
@@ -286,6 +290,11 @@ impl SubagentSpawner for SessionSubagentSpawner {
             self.permission.clone(),
             child_session_id.clone(),
         ));
+        let child_question_gate: Arc<dyn otto_tools::QuestionGate> =
+            Arc::new(otto_question::SessionQuestionGate::new(
+                self.question.clone(),
+                child_session_id.clone(),
+            ));
         let child_spawner: Arc<dyn SubagentSpawner> =
             Arc::new(self.with_parent_ruleset(child_ruleset));
         let system_cache = Some(compute_warm(
@@ -301,6 +310,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
             route,
             tools: self.tools.clone(),
             permission: child_gate,
+            question: child_question_gate,
             model,
             agent: subagent.name.clone(),
             agent_prompt: subagent.prompt.clone(),

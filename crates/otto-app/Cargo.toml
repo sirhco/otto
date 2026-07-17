@@ -13,6 +13,7 @@ otto-tools.workspace = true
 otto-storage.workspace = true
 otto-session.workspace = true
 otto-permission.workspace = true
+otto-question.workspace = true
 otto-agent.workspace = true
 otto-config.workspace = true
 otto-lsp.workspace = true

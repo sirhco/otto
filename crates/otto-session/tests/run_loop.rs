@@ -23,7 +23,9 @@ use otto_storage::model::{
     new_message_id, new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
-use otto_tools::{AllowAll, ExecuteResult, Tool, ToolContext, ToolError, ToolRegistry};
+use otto_tools::{
+    AllowAll, DenyAllQuestions, ExecuteResult, Tool, ToolContext, ToolError, ToolRegistry,
+};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -219,6 +221,7 @@ fn config(
         route,
         tools: Arc::new(tools),
         permission: Arc::new(AllowAll),
+        question: Arc::new(DenyAllQuestions),
         model: Model::new("anthropic", "claude-3", "route_scripted"),
         agent: "build".into(),
         agent_prompt: Some("SYSTEM".into()),

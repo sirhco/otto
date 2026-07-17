@@ -38,9 +38,9 @@ pub use lsp::LspHandle;
 pub use registry::ToolRegistry;
 pub use subagent::{SubagentRequest, SubagentSpawner};
 pub use tool::{
-    AllowAll, Attachment, ExecuteResult, MetadataSink, NoopSink, PermissionDenied, PermissionGate,
-    PermissionRequest, QuestionGate, QuestionOption, QuestionOutcome, QuestionPrompt, Tool,
-    ToolContext, ToolContextBuilder, ToolError, decode_args,
+    AllowAll, Attachment, DenyAllQuestions, ExecuteResult, MetadataSink, NoopSink,
+    PermissionDenied, PermissionGate, PermissionRequest, QuestionGate, QuestionOption,
+    QuestionOutcome, QuestionPrompt, Tool, ToolContext, ToolContextBuilder, ToolError, decode_args,
 };
 pub use tools::skill::{SkillMeta, skill_index_block, skill_roots};
 pub use tools::{

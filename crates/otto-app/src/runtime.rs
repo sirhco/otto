@@ -12,6 +12,7 @@ use otto_events::LLMEvent;
 use otto_llm::HttpTransport;
 use otto_mcp::{McpClient, McpServerConfig};
 use otto_permission::{Permission, PermissionMode, Ruleset, SessionGate};
+use otto_question::Question;
 use otto_session::run::{
     DEFAULT_COMPACTION_RESERVED, DEFAULT_MAX_RETRIES, DEFAULT_MAX_TOTAL_RETRIES,
     DEFAULT_PRESERVE_RECENT_TOKENS,
@@ -130,6 +131,7 @@ pub struct Runtime {
     store: Store,
     tools: Arc<ToolRegistry>,
     permission: Arc<Permission>,
+    question: Arc<Question>,
     agents: Vec<AgentInfo>,
     config: Config,
     auth: AuthStore,
@@ -185,6 +187,7 @@ impl Runtime {
             Permission::with_mode(permission_ruleset(&config), permission_mode(&config))
                 .with_hooks(hooks.clone()),
         );
+        let question = Arc::new(Question::new());
 
         // Construct the LSP service and inject it into the diagnostics-aware
         // tools (edit/write/apply_patch). Retained on the runtime so the server
@@ -236,6 +239,7 @@ impl Runtime {
             store,
             tools,
             permission,
+            question,
             agents,
             config,
             auth,
@@ -275,6 +279,7 @@ impl Runtime {
             Permission::with_mode(permission_ruleset(&config), permission_mode(&config))
                 .with_hooks(hooks.clone()),
         );
+        let question = Arc::new(Question::new());
         let lsp: Arc<otto_lsp::Lsp> = otto_lsp::Lsp::new(
             directory.clone(),
             otto_lsp::LspConfigResolved::enabled_default(),
@@ -297,6 +302,7 @@ impl Runtime {
             store,
             tools,
             permission,
+            question,
             agents,
             config,
             auth,
@@ -357,6 +363,12 @@ impl Runtime {
     #[must_use]
     pub fn permission(&self) -> &Arc<Permission> {
         &self.permission
+    }
+
+    /// The question-tool service.
+    #[must_use]
+    pub fn question(&self) -> &Arc<Question> {
+        &self.question
     }
 
     /// The resolved agent set.
@@ -525,6 +537,7 @@ impl Runtime {
             self.store.clone(),
             self.tools.clone(),
             self.permission.clone(),
+            self.question.clone(),
             agent.permission.clone(),
             agent_config(&self.config),
             route_for,
@@ -557,6 +570,7 @@ impl Runtime {
         let store = self.store.clone();
         let tools = self.tools.clone();
         let permission = self.permission.clone();
+        let question = self.question.clone();
         let hooks = self.hooks.clone();
         let factory = self.route_factory.clone();
         let directory = self.directory.clone();
@@ -713,11 +727,15 @@ impl Runtime {
             // 4. Assemble the RunConfig with the live event tap installed.
             let gate: Arc<dyn PermissionGate> =
                 Arc::new(SessionGate::new(permission.clone(), session_id.clone()));
+            let question_gate: Arc<dyn otto_tools::QuestionGate> = Arc::new(
+                otto_question::SessionQuestionGate::new(question.clone(), session_id.clone()),
+            );
             let cfg = RunConfig {
                 store: store.clone(),
                 route,
                 tools: tools.clone(),
                 permission: gate,
+                question: question_gate,
                 model,
                 agent: agent.name.clone(),
                 agent_prompt: agent.prompt.clone(),

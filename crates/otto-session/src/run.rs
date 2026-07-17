@@ -81,6 +81,8 @@ pub struct RunConfig {
     pub tools: Arc<ToolRegistry>,
     /// The permission gate threaded into tool execution.
     pub permission: Arc<dyn PermissionGate>,
+    /// The question-tool gate threaded into tool execution.
+    pub question: Arc<dyn otto_tools::QuestionGate>,
     /// The model to generate with.
     pub model: Model,
     /// The agent name.
@@ -783,7 +785,8 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, R
                 .message_id(&assistant_id)
                 .agent(&cfg.agent)
                 .abort(cfg.abort.clone())
-                .permission(cfg.permission.clone());
+                .permission(cfg.permission.clone())
+                .question(cfg.question.clone());
             // Inject the spawner so the `task` tool can drive a child loop; a
             // nested subagent re-enters here via the child `RunConfig.subagent`.
             if let Some(spawner) = &cfg.subagent {

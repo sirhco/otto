@@ -22,7 +22,7 @@ use otto_storage::model::{
     new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
-use otto_tools::{AllowAll, ToolRegistry};
+use otto_tools::{AllowAll, DenyAllQuestions, ToolRegistry};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -286,6 +286,7 @@ fn config(store: Store, route: Arc<dyn Route>, model: Model) -> RunConfig {
         route,
         tools: Arc::new(ToolRegistry::new()),
         permission: Arc::new(AllowAll),
+        question: Arc::new(DenyAllQuestions),
         model,
         agent: "build".into(),
         agent_prompt: Some("SYSTEM".into()),

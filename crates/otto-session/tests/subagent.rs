@@ -33,6 +33,10 @@ fn sid(s: &str) -> SessionId {
     s.into()
 }
 
+fn no_question_gate() -> Arc<dyn otto_tools::QuestionGate> {
+    Arc::new(otto_tools::DenyAllQuestions)
+}
+
 // -- scripted route ----------------------------------------------------------
 
 /// A [`Route`] that returns a canned event stream per `stream()` call.
@@ -228,6 +232,7 @@ async fn subagent_spawn_end_to_end() {
         store.clone(),
         tools.clone(),
         permission.clone(),
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         json!({}),
         route_for,
@@ -259,6 +264,7 @@ async fn subagent_spawn_end_to_end() {
         route: parent_route,
         tools: tools.clone(),
         permission: Arc::new(SessionGate::new(permission.clone(), parent_id)),
+        question: no_question_gate(),
         model: model(),
         agent: "build".into(),
         agent_prompt: Some("SYSTEM".into()),
@@ -359,6 +365,7 @@ async fn subagent_stop_deny_reruns_the_child_loop() {
         store.clone(),
         registry(vec![]),
         permission.clone(),
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         json!({}),
         route_for,
@@ -429,6 +436,7 @@ async fn subagent_stop_ask_approved_ends_the_child_loop() {
         store.clone(),
         registry(vec![]),
         permission.clone(),
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         json!({}),
         route_for,
@@ -509,6 +517,7 @@ async fn subagent_stop_ask_rejected_injects_the_human_message_and_reruns() {
         store.clone(),
         registry(vec![]),
         permission.clone(),
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         json!({}),
         route_for,
@@ -649,6 +658,7 @@ async fn ruleset_deny_fails_tool_but_turn_continues() {
         route,
         tools: registry(vec![Arc::new(TodoLikeTool)]),
         permission: Arc::new(SessionGate::new(permission.clone(), ses)),
+        question: no_question_gate(),
         model: model(),
         agent: "general".into(),
         agent_prompt: Some("SYSTEM".into()),
@@ -726,6 +736,7 @@ async fn spawned_child_inherits_parent_permission_mode() {
         store.clone(),
         tools.clone(),
         permission.clone(),
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         json!({}),
         route_for,
@@ -787,6 +798,7 @@ async fn spawn_many_delegates_in_order() {
         store.clone(),
         tools,
         permission,
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         json!({}),
         route_for,
@@ -834,6 +846,7 @@ async fn unknown_subagent_type_errors() {
         store.clone(),
         tools,
         permission,
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         json!({}),
         route_for,
@@ -883,6 +896,7 @@ async fn event_tx_forwards_child_run_events() {
         store.clone(),
         tools,
         permission,
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         json!({}),
         route_for,
@@ -965,6 +979,7 @@ async fn nested_subagent_spawn() {
         store.clone(),
         tools.clone(),
         permission.clone(),
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         config_agents,
         route_for,
@@ -991,6 +1006,7 @@ async fn nested_subagent_spawn() {
         route: parent_route,
         tools,
         permission: Arc::new(SessionGate::new(permission.clone(), parent_id)),
+        question: no_question_gate(),
         model: model(),
         agent: "build".into(),
         agent_prompt: Some("SYSTEM".into()),
@@ -1076,6 +1092,7 @@ async fn run_askedit_with_ruleset(ruleset: Value) -> ToolState {
         route,
         tools: registry(vec![Arc::new(AskEditTool)]),
         permission: Arc::new(SessionGate::new(permission, ses)),
+        question: no_question_gate(),
         model: model(),
         agent: "build".into(),
         agent_prompt: Some("SYSTEM".into()),
@@ -1151,6 +1168,7 @@ async fn permission_ask_admits_on_reply_once() {
         route,
         tools: registry(vec![Arc::new(AskEditTool)]),
         permission: Arc::new(SessionGate::new(permission, ses)),
+        question: no_question_gate(),
         model: model(),
         agent: "build".into(),
         agent_prompt: Some("SYSTEM".into()),
@@ -1201,6 +1219,7 @@ async fn spawn_honors_directory_override() {
         store.clone(),
         registry(vec![]),
         permission.clone(),
+        Arc::new(otto_question::Question::new()),
         Ruleset::new(),
         json!({}),
         route_for,
