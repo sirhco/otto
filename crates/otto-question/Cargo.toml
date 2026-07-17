@@ -1,0 +1,15 @@
+[package]
+name = "otto-question"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+otto-id.workspace = true
+otto-tools.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

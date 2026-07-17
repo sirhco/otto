@@ -9,6 +9,7 @@ members = [
     "crates/otto-storage",
     "crates/otto-session",
     "crates/otto-permission",
+    "crates/otto-question",
     "crates/otto-agent",
     "crates/otto-config",
     "crates/otto-auth",
@@ -49,6 +50,7 @@ otto-llm = { path = "crates/otto-llm" }
 otto-tools = { path = "crates/otto-tools" }
 otto-storage = { path = "crates/otto-storage" }
 otto-permission = { path = "crates/otto-permission" }
+otto-question = { path = "crates/otto-question" }
 otto-agent = { path = "crates/otto-agent" }
 otto-mcp = { path = "crates/otto-mcp" }
 otto-lsp = { path = "crates/otto-lsp" }

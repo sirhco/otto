@@ -2065,6 +2065,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-question"
+version = "0.9.0"
+dependencies = [
+ "async-trait",
+ "otto-id",
+ "otto-tools",
+ "tokio",
+]
+
+[[package]]
 name = "otto-server"
 version = "0.9.0"
 dependencies = [
