@@ -156,13 +156,25 @@ fn parse_osc11_reply(reply: &[u8]) -> Option<ThemeMode> {
     let text = std::str::from_utf8(reply).ok()?;
     let rgb = text.split("rgb:").nth(1)?;
     let mut channels = rgb.split(['/', '\x1b', '\x07']).filter(|s| !s.is_empty());
-    let r = u16::from_str_radix(channels.next()?, 16).ok()?;
-    let g = u16::from_str_radix(channels.next()?, 16).ok()?;
-    let b = u16::from_str_radix(channels.next()?, 16).ok()?;
-    // Channels may be 8- or 16-bit; normalize to 0..=255 before computing
-    // luminance.
-    let norm = |v: u16| f64::from(v) / f64::from(u16::MAX) * 255.0;
-    let luminance = 0.299 * norm(r) + 0.587 * norm(g) + 0.114 * norm(b);
+    let r_hex = channels.next()?;
+    let g_hex = channels.next()?;
+    let b_hex = channels.next()?;
+
+    // Each channel may be a different digit-count per the X11 rgb: spec
+    // (typically uniform in practice, but not guaranteed) — normalize each
+    // by its own max value rather than assuming a fixed 16-bit width.
+    let norm = |hex: &str| -> Option<f64> {
+        let v = u32::from_str_radix(hex, 16).ok()?;
+        let max = 16u32
+            .checked_pow(u32::try_from(hex.len()).ok()?)?
+            .checked_sub(1)?;
+        if max == 0 {
+            return None;
+        }
+        Some(f64::from(v) / f64::from(max) * 255.0)
+    };
+    let (r, g, b) = (norm(r_hex)?, norm(g_hex)?, norm(b_hex)?);
+    let luminance = 0.299 * r + 0.587 * g + 0.114 * b;
     Some(if luminance < 128.0 {
         ThemeMode::Dark
     } else {
@@ -255,6 +267,15 @@ mod tests {
     #[test]
     fn parse_osc11_reply_garbage_is_none() {
         assert_eq!(parse_osc11_reply(b"not an osc11 reply"), None);
+    }
+
+    #[test]
+    fn parse_osc11_reply_handles_8bit_hex_channels() {
+        // 2-digit (8-bit) hex per channel, per the X11 rgb: spec — must not
+        // be misread as a 16-bit value (that bug misclassified white as
+        // Dark).
+        let reply = b"\x1b]11;rgb:ff/ff/ff\x07";
+        assert_eq!(parse_osc11_reply(reply), Some(ThemeMode::Light));
     }
 
     #[test]
