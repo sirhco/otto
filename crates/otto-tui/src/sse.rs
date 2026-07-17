@@ -21,6 +21,7 @@ pub struct FrameDecoder {
 pub enum ServerEvent {
     Connected,
     PermissionAsked(PermissionAsked),
+    QuestionAsked(QuestionAsked),
     /// A `permission.mode_changed` envelope: the session whose mode changed
     /// and the new wire mode (`approve-each`/`accept-edits`/`full-auto`).
     /// `session_id` is decoded but not currently used to filter (mirrors
@@ -77,6 +78,30 @@ pub struct PermissionAsked {
     pub session_id: String,
     pub permission: String,
     pub patterns: Vec<String>,
+}
+
+/// One option in a pending question, surfaced by `/event` (`question.asked`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOptionView {
+    pub label: String,
+    pub description: String,
+}
+
+/// One question in a pending question-tool ask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionPromptView {
+    pub question: String,
+    pub header: String,
+    pub options: Vec<QuestionOptionView>,
+    pub multiple: bool,
+}
+
+/// A pending question-tool ask surfaced by `/event` (`question.asked`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionAsked {
+    pub id: String,
+    pub session_id: String,
+    pub questions: Vec<QuestionPromptView>,
 }
 
 impl FrameDecoder {
@@ -164,6 +189,29 @@ struct ModeChangedProps {
     mode: String,
 }
 
+#[derive(Deserialize)]
+struct QuestionOptionProps {
+    label: String,
+    description: String,
+}
+
+#[derive(Deserialize)]
+struct QuestionPromptProps {
+    question: String,
+    header: String,
+    options: Vec<QuestionOptionProps>,
+    #[serde(default)]
+    multiple: bool,
+}
+
+#[derive(Deserialize)]
+struct QuestionAskedProps {
+    id: String,
+    #[serde(rename = "sessionID")]
+    session_id: String,
+    questions: Vec<QuestionPromptProps>,
+}
+
 /// Parse a `/event` envelope frame. Unknown envelope types map to
 /// [`ServerEvent::Other`]; malformed frames also map to `Other`.
 #[must_use]
@@ -191,6 +239,30 @@ pub fn decode_event(frame: &str) -> ServerEvent {
                 Err(_) => ServerEvent::Other,
             }
         }
+        "question.asked" => match serde_json::from_value::<QuestionAskedProps>(env.properties) {
+            Ok(q) => ServerEvent::QuestionAsked(QuestionAsked {
+                id: q.id,
+                session_id: q.session_id,
+                questions: q
+                    .questions
+                    .into_iter()
+                    .map(|p| QuestionPromptView {
+                        question: p.question,
+                        header: p.header,
+                        options: p
+                            .options
+                            .into_iter()
+                            .map(|o| QuestionOptionView {
+                                label: o.label,
+                                description: o.description,
+                            })
+                            .collect(),
+                        multiple: p.multiple,
+                    })
+                    .collect(),
+            }),
+            Err(_) => ServerEvent::Other,
+        },
         "workflow.started" | "workflow.progress" | "workflow.done" => {
             let p = &env.properties;
             let phase = match env.kind.as_str() {
@@ -398,5 +470,28 @@ mod tests {
             decode_event("{\"type\":\"message.part.updated\",\"properties\":{}}"),
             ServerEvent::Other
         );
+    }
+
+    #[test]
+    fn decode_event_reads_question_asked() {
+        let frame = "{\"type\":\"question.asked\",\"properties\":{\"id\":\"que_1\",\"sessionID\":\"ses_1\",\"questions\":[{\"question\":\"Pick one\",\"header\":\"choice\",\"options\":[{\"label\":\"A\",\"description\":\"first\"}],\"multiple\":false}]}}";
+        let ev = decode_event(frame);
+        match ev {
+            ServerEvent::QuestionAsked(q) => {
+                assert_eq!(q.id, "que_1");
+                assert_eq!(q.session_id, "ses_1");
+                assert_eq!(q.questions.len(), 1);
+                assert_eq!(q.questions[0].header, "choice");
+                assert_eq!(q.questions[0].options[0].label, "A");
+                assert!(!q.questions[0].multiple);
+            }
+            other => panic!("expected QuestionAsked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_event_question_asked_malformed_is_other() {
+        let frame = "{\"type\":\"question.asked\",\"properties\":{}}";
+        assert_eq!(decode_event(frame), ServerEvent::Other);
     }
 }
