@@ -687,7 +687,8 @@ async fn session_prompt(
 /// `GET /event` — the global SSE stream (opencode `event.ts`).
 ///
 /// Emits an initial `server.connected` frame, then forwards permission
-/// [`Asked`](otto_permission::Asked) events and any fanned-out run events,
+/// [`Asked`](otto_permission::Asked) events, question-tool
+/// [`Asked`](otto_question::Asked) events, and any fanned-out run events,
 /// each framed as `data: { type, properties }`. `tower-http`/axum keep-alive
 /// comments hold the connection open between events.
 async fn event_stream(
