@@ -65,6 +65,12 @@ impl Tool for QuestionTool {
         let params: QuestionParams = decode_args(self.id(), args)?;
         let questions = params.questions;
 
+        if questions.is_empty() {
+            return Err(ToolError::Execution(
+                "question tool called with no questions".to_string(),
+            ));
+        }
+
         match ctx.question.ask(questions.clone()).await {
             QuestionOutcome::Cancelled => {
                 Err(ToolError::Execution("question cancelled by user".to_string()))
@@ -155,6 +161,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments { .. }));
+    }
+
+    #[tokio::test]
+    async fn empty_questions_is_an_error() {
+        let ctx = ToolContext::builder(std::env::temp_dir()).build();
+        let err = QuestionTool
+            .execute(serde_json::json!({ "questions": [] }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no questions"));
     }
 
     #[tokio::test]
