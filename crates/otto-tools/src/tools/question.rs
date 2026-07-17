@@ -108,7 +108,7 @@ impl Tool for QuestionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::{QuestionGate, QuestionOption, QuestionOutcome};
+    use crate::tool::{QuestionGate, QuestionOutcome};
 
     struct ScriptedGate(QuestionOutcome);
 
@@ -116,25 +116,6 @@ mod tests {
     impl QuestionGate for ScriptedGate {
         async fn ask(&self, _questions: Vec<QuestionPrompt>) -> QuestionOutcome {
             self.0.clone()
-        }
-    }
-
-    #[allow(dead_code)]
-    fn one_question(multiple: bool) -> QuestionPrompt {
-        QuestionPrompt {
-            question: "Pick one".into(),
-            header: "choice".into(),
-            options: vec![
-                QuestionOption {
-                    label: "A".into(),
-                    description: "first".into(),
-                },
-                QuestionOption {
-                    label: "B".into(),
-                    description: "second".into(),
-                },
-            ],
-            multiple,
         }
     }
 
