@@ -33,6 +33,12 @@ pub trait PermissionResponder: Send + Sync {
     fn respond(&self, asked: &Asked) -> Reply;
 }
 
+/// Decides how to answer an interactive question-tool [`Asked`] request.
+pub trait QuestionResponder: Send + Sync {
+    /// Answer a question-tool request.
+    fn respond(&self, asked: &otto_question::Asked) -> otto_tools::QuestionOutcome;
+}
+
 /// Everything [`run_session`] needs to drive one turn.
 pub struct RunRequest {
     /// The user prompt to send.
@@ -48,12 +54,12 @@ pub struct RunRequest {
 /// Drive a single agent turn on `runtime`, rendering the streamed events to
 /// `out`.
 ///
-/// Creates (or continues) a session, spawns a background task that answers
-/// permission asks via `responder`, kicks off [`Runtime::run`], renders the
-/// live [`LLMEvent`](otto_events::LLMEvent) stream with a [`Renderer`], and
-/// awaits the final assistant message. `abort` cancels the run (wire it to
-/// Ctrl-C); it is also used to tear the permission task down once the turn
-/// ends.
+/// Creates (or continues) a session, spawns background tasks that answer
+/// permission asks via `responder` and question-tool asks via
+/// `question_responder`, kicks off [`Runtime::run`], renders the live
+/// [`LLMEvent`](otto_events::LLMEvent) stream with a [`Renderer`], and awaits
+/// the final assistant message. `abort` cancels the run (wire it to Ctrl-C);
+/// it is also used to tear both tasks down once the turn ends.
 ///
 /// # Errors
 /// Returns an error if the session cannot be created/found, if the run task
@@ -65,6 +71,7 @@ pub async fn run_session<W: Write + Send>(
     out: W,
     color: bool,
     responder: Arc<dyn PermissionResponder>,
+    question_responder: Arc<dyn QuestionResponder>,
     abort: CancellationToken,
 ) -> Result<()> {
     let RunRequest {
@@ -90,6 +97,11 @@ pub async fn run_session<W: Write + Send>(
         responder.clone(),
         abort.clone(),
     );
+    let question_task = spawn_question_pump(
+        runtime.question().clone(),
+        question_responder.clone(),
+        abort.clone(),
+    );
 
     // Drive the turn and render the live event stream.
     let RunHandle { mut events, join } =
@@ -104,6 +116,7 @@ pub async fn run_session<W: Write + Send>(
     // The turn is done: tear the permission task down.
     abort.cancel();
     let _ = perm_task.await;
+    let _ = question_task.await;
 
     match outcome {
         Ok(Ok(_info)) => Ok(()),
@@ -138,6 +151,37 @@ pub fn spawn_permission_pump(
                             .await
                             .unwrap_or(Reply::Reject { message: None });
                         permission.reply(&request_id, reply);
+                    }
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(_)) => continue,
+                },
+            }
+        }
+    })
+}
+
+/// Spawn the background task that answers question-tool [`Asked`] events via
+/// `responder` until `abort` is cancelled or the service closes. Mirrors
+/// [`spawn_permission_pump`] exactly — see its doc comment for the
+/// subscribe-before-run rationale, which applies identically here.
+pub fn spawn_question_pump(
+    question: Arc<otto_question::Question>,
+    responder: Arc<dyn QuestionResponder>,
+    abort: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let mut asks = question.subscribe();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = abort.cancelled() => break,
+                received = asks.recv() => match received {
+                    Ok(asked) => {
+                        let request_id = asked.request_id.clone();
+                        let responder = responder.clone();
+                        let outcome = tokio::task::spawn_blocking(move || responder.respond(&asked))
+                            .await
+                            .unwrap_or(otto_tools::QuestionOutcome::Cancelled);
+                        question.reply(&request_id, outcome);
                     }
                     Err(RecvError::Closed) => break,
                     Err(RecvError::Lagged(_)) => continue,
@@ -208,6 +252,64 @@ impl PermissionResponder for TtyResponder {
     }
 }
 
+/// The interactive CLI question-tool responder.
+///
+/// On a TTY it prints each question's header/text/options to stderr and
+/// reads a selection from stdin — a single index, or comma-separated
+/// indices when a question's `multiple` is `true`. Non-interactive (no TTY):
+/// always cancels — there is no sensible "auto-answer" policy for a
+/// free-choice question the way `--yes` auto-approves permission.
+pub struct TtyQuestionResponder {
+    pub interactive: bool,
+}
+
+impl QuestionResponder for TtyQuestionResponder {
+    fn respond(&self, asked: &otto_question::Asked) -> otto_tools::QuestionOutcome {
+        if !self.interactive {
+            return otto_tools::QuestionOutcome::Cancelled;
+        }
+        let mut answers = Vec::with_capacity(asked.questions.len());
+        for q in &asked.questions {
+            eprintln!("\n{}", q.header);
+            eprintln!("{}", q.question);
+            for (i, opt) in q.options.iter().enumerate() {
+                eprintln!("  {i}) {} — {}", opt.label, opt.description);
+            }
+            let prompt = if q.multiple {
+                "select (comma-separated indices): "
+            } else {
+                "select (index): "
+            };
+            eprint!("{prompt}");
+            let _ = std::io::stderr().flush();
+
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() {
+                return otto_tools::QuestionOutcome::Cancelled;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return otto_tools::QuestionOutcome::Cancelled;
+            }
+            let parsed: Option<Vec<usize>> = trimmed
+                .split(',')
+                .map(|s| s.trim().parse::<usize>().ok())
+                .collect();
+            let Some(indices) = parsed else {
+                return otto_tools::QuestionOutcome::Cancelled;
+            };
+            if indices.is_empty()
+                || indices.iter().any(|&i| i >= q.options.len())
+                || (!q.multiple && indices.len() != 1)
+            {
+                return otto_tools::QuestionOutcome::Cancelled;
+            }
+            answers.push(indices);
+        }
+        otto_tools::QuestionOutcome::Answered(answers)
+    }
+}
+
 /// Entry point for `otto run`: load the runtime, resolve the agent/model/
 /// prompt/session, wire Ctrl-C to a cancellation token, and call
 /// [`run_session`] against real stdout.
@@ -257,6 +359,8 @@ pub async fn cmd_run(cwd: &std::path::Path, args: RunArgs) -> Result<()> {
         yes: args.yes,
         interactive,
     });
+    let question_responder: Arc<dyn QuestionResponder> =
+        Arc::new(TtyQuestionResponder { interactive });
 
     let color = color_enabled() && std::io::stdout().is_terminal();
     run_session(
@@ -270,6 +374,7 @@ pub async fn cmd_run(cwd: &std::path::Path, args: RunArgs) -> Result<()> {
         std::io::stdout(),
         color,
         responder,
+        question_responder,
         abort,
     )
     .await
@@ -324,4 +429,48 @@ async fn resolve_session(
         return Ok(id);
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spawn_question_pump_answers_via_responder() {
+        struct FixedResponder(otto_tools::QuestionOutcome);
+        impl QuestionResponder for FixedResponder {
+            fn respond(&self, _asked: &otto_question::Asked) -> otto_tools::QuestionOutcome {
+                self.0.clone()
+            }
+        }
+        let question = std::sync::Arc::new(otto_question::Question::new());
+        let abort = tokio_util::sync::CancellationToken::new();
+        let pump = spawn_question_pump(
+            question.clone(),
+            std::sync::Arc::new(FixedResponder(otto_tools::QuestionOutcome::Answered(vec![
+                vec![0],
+            ]))),
+            abort.clone(),
+        );
+        let outcome = question
+            .ask(
+                "ses_1",
+                vec![otto_tools::QuestionPrompt {
+                    question: "Pick one".into(),
+                    header: "choice".into(),
+                    options: vec![otto_tools::QuestionOption {
+                        label: "A".into(),
+                        description: "first".into(),
+                    }],
+                    multiple: false,
+                }],
+            )
+            .await;
+        assert_eq!(
+            outcome,
+            otto_tools::QuestionOutcome::Answered(vec![vec![0]])
+        );
+        abort.cancel();
+        let _ = pump.await;
+    }
 }

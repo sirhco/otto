@@ -13,7 +13,7 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use otto_agent::ModelRef;
 use otto_app::{Result as AppResult, Runtime};
-use otto_cli::run::{PermissionResponder, RunRequest, run_session};
+use otto_cli::run::{PermissionResponder, QuestionResponder, RunRequest, run_session};
 use otto_config::Config;
 use otto_events::{FinishReason, LLMEvent};
 use otto_llm::{LLMError, LLMRequest, Model, Route};
@@ -95,6 +95,18 @@ impl PermissionResponder for ScriptedResponder {
     fn respond(&self, _asked: &Asked) -> Reply {
         self.seen.fetch_add(1, Ordering::SeqCst);
         self.reply.clone()
+    }
+}
+
+// -- always-cancel question responder ----------------------------------------
+
+/// A [`QuestionResponder`] test double for tests that don't exercise the
+/// question tool: cancels every ask.
+struct AlwaysCancelResponder;
+
+impl QuestionResponder for AlwaysCancelResponder {
+    fn respond(&self, _asked: &otto_question::Asked) -> otto_tools::QuestionOutcome {
+        otto_tools::QuestionOutcome::Cancelled
     }
 }
 
@@ -189,6 +201,7 @@ async fn run_session_renders_scripted_assistant_text() {
         buf.clone(),
         false,
         responder,
+        Arc::new(AlwaysCancelResponder),
         CancellationToken::new(),
     )
     .await
@@ -260,6 +273,7 @@ async fn run_session_answers_permission_via_responder() {
         buf.clone(),
         false,
         responder,
+        Arc::new(AlwaysCancelResponder),
         CancellationToken::new(),
     )
     .await
