@@ -190,6 +190,8 @@ pub fn router(runtime: Arc<Runtime>, opts: ServeOptions) -> Router {
         .route("/event", get(event_stream))
         .route("/permission", get(permission_list))
         .route("/permission/{request_id}/reply", post(permission_reply))
+        .route("/question", get(question_list))
+        .route("/question/{request_id}/reply", post(question_reply))
         .route("/session/{id}/permission-mode", post(set_permission_mode))
         .route("/session/{id}/cancel", post(session_cancel))
         .route("/find", get(find_text))
@@ -692,6 +694,7 @@ async fn event_stream(
     State(state): State<AppState>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let mut perm_rx = state.runtime.permission().subscribe();
+    let mut question_rx = state.runtime.question().subscribe();
     let mut bus_rx = state.events.subscribe();
     let connected = json!({ "type": "server.connected", "properties": {} }).to_string();
 
@@ -717,6 +720,22 @@ async fn event_stream(
                     Err(broadcast::error::RecvError::Closed) => break,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 },
+                asked = question_rx.recv() => match asked {
+                    Ok(a) => {
+                        let data = json!({
+                            "type": "question.asked",
+                            "properties": {
+                                "id": a.request_id,
+                                "sessionID": a.session_id,
+                                "questions": a.questions.iter().map(question_prompt_json).collect::<Vec<_>>(),
+                            }
+                        })
+                        .to_string();
+                        yield Ok(Event::default().data(data));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                },
                 fanned = bus_rx.recv() => match fanned {
                     Ok(data) => yield Ok(Event::default().data(data)),
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -726,6 +745,20 @@ async fn event_stream(
         }
     };
     Sse::new(sse).keep_alive(KeepAlive::default())
+}
+
+/// Render one [`otto_tools::QuestionPrompt`] as its wire JSON shape
+/// (`{"question","header","options":[{"label","description"}],"multiple"}`).
+fn question_prompt_json(q: &otto_tools::QuestionPrompt) -> Value {
+    json!({
+        "question": q.question,
+        "header": q.header,
+        "options": q.options.iter().map(|o| json!({
+            "label": o.label,
+            "description": o.description,
+        })).collect::<Vec<_>>(),
+        "multiple": q.multiple,
+    })
 }
 
 // -- permission --------------------------------------------------------------
@@ -778,6 +811,55 @@ async fn permission_reply(
     } else {
         Err(ApiError::not_found(format!(
             "permission {request_id} not found"
+        )))
+    }
+}
+
+// -- question -----------------------------------------------------------
+
+/// `GET /question` — pending question-tool requests.
+async fn question_list(State(state): State<AppState>) -> Json<Value> {
+    let pending: Vec<Value> = state
+        .runtime
+        .question()
+        .list_pending()
+        .into_iter()
+        .map(|p| {
+            json!({
+                "id": p.request_id,
+                "sessionID": p.session_id,
+                "questions": p.questions.iter().map(question_prompt_json).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Json(Value::Array(pending))
+}
+
+/// Body for `POST /question/{request_id}/reply`.
+#[derive(Debug, Deserialize)]
+struct QuestionReplyBody {
+    reply: String,
+    #[serde(default)]
+    answers: Vec<Vec<usize>>,
+}
+
+/// `POST /question/{request_id}/reply` — resolve a pending question-tool
+/// request.
+async fn question_reply(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+    Json(body): Json<QuestionReplyBody>,
+) -> ApiResult<Json<bool>> {
+    let outcome = match body.reply.as_str() {
+        "answered" => otto_tools::QuestionOutcome::Answered(body.answers),
+        "cancelled" => otto_tools::QuestionOutcome::Cancelled,
+        other => return Err(ApiError::bad_request(format!("unknown reply {other:?}"))),
+    };
+    if state.runtime.question().reply(&request_id, outcome) {
+        Ok(Json(true))
+    } else {
+        Err(ApiError::not_found(format!(
+            "question {request_id} not found"
         )))
     }
 }

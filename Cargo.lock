@@ -2090,6 +2090,7 @@ dependencies = [
  "otto-events",
  "otto-llm",
  "otto-permission",
+ "otto-question",
  "otto-session",
  "otto-storage",
  "otto-tools",

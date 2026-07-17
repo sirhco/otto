@@ -19,7 +19,10 @@ use otto_config::Config;
 use otto_events::{FinishReason, LLMEvent};
 use otto_llm::{LLMError, LLMRequest, Model, Route};
 use otto_server::{ServeOptions, serve};
-use otto_tools::{ExecuteResult, PermissionRequest, Tool, ToolContext, ToolError, ToolRegistry};
+use otto_tools::{
+    ExecuteResult, PermissionRequest, QuestionOption, QuestionOutcome, QuestionPrompt, Tool,
+    ToolContext, ToolError, ToolRegistry,
+};
 use serde_json::{Value, json};
 
 // -- scripted route + factory ------------------------------------------------
@@ -551,6 +554,226 @@ async fn permission_mode_change_emits_sse_frame() {
     assert!(text.contains("permission.mode_changed"), "frame: {text}");
     assert!(text.contains(&id), "frame: {text}");
     assert!(text.contains("accept-edits"), "frame: {text}");
+}
+
+// -- question ------------------------------------------------------------
+
+fn one_question() -> QuestionPrompt {
+    QuestionPrompt {
+        question: "Which color?".into(),
+        header: "color".into(),
+        options: vec![
+            QuestionOption {
+                label: "Red".into(),
+                description: "the color red".into(),
+            },
+            QuestionOption {
+                label: "Blue".into(),
+                description: "the color blue".into(),
+            },
+        ],
+        multiple: false,
+    }
+}
+
+#[tokio::test]
+async fn question_list_and_reply_answered() {
+    let runtime = plain_runtime().await;
+    let base = spawn(runtime.clone(), no_auth()).await;
+    let http = reqwest::Client::new();
+
+    // Initially no pending questions.
+    let pending: Value = http
+        .get(format!("{base}/question"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(pending.as_array().unwrap().is_empty());
+
+    // Fire the ask in the background; it blocks awaiting a reply.
+    let ask = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move { runtime.question().ask("ses_1", vec![one_question()]).await })
+    };
+
+    // Poll until the request shows up as pending.
+    let mut found = None;
+    for _ in 0..100 {
+        let pending: Value = http
+            .get(format!("{base}/question"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(first) = pending.as_array().and_then(|a| a.first()) {
+            found = Some(first.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let found = found.expect("a question request should be pending");
+    assert_eq!(found["sessionID"], "ses_1");
+    let questions = found["questions"].as_array().unwrap();
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0]["question"], "Which color?");
+    assert_eq!(questions[0]["header"], "color");
+    assert_eq!(questions[0]["multiple"], false);
+    let options = questions[0]["options"].as_array().unwrap();
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0]["label"], "Red");
+    assert_eq!(options[0]["description"], "the color red");
+    assert_eq!(options[1]["label"], "Blue");
+    let request_id = found["id"].as_str().unwrap().to_string();
+
+    // Reply -> unblocks the ask with the chosen index.
+    let replied = http
+        .post(format!("{base}/question/{request_id}/reply"))
+        .json(&json!({ "reply": "answered", "answers": [[0]] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replied.status(), 200);
+    assert_eq!(replied.json::<Value>().await.unwrap(), json!(true));
+
+    let outcome = ask.await.unwrap();
+    assert_eq!(outcome, QuestionOutcome::Answered(vec![vec![0]]));
+
+    // No longer pending.
+    let pending: Value = http
+        .get(format!("{base}/question"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(pending.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn question_reply_cancelled_resolves_the_ask() {
+    let runtime = plain_runtime().await;
+    let base = spawn(runtime.clone(), no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let ask = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move { runtime.question().ask("ses_2", vec![one_question()]).await })
+    };
+
+    let mut request_id = None;
+    for _ in 0..100 {
+        let pending: Value = http
+            .get(format!("{base}/question"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(first) = pending.as_array().and_then(|a| a.first()) {
+            request_id = Some(first["id"].as_str().unwrap().to_string());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let request_id = request_id.expect("a question request should be pending");
+
+    let replied = http
+        .post(format!("{base}/question/{request_id}/reply"))
+        .json(&json!({ "reply": "cancelled" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replied.status(), 200);
+
+    let outcome = ask.await.unwrap();
+    assert_eq!(outcome, QuestionOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn question_reply_unknown_id_returns_404() {
+    let base = spawn(plain_runtime().await, no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let resp = http
+        .post(format!("{base}/question/que_does_not_exist/reply"))
+        .json(&json!({ "reply": "cancelled" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn question_reply_bad_reply_string_returns_400() {
+    let base = spawn(plain_runtime().await, no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let resp = http
+        .post(format!("{base}/question/que_whatever/reply"))
+        .json(&json!({ "reply": "bogus" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn question_asked_emits_sse_frame() {
+    let runtime = plain_runtime().await;
+    let base = spawn(runtime.clone(), no_auth()).await;
+    let http = reqwest::Client::new();
+
+    // Open the /event stream, then ask a question and confirm a
+    // `question.asked` frame with the full questions[] payload arrives.
+    let event_resp = http.get(format!("{base}/event")).send().await.unwrap();
+    let mut body = event_resp.bytes_stream();
+    // Drain the initial `server.connected` frame.
+    let _ = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("initial frame within 2s");
+
+    let ask = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move { runtime.question().ask("ses_9", vec![one_question()]).await })
+    };
+
+    let frame = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("a question.asked frame within 2s")
+        .expect("a chunk")
+        .expect("chunk ok");
+    let text = String::from_utf8_lossy(&frame).to_string();
+    let payload = text.strip_prefix("data: ").unwrap_or(&text).trim();
+    let parsed: Value = serde_json::from_str(payload).expect("json frame");
+    assert_eq!(parsed["type"], "question.asked");
+    assert_eq!(parsed["properties"]["sessionID"], "ses_9");
+    let questions = parsed["properties"]["questions"].as_array().unwrap();
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0]["question"], "Which color?");
+    assert_eq!(questions[0]["header"], "color");
+    assert_eq!(questions[0]["multiple"], false);
+    let options = questions[0]["options"].as_array().unwrap();
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0]["label"], "Red");
+    assert_eq!(options[1]["label"], "Blue");
+
+    // Resolve it so the spawned ask completes.
+    let request_id = parsed["properties"]["id"].as_str().unwrap().to_string();
+    let replied = http
+        .post(format!("{base}/question/{request_id}/reply"))
+        .json(&json!({ "reply": "cancelled" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replied.status(), 200);
+    assert_eq!(ask.await.unwrap(), QuestionOutcome::Cancelled);
 }
 
 #[tokio::test]
