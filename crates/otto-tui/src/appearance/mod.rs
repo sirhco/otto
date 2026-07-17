@@ -36,7 +36,8 @@ pub fn detect_color_depth() -> ColorDepth {
 
 /// Pure core of [`detect_color_depth`], testable without env mutation.
 fn detect_color_depth_from(colorterm: Option<&str>, term: Option<&str>) -> ColorDepth {
-    let truecolor = colorterm.is_some_and(|v| v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit"));
+    let truecolor = colorterm
+        .is_some_and(|v| v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit"));
     if truecolor {
         ColorDepth::TrueColor
     } else if term.is_some_and(|t| t.contains("256color")) {
@@ -188,7 +189,11 @@ mod tests {
         // `dark()`'s accent is `Color::Cyan` (named, not RGB) — quantization
         // must not touch it at any depth.
         let dark = Theme::dark();
-        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256, ColorDepth::Ansi16] {
+        for depth in [
+            ColorDepth::TrueColor,
+            ColorDepth::Ansi256,
+            ColorDepth::Ansi16,
+        ] {
             assert_eq!(quantize(&dark, depth).accent.fg, Some(Color::Cyan));
         }
     }
