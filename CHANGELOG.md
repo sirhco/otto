@@ -4,6 +4,21 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.9.0] - 2026-07-17
+
+### Added
+
+- **`otto tui` auto-detects OS light/dark appearance.** `theme = "auto"`
+  follows the OS's light/dark setting (macOS/Linux-GNOME/Windows), live-
+  repolling every 5s; SSH sessions get a one-shot terminal query instead. A
+  new `light` preset backs auto-detected light mode.
+- **`otto tui` degrades color output on non-truecolor terminals.** Theme
+  colors quantize to a 256-color or 16-color palette based on `COLORTERM`/
+  `TERM`, instead of assuming full RGB support.
+- **`otto tui` sends an OS notification when a turn finishes unfocused.** A
+  terminal notification (OSC 9) and title update appear when otto isn't the
+  focused window when a turn completes, and clear on refocus.
+
 ## [0.8.0] - 2026-07-16
 
 ### Added
