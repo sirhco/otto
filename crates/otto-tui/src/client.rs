@@ -350,6 +350,32 @@ impl Client {
         Ok(())
     }
 
+    /// `POST /question/{request_id}/reply`.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or the server responds with a
+    /// non-success status.
+    pub async fn reply_question(
+        &self,
+        request_id: &str,
+        reply: &crate::state::QuestionReplyKind,
+    ) -> Result<()> {
+        let body = match reply {
+            crate::state::QuestionReplyKind::Answered(answers) => {
+                serde_json::json!({ "reply": "answered", "answers": answers })
+            }
+            crate::state::QuestionReplyKind::Cancelled => {
+                serde_json::json!({ "reply": "cancelled" })
+            }
+        };
+        self.post(&format!("/question/{request_id}/reply"))
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `POST /session/{session_id}/permission-mode`.
     ///
     /// # Errors
