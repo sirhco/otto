@@ -1,6 +1,6 @@
 //! The hand-rolled multiline prompt editor and key routing.
 
-use crate::state::{App, LoopAction, Msg, Overlay};
+use crate::state::{App, LoopAction, Msg, Overlay, QuestionReplyKind};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// One visual row produced by soft-wrapping a logical line: the logical line
@@ -401,10 +401,21 @@ impl App {
                 return None;
             }
             match key.code {
+                KeyCode::Esc if self.is_question() => return self.question_cancel(),
                 KeyCode::Esc => self.close_overlay(),
                 KeyCode::Char('y') if self.is_permission() => return self.reply_intent("once"),
                 KeyCode::Char('a') if self.is_permission() => return self.reply_intent("always"),
                 KeyCode::Char('n') if self.is_permission() => return self.reply_intent("reject"),
+                KeyCode::Up if self.is_question() => {
+                    self.question_move_highlight(-1);
+                }
+                KeyCode::Down if self.is_question() => {
+                    self.question_move_highlight(1);
+                }
+                KeyCode::Char(' ') if self.is_question() => {
+                    self.question_toggle_highlighted();
+                }
+                KeyCode::Enter if self.is_question() => return self.question_confirm(),
                 KeyCode::Up if self.picker_len() > 0 => {
                     self.picker_move(-1);
                 }
@@ -532,6 +543,62 @@ impl App {
             return Some(Msg::PermissionReply {
                 id,
                 reply: reply.to_string(),
+            });
+        }
+        None
+    }
+
+    fn is_question(&self) -> bool {
+        matches!(self.overlay, Overlay::Question(_))
+    }
+
+    fn question_move_highlight(&mut self, delta: i32) {
+        if let Overlay::Question(qs) = &mut self.overlay {
+            qs.move_highlight(delta);
+        }
+    }
+
+    fn question_toggle_highlighted(&mut self) {
+        if let Overlay::Question(qs) = &mut self.overlay {
+            let idx = qs.highlight;
+            qs.toggle(idx);
+        }
+    }
+
+    /// Confirm the highlighted/toggled selection for the current question.
+    /// For a single-select question, Enter both selects the highlighted
+    /// option and confirms in one step (mirrors `reply_intent`'s
+    /// one-keypress-per-decision feel) — `toggle` is called first if the
+    /// cursor is still empty, so a bare Enter on a fresh single-select
+    /// question answers with whatever's highlighted rather than doing
+    /// nothing.
+    fn question_confirm(&mut self) -> Option<Msg> {
+        if let Overlay::Question(qs) = &mut self.overlay {
+            if qs.cursor.is_empty() && !qs.current_question_is_multiple() {
+                let idx = qs.highlight;
+                qs.toggle(idx);
+            }
+            let done = qs.confirm_current();
+            if done {
+                let id = qs.id.clone();
+                let answers = qs.answers.clone();
+                self.close_overlay();
+                return Some(Msg::QuestionReply {
+                    id,
+                    reply: QuestionReplyKind::Answered(answers),
+                });
+            }
+        }
+        None
+    }
+
+    fn question_cancel(&mut self) -> Option<Msg> {
+        if let Overlay::Question(qs) = &self.overlay {
+            let id = qs.id.clone();
+            self.close_overlay();
+            return Some(Msg::QuestionReply {
+                id,
+                reply: QuestionReplyKind::Cancelled,
             });
         }
         None
@@ -1095,5 +1162,68 @@ mod tests {
             matches!(msg, Some(Msg::Quit)),
             "ctrl+c wins over the overlay"
         );
+    }
+
+    // ----- Task 8: question overlay key handling ---------------------------
+
+    fn sample_question_asked() -> crate::sse::QuestionAsked {
+        crate::sse::QuestionAsked {
+            id: "que_1".into(),
+            session_id: "ses_1".into(),
+            questions: vec![crate::sse::QuestionPromptView {
+                question: "Pick one".into(),
+                header: "choice".into(),
+                options: vec![
+                    crate::sse::QuestionOptionView {
+                        label: "A".into(),
+                        description: "a".into(),
+                    },
+                    crate::sse::QuestionOptionView {
+                        label: "B".into(),
+                        description: "b".into(),
+                    },
+                ],
+                multiple: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn question_arrow_and_enter_answers_single_question() {
+        use crate::state::{QuestionReplyKind, QuestionSession};
+        let mut app = App::new();
+        app.overlay = Overlay::Question(QuestionSession::new(sample_question_asked()));
+        app.on_key(key(KeyCode::Down)); // highlight moves to option B
+        let msg = app.on_key(key(KeyCode::Enter));
+        match msg {
+            Some(Msg::QuestionReply {
+                id,
+                reply: QuestionReplyKind::Answered(answers),
+            }) => {
+                assert_eq!(id, "que_1");
+                assert_eq!(answers, vec![vec![1]]);
+            }
+            other => panic!("expected an Answered QuestionReply, got {other:?}"),
+        }
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "overlay closes on the final answer"
+        );
+    }
+
+    #[test]
+    fn question_esc_cancels() {
+        use crate::state::{QuestionReplyKind, QuestionSession};
+        let mut app = App::new();
+        app.overlay = Overlay::Question(QuestionSession::new(sample_question_asked()));
+        let msg = app.on_key(key(KeyCode::Esc));
+        match msg {
+            Some(Msg::QuestionReply {
+                id,
+                reply: QuestionReplyKind::Cancelled,
+            }) => assert_eq!(id, "que_1"),
+            other => panic!("expected a Cancelled QuestionReply, got {other:?}"),
+        }
+        assert!(matches!(app.overlay, Overlay::None));
     }
 }

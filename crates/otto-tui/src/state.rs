@@ -140,6 +140,12 @@ impl QuestionSession {
         &self.questions[self.current]
     }
 
+    /// Whether the current question allows multiple selections.
+    #[must_use]
+    pub fn current_question_is_multiple(&self) -> bool {
+        self.current_question().multiple
+    }
+
     /// Move the highlight cursor by `delta` (wrapping), clamped to the
     /// current question's option count.
     pub fn move_highlight(&mut self, delta: i32) {
