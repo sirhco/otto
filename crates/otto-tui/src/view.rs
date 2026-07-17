@@ -128,6 +128,10 @@ pub fn view(app: &App, frame: &mut Frame) {
         // the input row (`input()`) as a search bar and jump-scrolls the
         // transcript (`transcript()`); nothing extra to draw here.
         Overlay::Search(_) => {}
+        // Compile-only stub: Task 7 (otto-tui plumbing) added the variant but
+        // owns no rendering; Task 8 replaces this with the real interactive
+        // question overlay.
+        Overlay::Question(_) => {}
     }
 }
 

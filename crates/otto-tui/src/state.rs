@@ -105,12 +105,95 @@ pub(crate) fn parse_todos(input: &serde_json::Value) -> Vec<TodoItem> {
         .unwrap_or_default()
 }
 
+/// Client-side pagination state for an in-progress `Overlay::Question` — one
+/// question in `questions` at a time, `current` tracks which, `answers`
+/// accumulates confirmed selections, `cursor` is the in-progress selection
+/// for `questions[current]`.
+#[derive(Debug, Clone)]
+pub struct QuestionSession {
+    pub id: String,
+    pub session_id: String,
+    pub questions: Vec<crate::sse::QuestionPromptView>,
+    pub current: usize,
+    pub answers: Vec<Vec<usize>>,
+    pub cursor: Vec<usize>,
+    /// Highlighted option index in the current question's option list, for
+    /// arrow-key navigation.
+    pub highlight: usize,
+}
+
+impl QuestionSession {
+    #[must_use]
+    pub fn new(asked: crate::sse::QuestionAsked) -> Self {
+        Self {
+            id: asked.id,
+            session_id: asked.session_id,
+            questions: asked.questions,
+            current: 0,
+            answers: Vec::new(),
+            cursor: Vec::new(),
+            highlight: 0,
+        }
+    }
+
+    fn current_question(&self) -> &crate::sse::QuestionPromptView {
+        &self.questions[self.current]
+    }
+
+    /// Move the highlight cursor by `delta` (wrapping), clamped to the
+    /// current question's option count.
+    pub fn move_highlight(&mut self, delta: i32) {
+        let len = self.current_question().options.len();
+        if len == 0 {
+            return;
+        }
+        let next = (self.highlight as i32 + delta).rem_euclid(len as i32);
+        self.highlight = next as usize;
+    }
+
+    /// Toggle `index` in the in-progress `cursor` for the current question.
+    /// On a non-multiple question, toggling replaces the cursor with just
+    /// `index` (radio-button semantics); on a multiple question it
+    /// adds/removes `index` (checkbox semantics).
+    pub fn toggle(&mut self, index: usize) {
+        if self.current_question().multiple {
+            if let Some(pos) = self.cursor.iter().position(|&i| i == index) {
+                self.cursor.remove(pos);
+            } else {
+                self.cursor.push(index);
+            }
+        } else {
+            self.cursor = vec![index];
+        }
+    }
+
+    /// Confirm the current question's `cursor` selection (must be
+    /// non-empty), append it to `answers`, and advance. Returns `true` if
+    /// this was the last question (the caller should now build a
+    /// `Msg::QuestionReply::Answered(answers)`); `false` if more questions
+    /// remain (or the cursor was empty and nothing advanced).
+    pub fn confirm_current(&mut self) -> bool {
+        if self.cursor.is_empty() {
+            return false;
+        }
+        self.answers.push(std::mem::take(&mut self.cursor));
+        self.highlight = 0;
+        if self.current + 1 < self.questions.len() {
+            self.current += 1;
+            false
+        } else {
+            true
+        }
+    }
+}
+
 /// The single active modal overlay, if any.
 #[derive(Debug, Clone)]
 pub enum Overlay {
     None,
     Help,
     Permission(PermissionAsked),
+    Question(QuestionSession),
     Sessions,
     Models,
     Agents,
@@ -206,6 +289,18 @@ pub struct SearchState {
     pub(crate) current: usize,
 }
 
+/// The TUI-local mirror of the wire-level question reply (`Answered`/
+/// `Cancelled`) — kept separate from `otto_tools::QuestionOutcome` so this
+/// crate's `state.rs` doesn't need an `otto-tools` dependency just for this
+/// one enum (it already has one transitively via other otto crates, but the
+/// direct type stays TUI-local for the same reason `PermissionReply` carries
+/// a plain `String` rather than `otto_permission::Reply`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionReplyKind {
+    Answered(Vec<Vec<usize>>),
+    Cancelled,
+}
+
 /// Everything the loop can hand to [`App::update`].
 ///
 /// `Server(LLMEvent)` is the largest variant by a wide margin, but `Msg`
@@ -228,6 +323,10 @@ pub enum Msg {
     PermissionReply {
         id: String,
         reply: String,
+    },
+    QuestionReply {
+        id: String,
+        reply: QuestionReplyKind,
     },
     SwitchSession(String),
     /// Create a fresh session and switch to it (clears the transcript). The
@@ -1191,6 +1290,9 @@ impl App {
                 // /event bus is global; single-session use is the common case.)
                 self.overlay = Overlay::Permission(p);
             }
+            Msg::Event(ServerEvent::QuestionAsked(q)) => {
+                self.overlay = Overlay::Question(QuestionSession::new(q));
+            }
             Msg::Event(ServerEvent::Workflow(w)) => {
                 // Fold the same events into the live `WorkflowView` (task→state
                 // map) that powers the progress panel + cancel key. Progress and
@@ -1307,6 +1409,8 @@ impl App {
             Msg::Key(_) | Msg::Resize => {}
             // The loop performs the HTTP call; no state update needed here.
             Msg::PermissionReply { .. } => {}
+            // The loop performs the HTTP call; no state update needed here.
+            Msg::QuestionReply { .. } => {}
             // The loop performs the session switch (reload history); no state update here.
             Msg::SwitchSession(_) => {}
             // The loop creates the session then routes a SwitchSession.
@@ -4552,5 +4656,87 @@ mod tests {
                 if kind == "sdd" && arg == ".otto/plans/"),
             "leading '@' must be stripped before starting the workflow, got {msg:?}"
         );
+    }
+
+    fn sample_question_asked() -> crate::sse::QuestionAsked {
+        crate::sse::QuestionAsked {
+            id: "que_1".into(),
+            session_id: "ses_1".into(),
+            questions: vec![
+                crate::sse::QuestionPromptView {
+                    question: "First?".into(),
+                    header: "q1".into(),
+                    options: vec![
+                        crate::sse::QuestionOptionView {
+                            label: "A".into(),
+                            description: "a".into(),
+                        },
+                        crate::sse::QuestionOptionView {
+                            label: "B".into(),
+                            description: "b".into(),
+                        },
+                    ],
+                    multiple: false,
+                },
+                crate::sse::QuestionPromptView {
+                    question: "Second?".into(),
+                    header: "q2".into(),
+                    options: vec![
+                        crate::sse::QuestionOptionView {
+                            label: "X".into(),
+                            description: "x".into(),
+                        },
+                        crate::sse::QuestionOptionView {
+                            label: "Y".into(),
+                            description: "y".into(),
+                        },
+                    ],
+                    multiple: true,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn question_asked_opens_the_overlay() {
+        let mut app = App::new();
+        app.update(Msg::Event(ServerEvent::QuestionAsked(
+            sample_question_asked(),
+        )));
+        assert!(matches!(app.overlay, Overlay::Question(_)));
+    }
+
+    #[test]
+    fn question_session_toggle_and_advance_single_select() {
+        let mut qs = QuestionSession::new(sample_question_asked());
+        assert_eq!(qs.current, 0);
+        qs.toggle(1); // select option B
+        assert_eq!(qs.cursor, vec![1]);
+        let done = qs.confirm_current();
+        assert!(!done, "one more question remains");
+        assert_eq!(qs.current, 1);
+        assert_eq!(qs.answers, vec![vec![1]]);
+        assert!(qs.cursor.is_empty(), "cursor resets for the next question");
+    }
+
+    #[test]
+    fn question_session_multi_select_accumulates_and_requires_nonempty() {
+        // Answer question 1 first to advance into question 2 (multi-select).
+        let mut qs = QuestionSession::new(sample_question_asked());
+        qs.toggle(0);
+        qs.confirm_current();
+        assert_eq!(qs.current, 1);
+        // Question 2 is multi-select: toggling twice selects both, confirm with empty cursor should not advance.
+        let advanced_empty = qs.confirm_current();
+        assert!(
+            !advanced_empty,
+            "empty multi-select cursor must not confirm"
+        );
+        qs.toggle(0);
+        qs.toggle(1);
+        assert_eq!(qs.cursor, vec![0, 1]);
+        let done = qs.confirm_current();
+        assert!(done, "last question confirmed");
+        assert_eq!(qs.answers, vec![vec![0], vec![0, 1]]);
     }
 }
