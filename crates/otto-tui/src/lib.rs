@@ -83,7 +83,11 @@ pub async fn run(opts: TuiOptions) -> Result<()> {
     app.color_depth = crate::appearance::detect_color_depth();
 
     let mut ssh_detected = false;
-    if cfg_theme.as_deref() == Some("auto") && !no_color {
+    if cfg_theme
+        .as_deref()
+        .is_some_and(|t| t.eq_ignore_ascii_case("auto"))
+        && !no_color
+    {
         app.dark_theme = crate::appearance::quantize(&crate::theme::Theme::dark(), app.color_depth);
         app.light_theme =
             crate::appearance::quantize(&crate::theme::Theme::preset("light"), app.color_depth);
@@ -314,6 +318,8 @@ async fn event_loop(
                 LoopAction::CursorColor => {
                     if let Some(hex) = app.theme.accent_hex() {
                         let _ = set_cursor_color(&hex);
+                    } else {
+                        let _ = reset_cursor_color();
                     }
                 }
             }
@@ -590,6 +596,7 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(
         let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     }
     let _ = reset_cursor_color();
+    let _ = reset_title();
     execute!(
         terminal.backend_mut(),
         crossterm::event::DisableFocusChange,
@@ -706,7 +713,7 @@ fn reset_cursor_color() -> io::Result<()> {
 /// back to the SSH one-shot path (a live re-poll there would race the
 /// `crossterm::EventStream` read).
 fn should_poll_os_theme(cfg_theme: Option<&str>, no_color: bool, ssh_detected: bool) -> bool {
-    cfg_theme == Some("auto") && !no_color && !ssh_detected
+    cfg_theme.is_some_and(|t| t.eq_ignore_ascii_case("auto")) && !no_color && !ssh_detected
 }
 
 #[cfg(test)]
@@ -803,6 +810,10 @@ mod tests {
             "NO_COLOR wins"
         );
         assert!(!should_poll_os_theme(None, false, false));
+        assert!(
+            should_poll_os_theme(Some("Auto"), false, false),
+            "case-insensitive"
+        );
     }
 }
 

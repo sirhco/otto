@@ -367,9 +367,6 @@ pub struct App {
     /// Terminal color depth, detected once at startup from `COLORTERM`/
     /// `TERM`. Used to re-quantize `dark_theme`/`light_theme` on an
     /// OS-appearance swap; unused outside `theme = "auto"` mode.
-    // Not yet read within this file — `run()` (lib.rs) sets and consumes it
-    // to quantize `dark_theme`/`light_theme` at startup; wired in Task 6.
-    #[allow(dead_code)]
     pub(crate) color_depth: crate::appearance::ColorDepth,
     /// Precomputed, already-quantized dark preset for `theme = "auto"` mode.
     /// Only meaningful when `theme_mode.is_some()`.
