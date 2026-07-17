@@ -124,8 +124,8 @@ pub struct Config {
 
     /// Named TUI color theme preset (e.g. "catppuccin", "gruvbox", "nord",
     /// "base16", "light"). Unknown names fall back to the default dark
-    /// theme. `"auto"` follows the OS's light/dark appearance setting
-    /// instead of a fixed preset.
+    /// theme. `"auto"` follows the OS's light/dark appearance setting where
+    /// detectable, otherwise falls back to the same default dark theme.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
 
