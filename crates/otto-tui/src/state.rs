@@ -276,6 +276,13 @@ pub enum Msg {
     /// `permission.mode_changed` on the `/event` stream, translated in the
     /// event pump). Syncs `App.permission_mode` to the authoritative value.
     PermissionModeChanged(String),
+    /// Terminal focus changed (crossterm focus-change events, enabled at
+    /// startup). Gates the turn-finished OS notification.
+    FocusChanged(bool),
+    /// The periodic OS-appearance poll ran again. `None` = undetectable this
+    /// round (unsupported platform/desktop environment, or a transient
+    /// command failure) — leaves the active theme untouched.
+    OsThemeChanged(Option<crate::appearance::ThemeMode>),
 }
 
 /// A side effect the event loop must perform because it needs the terminal or
@@ -287,6 +294,14 @@ pub enum LoopAction {
     Yank,
     /// Suspend to the shell (SIGTSTP) and re-enter on resume.
     Suspend,
+    /// Write the turn-finished OS notification (OSC 9) and set a "done"
+    /// terminal title.
+    Notify,
+    /// Reset the terminal title back to the plain `otto` title.
+    ResetTitle,
+    /// Re-apply the OSC 12 cursor color for the newly active theme (after an
+    /// OS-appearance swap).
+    CursorColor,
 }
 
 /// The whole TUI state.
@@ -313,6 +328,13 @@ pub struct App {
     /// A terminal/stdout side effect for the event loop to perform, if any.
     /// Set by `on_key`, drained by `event_loop` (like `should_quit`).
     pub pending_action: Option<LoopAction>,
+    /// Whether otto's terminal currently has focus (crossterm focus-change
+    /// events). Gates the turn-finished OS notification — no point notifying
+    /// a user who's already looking at the screen.
+    pub focused: bool,
+    /// Whether a "done" terminal title is currently set, awaiting reset on
+    /// the next focus-gained event.
+    pub(crate) title_active: bool,
     /// Index of the open assistant text item currently being streamed, if any.
     open_text: Option<usize>,
     open_reasoning: Option<usize>,
@@ -342,6 +364,24 @@ pub struct App {
     pub(crate) todos_collapsed: bool,
     /// Active style tokens (dark by default; config-driven via `Theme::select_with` at startup).
     pub theme: crate::theme::Theme,
+    /// Terminal color depth, detected once at startup from `COLORTERM`/
+    /// `TERM`. Used to re-quantize `dark_theme`/`light_theme` on an
+    /// OS-appearance swap; unused outside `theme = "auto"` mode.
+    // Not yet read within this file — `run()` (lib.rs) sets and consumes it
+    // to quantize `dark_theme`/`light_theme` at startup; wired in Task 6.
+    #[allow(dead_code)]
+    pub(crate) color_depth: crate::appearance::ColorDepth,
+    /// Precomputed, already-quantized dark preset for `theme = "auto"` mode.
+    /// Only meaningful when `theme_mode.is_some()`.
+    pub(crate) dark_theme: crate::theme::Theme,
+    /// Precomputed, already-quantized light preset for `theme = "auto"`
+    /// mode. Only meaningful when `theme_mode.is_some()`.
+    pub(crate) light_theme: crate::theme::Theme,
+    /// The currently-active OS appearance, if auto-detection is in effect.
+    /// `None` means `theme != "auto"` (or detection hasn't resolved yet) —
+    /// used to dedupe repeated `Msg::OsThemeChanged` polls reporting no
+    /// change.
+    pub(crate) theme_mode: Option<crate::appearance::ThemeMode>,
     /// Bumped whenever the assembled transcript lines would change, so the
     /// render-side `LineCache` (view.rs) knows to reassemble. View-only
     /// messages (scroll, tick, overlay open/close, search nav) do NOT bump it.
@@ -504,6 +544,8 @@ impl App {
             tool_cursor: None,
             input: Editor::new(),
             pending_action: None,
+            focused: true,
+            title_active: false,
             open_text: None,
             open_reasoning: None,
             selected: 0,
@@ -517,6 +559,10 @@ impl App {
             todos: Vec::new(),
             todos_collapsed: false,
             theme: crate::theme::Theme::dark(),
+            color_depth: crate::appearance::ColorDepth::TrueColor,
+            dark_theme: crate::theme::Theme::dark(),
+            light_theme: crate::theme::Theme::dark(),
+            theme_mode: None,
             render_gen: 0,
             line_cache: std::cell::RefCell::new(None),
             last_scroll_max: std::cell::Cell::new(0),
@@ -1336,6 +1382,26 @@ impl App {
             // performs the HTTP call; no local state change needed here.
             Msg::CyclePermissionMode => {}
             Msg::PermissionModeChanged(mode) => self.permission_mode = mode,
+            Msg::FocusChanged(focused) => {
+                self.focused = focused;
+                if focused && self.title_active {
+                    self.title_active = false;
+                    self.pending_action = Some(LoopAction::ResetTitle);
+                }
+            }
+            Msg::OsThemeChanged(mode) => {
+                if let Some(mode) = mode
+                    && self.theme_mode != Some(mode)
+                {
+                    self.theme_mode = Some(mode);
+                    self.theme = match mode {
+                        crate::appearance::ThemeMode::Light => self.light_theme.clone(),
+                        crate::appearance::ThemeMode::Dark => self.dark_theme.clone(),
+                    };
+                    self.bump_render();
+                    self.pending_action = Some(LoopAction::CursorColor);
+                }
+            }
         }
     }
 
@@ -1592,6 +1658,10 @@ impl App {
                 // (spinner gone) while tools and later steps are still running.
                 if reason != otto_events::FinishReason::ToolCalls {
                     self.status = "ready".into();
+                    if !self.focused {
+                        self.title_active = true;
+                        self.pending_action = Some(LoopAction::Notify);
+                    }
                 }
             }
             LLMEvent::ProviderError { message, .. } => self.record_error(message),
@@ -2184,6 +2254,116 @@ mod tests {
         assert_eq!(app.permission_mode, "approve-each");
         app.update(Msg::PermissionModeChanged("full-auto".into()));
         assert_eq!(app.permission_mode, "full-auto");
+    }
+
+    #[test]
+    fn focus_changed_updates_focused_flag() {
+        let mut app = App::new();
+        assert!(app.focused, "starts focused");
+        app.update(Msg::FocusChanged(false));
+        assert!(!app.focused);
+        app.update(Msg::FocusChanged(true));
+        assert!(app.focused);
+    }
+
+    #[test]
+    fn focus_gained_resets_active_title() {
+        let mut app = App::new();
+        app.focused = false;
+        app.title_active = true;
+        app.update(Msg::FocusChanged(true));
+        assert!(!app.title_active);
+        assert_eq!(app.pending_action, Some(LoopAction::ResetTitle));
+    }
+
+    #[test]
+    fn focus_gained_is_a_noop_when_no_title_is_active() {
+        let mut app = App::new();
+        app.focused = false;
+        app.update(Msg::FocusChanged(true));
+        assert_eq!(app.pending_action, None);
+    }
+
+    #[test]
+    fn finish_while_unfocused_sets_notify_action() {
+        let mut app = App::new();
+        app.session_id = Some("ses_1".into());
+        app.focused = false;
+        app.fold_event(LLMEvent::Finish {
+            reason: otto_events::FinishReason::Stop,
+            usage: None,
+            provider_metadata: None,
+        });
+        assert_eq!(app.pending_action, Some(LoopAction::Notify));
+        assert!(app.title_active);
+    }
+
+    #[test]
+    fn finish_while_focused_does_not_notify() {
+        let mut app = App::new();
+        app.session_id = Some("ses_1".into());
+        app.focused = true;
+        app.fold_event(LLMEvent::Finish {
+            reason: otto_events::FinishReason::Stop,
+            usage: None,
+            provider_metadata: None,
+        });
+        assert_eq!(app.pending_action, None);
+        assert!(!app.title_active);
+    }
+
+    #[test]
+    fn tool_calls_finish_does_not_notify_even_when_unfocused() {
+        // A `ToolCalls` finish is a mid-turn step, not the terminal finish —
+        // must not fire a premature "turn finished" notification.
+        let mut app = App::new();
+        app.session_id = Some("ses_1".into());
+        app.focused = false;
+        app.fold_event(LLMEvent::Finish {
+            reason: otto_events::FinishReason::ToolCalls,
+            usage: None,
+            provider_metadata: None,
+        });
+        assert_eq!(app.pending_action, None);
+    }
+
+    #[test]
+    fn os_theme_changed_swaps_theme_and_dedupes() {
+        let mut app = App::new();
+        app.dark_theme = crate::theme::Theme::dark();
+        app.light_theme = crate::theme::Theme::preset("light");
+        let gen_before = app.render_gen;
+
+        app.update(Msg::OsThemeChanged(Some(
+            crate::appearance::ThemeMode::Light,
+        )));
+        assert_eq!(app.theme_mode, Some(crate::appearance::ThemeMode::Light));
+        assert_eq!(app.theme.accent.fg, app.light_theme.accent.fg);
+        assert_eq!(app.pending_action, Some(LoopAction::CursorColor));
+        assert!(
+            app.render_gen > gen_before,
+            "theme swap must bump render_gen"
+        );
+
+        // A repeated poll reporting the SAME mode must not re-fire the
+        // action or bump render_gen again.
+        app.pending_action = None;
+        let gen_after_first = app.render_gen;
+        app.update(Msg::OsThemeChanged(Some(
+            crate::appearance::ThemeMode::Light,
+        )));
+        assert_eq!(app.pending_action, None, "no change — no action");
+        assert_eq!(app.render_gen, gen_after_first);
+    }
+
+    #[test]
+    fn os_theme_changed_none_is_a_noop() {
+        let mut app = App::new();
+        let gen_before = app.render_gen;
+        app.update(Msg::OsThemeChanged(None));
+        assert_eq!(app.theme_mode, None);
+        assert_eq!(app.pending_action, None);
+        assert_eq!(app.render_gen, gen_before);
     }
 
     #[test]
