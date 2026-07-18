@@ -1292,12 +1292,19 @@ impl App {
         match msg {
             Msg::Server(ev) => self.fold_event(ev),
             Msg::Event(ServerEvent::PermissionAsked(p)) => {
-                // Surface the permission prompt. (MVP: not filtered by session — the
-                // /event bus is global; single-session use is the common case.)
-                self.overlay = Overlay::Permission(p);
+                // Only surface the ask if it belongs to the attached session.
+                // An ask for a different (backgrounded) session is durable
+                // server-side pending state (visible via `GET /permission`) —
+                // the dashboard's own poll (Task 5/8) picks it up, so
+                // dropping the live event here is safe, not a lost ask.
+                if self.session_id.as_deref() == Some(p.session_id.as_str()) {
+                    self.overlay = Overlay::Permission(p);
+                }
             }
             Msg::Event(ServerEvent::QuestionAsked(q)) => {
-                self.overlay = Overlay::Question(QuestionSession::new(q));
+                if self.session_id.as_deref() == Some(q.session_id.as_str()) {
+                    self.overlay = Overlay::Question(QuestionSession::new(q));
+                }
             }
             Msg::Event(ServerEvent::Workflow(w)) => {
                 // Fold the same events into the live `WorkflowView` (task→state
@@ -3180,6 +3187,7 @@ mod tests {
     #[test]
     fn permission_event_opens_and_reply_intent_closes_overlay() {
         let mut app = App::new();
+        app.session_id = Some("s".into());
         let asked = PermissionAsked {
             id: "p1".into(),
             session_id: "s".into(),
@@ -3190,6 +3198,24 @@ mod tests {
         assert!(matches!(app.overlay, Overlay::Permission(_)));
         app.close_overlay();
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn permission_asked_for_other_session_does_not_hijack_overlay() {
+        let mut app = App::new();
+        app.session_id = Some("ses_attached".into());
+        app.overlay = Overlay::Sessions;
+        app.update(Msg::Event(ServerEvent::PermissionAsked(PermissionAsked {
+            id: "perm_1".into(),
+            session_id: "ses_other".into(),
+            permission: "edit".into(),
+            patterns: vec![],
+        })));
+        assert!(
+            matches!(app.overlay, Overlay::Sessions),
+            "overlay hijacked by a foreign-session permission ask: {:?}",
+            app.overlay
+        );
     }
 
     #[test]
@@ -4706,10 +4732,38 @@ mod tests {
     #[test]
     fn question_asked_opens_the_overlay() {
         let mut app = App::new();
+        app.session_id = Some("ses_1".into());
         app.update(Msg::Event(ServerEvent::QuestionAsked(
             sample_question_asked(),
         )));
         assert!(matches!(app.overlay, Overlay::Question(_)));
+    }
+
+    #[test]
+    fn question_asked_for_other_session_does_not_hijack_overlay() {
+        let mut app = App::new();
+        app.session_id = Some("ses_attached".into());
+        app.overlay = Overlay::Sessions;
+        app.update(Msg::Event(ServerEvent::QuestionAsked(
+            crate::sse::QuestionAsked {
+                id: "que_1".into(),
+                session_id: "ses_other".into(),
+                questions: vec![crate::sse::QuestionPromptView {
+                    question: "Pick one".into(),
+                    header: "choice".into(),
+                    options: vec![crate::sse::QuestionOptionView {
+                        label: "A".into(),
+                        description: "a".into(),
+                    }],
+                    multiple: false,
+                }],
+            },
+        )));
+        assert!(
+            matches!(app.overlay, Overlay::Sessions),
+            "overlay hijacked by a foreign-session question ask: {:?}",
+            app.overlay
+        );
     }
 
     #[test]
