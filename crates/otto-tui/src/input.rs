@@ -1,6 +1,8 @@
 //! The hand-rolled multiline prompt editor and key routing.
 
-use crate::state::{App, LoopAction, Msg, Overlay, QuestionReplyKind};
+use crate::state::{
+    App, DashboardPeek, DashboardStatus, LoopAction, Msg, Overlay, QuestionReplyKind,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// One visual row produced by soft-wrapping a logical line: the logical line
@@ -406,6 +408,29 @@ impl App {
                 KeyCode::Char('y') if self.is_permission() => return self.reply_intent("once"),
                 KeyCode::Char('a') if self.is_permission() => return self.reply_intent("always"),
                 KeyCode::Char('n') if self.is_permission() => return self.reply_intent("reject"),
+                KeyCode::Char('y') if self.dashboard_awaiting_permission() => {
+                    return self.dashboard_reply_permission("once");
+                }
+                KeyCode::Char('a') if self.dashboard_awaiting_permission() => {
+                    return self.dashboard_reply_permission("always");
+                }
+                KeyCode::Char('n') if self.dashboard_awaiting_permission() => {
+                    return self.dashboard_reply_permission("reject");
+                }
+                KeyCode::Char(c)
+                    if c.is_ascii_digit() && c != '0' && self.dashboard_awaiting_question() =>
+                {
+                    return self.dashboard_reply_question(c.to_digit(10).unwrap() as usize - 1);
+                }
+                KeyCode::Up if self.is_dashboard() => {
+                    self.dashboard_move(-1);
+                    return None;
+                }
+                KeyCode::Down if self.is_dashboard() => {
+                    self.dashboard_move(1);
+                    return None;
+                }
+                KeyCode::Enter if self.is_dashboard() => return self.dashboard_open_selected(),
                 KeyCode::Up if self.is_question() => {
                     self.question_move_highlight(-1);
                 }
@@ -535,6 +560,76 @@ impl App {
         matches!(self.overlay, Overlay::Permission(_))
     }
 
+    fn is_dashboard(&self) -> bool {
+        matches!(self.overlay, Overlay::Dashboard)
+    }
+
+    fn dashboard_awaiting_permission(&self) -> bool {
+        self.is_dashboard() && matches!(self.dashboard.peek, DashboardPeek::Permission)
+    }
+
+    fn dashboard_awaiting_question(&self) -> bool {
+        self.is_dashboard() && matches!(self.dashboard.peek, DashboardPeek::Question { .. })
+    }
+
+    /// Move the dashboard's row selection by `delta` (clamped), resetting
+    /// the peek to whatever `derive_peek` says for the new row —
+    /// `route_message` (Task 8) observes a `Loading` result after this and
+    /// spawns the actual message fetch for idle/busy rows.
+    fn dashboard_move(&mut self, delta: isize) {
+        let len = self.dashboard.rows.len();
+        if len == 0 {
+            return;
+        }
+        let max = len - 1;
+        let next = (self.dashboard.selected as isize + delta).clamp(0, max as isize);
+        self.dashboard.selected = next as usize;
+        self.dashboard.peek = self.dashboard.derive_peek();
+    }
+
+    /// Open (fully switch to) the currently-selected dashboard row's
+    /// session, closing the dashboard.
+    fn dashboard_open_selected(&mut self) -> Option<Msg> {
+        let row = self.dashboard.rows.get(self.dashboard.selected)?;
+        let id = row.session.id.clone();
+        self.close_overlay();
+        Some(Msg::SwitchSession(id))
+    }
+
+    /// Reply `reply` (`"once"`/`"always"`/`"reject"`) to the selected row's
+    /// pending permission ask.
+    fn dashboard_reply_permission(&mut self, reply: &str) -> Option<Msg> {
+        let DashboardStatus::AwaitingPermission(p) =
+            &self.dashboard.rows.get(self.dashboard.selected)?.status
+        else {
+            return None;
+        };
+        Some(Msg::PermissionReply {
+            id: p.id.clone(),
+            reply: reply.to_string(),
+        })
+    }
+
+    /// Answer the selected row's pending single-question ask with option
+    /// `index`. `dashboard_awaiting_question` already guarantees exactly
+    /// one non-multiple question, so a single-element `Answered` payload is
+    /// always the right shape; an out-of-range `index` is ignored.
+    fn dashboard_reply_question(&mut self, index: usize) -> Option<Msg> {
+        let DashboardStatus::AwaitingQuestion(q) =
+            &self.dashboard.rows.get(self.dashboard.selected)?.status
+        else {
+            return None;
+        };
+        let question = q.questions.first()?;
+        if index >= question.options.len() {
+            return None;
+        }
+        Some(Msg::QuestionReply {
+            id: q.id.clone(),
+            reply: QuestionReplyKind::Answered(vec![vec![index]]),
+        })
+    }
+
     /// Produce a permission-reply intent `Msg` and close the overlay.
     fn reply_intent(&mut self, reply: &str) -> Option<Msg> {
         if let Overlay::Permission(p) = &self.overlay {
@@ -608,6 +703,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::DashboardRow;
 
     #[test]
     fn insert_backspace_newline_and_take() {
@@ -1225,5 +1321,130 @@ mod tests {
             other => panic!("expected a Cancelled QuestionReply, got {other:?}"),
         }
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    // ----- Task 6: dashboard key handling -----------------------------------
+
+    fn dash_perm(session_id: &str) -> crate::sse::PermissionAsked {
+        crate::sse::PermissionAsked {
+            id: format!("perm_{session_id}"),
+            session_id: session_id.into(),
+            permission: "edit".into(),
+            patterns: vec!["*.rs".into()],
+        }
+    }
+
+    fn dash_single_question(session_id: &str) -> crate::sse::QuestionAsked {
+        crate::sse::QuestionAsked {
+            id: format!("que_{session_id}"),
+            session_id: session_id.into(),
+            questions: vec![crate::sse::QuestionPromptView {
+                question: "Pick one".into(),
+                header: "choice".into(),
+                options: vec![
+                    crate::sse::QuestionOptionView {
+                        label: "A".into(),
+                        description: "a".into(),
+                    },
+                    crate::sse::QuestionOptionView {
+                        label: "B".into(),
+                        description: "b".into(),
+                    },
+                ],
+                multiple: false,
+            }],
+        }
+    }
+
+    fn dash_session(id: &str) -> crate::client::SessionInfo {
+        crate::client::SessionInfo {
+            id: id.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dashboard_arrows_move_selection_and_reset_peek() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session("a"),
+                status: DashboardStatus::Idle,
+            },
+            DashboardRow {
+                session: dash_session("b"),
+                status: DashboardStatus::Idle,
+            },
+        ];
+        app.dashboard.selected = 0;
+        let out = app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(out.is_none());
+        assert_eq!(app.dashboard.selected, 1);
+        assert_eq!(app.dashboard.peek, DashboardPeek::Loading);
+    }
+
+    #[test]
+    fn dashboard_enter_opens_selected_session() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("target"),
+            status: DashboardStatus::Idle,
+        }];
+        let out = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(out, Some(Msg::SwitchSession(id)) if id == "target"));
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "dashboard closes when opening a session"
+        );
+    }
+
+    #[test]
+    fn dashboard_y_replies_once_to_pending_permission() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s"),
+            status: DashboardStatus::AwaitingPermission(dash_perm("s")),
+        }];
+        app.dashboard.peek = DashboardPeek::Permission;
+        let out = app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(matches!(
+            out,
+            Some(Msg::PermissionReply { id, reply })
+                if id == "perm_s" && reply == "once"
+        ));
+    }
+
+    #[test]
+    fn dashboard_digit_replies_to_pending_question() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s"),
+            status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+        }];
+        app.dashboard.peek = DashboardPeek::Question { highlight: 0 };
+        let out = app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert!(matches!(
+            out,
+            Some(Msg::QuestionReply { id, reply: QuestionReplyKind::Answered(a) })
+                if id == "que_s" && a == vec![vec![1]]
+        ));
+    }
+
+    #[test]
+    fn dashboard_digit_out_of_range_is_ignored() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s"),
+            status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+        }];
+        app.dashboard.peek = DashboardPeek::Question { highlight: 0 };
+        // dash_single_question has 2 options (indices 0-1); '9' -> index 8.
+        let out = app.on_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        assert!(out.is_none());
     }
 }
