@@ -23,7 +23,7 @@ impl std::fmt::Debug for Client {
 }
 
 /// A session summary row from `GET /session`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct SessionInfo {
     pub id: String,
     #[serde(default)]
@@ -36,6 +36,16 @@ pub struct SessionInfo {
     /// breaker for [`most_recent_session`].
     #[serde(default)]
     pub time_created: i64,
+    /// Whether this session currently has an in-flight turn (server
+    /// `Session`'s computed `busy` field, added for the dashboard).
+    /// Absent/old servers → `false`.
+    #[serde(default)]
+    pub busy: bool,
+    /// Parent session id, if this is a subagent/workflow child session
+    /// (server `Session.parent_id`). `None` for a top-level session — the
+    /// dashboard (`Overlay::Dashboard`) filters to top-level sessions only.
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 /// The session to reopen on startup: the most-recently-updated one (ties broken
@@ -224,6 +234,40 @@ impl Client {
             .json()
             .await
             .context("decoding history")
+    }
+
+    /// `GET /permission` — pending permission asks across all sessions.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, the server responds with a
+    /// non-success status, or the body cannot be decoded as JSON.
+    pub async fn permission_list(&self) -> Result<Vec<crate::sse::PermissionAsked>> {
+        let v: serde_json::Value = self
+            .get("/permission")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("decoding /permission")?;
+        Ok(crate::sse::decode_permission_list(&v))
+    }
+
+    /// `GET /question` — pending question-tool asks across all sessions.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, the server responds with a
+    /// non-success status, or the body cannot be decoded as JSON.
+    pub async fn question_list(&self) -> Result<Vec<crate::sse::QuestionAsked>> {
+        let v: serde_json::Value = self
+            .get("/question")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .context("decoding /question")?;
+        Ok(crate::sse::decode_question_list(&v))
     }
 
     /// `GET /agent`.
@@ -570,7 +614,25 @@ mod tests {
             title: None,
             time_updated: updated,
             time_created: created,
+            busy: false,
+            parent_id: None,
         }
+    }
+
+    #[test]
+    fn session_info_reads_busy_and_parent_id() {
+        let j = r#"{"id":"ses_1","busy":true,"parent_id":"ses_parent"}"#;
+        let s: SessionInfo = serde_json::from_str(j).unwrap();
+        assert!(s.busy);
+        assert_eq!(s.parent_id.as_deref(), Some("ses_parent"));
+    }
+
+    #[test]
+    fn session_info_defaults_busy_false_and_parent_none_when_absent() {
+        let j = r#"{"id":"ses_1"}"#;
+        let s: SessionInfo = serde_json::from_str(j).unwrap();
+        assert!(!s.busy);
+        assert!(s.parent_id.is_none());
     }
 
     #[test]
