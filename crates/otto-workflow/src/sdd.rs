@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use otto_storage::model::MessageId;
-use otto_tools::{SubagentRequest, SubagentSpawner};
+use otto_tools::{SubagentOrigin, SubagentRequest, SubagentSpawner};
 use otto_vcs::worktree::{CreateInput, RemoveInput, Worktree};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -537,6 +537,9 @@ impl SddWorkflow {
             command: None,
             abort: abort.clone(),
             directory: Some(directory),
+            origin: SubagentOrigin::Workflow {
+                kind: "sdd".to_string(),
+            },
         }
     }
 
@@ -607,6 +610,9 @@ async fn spawn_one(
         abort: abort.clone(),
         event_tx: crate::tap_subagent(task_index, subagent),
         directory: None,
+        origin: SubagentOrigin::Workflow {
+            kind: "sdd".to_string(),
+        },
     };
     spawner.spawn(req).await.map_err(WfError::from)
 }

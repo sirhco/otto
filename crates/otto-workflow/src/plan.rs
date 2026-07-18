@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use otto_storage::model::MessageId;
-use otto_tools::{SubagentRequest, SubagentSpawner};
+use otto_tools::{SubagentOrigin, SubagentRequest, SubagentSpawner};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{TaskStatus, WfError};
@@ -165,6 +165,9 @@ impl PlanWorkflow {
             abort: abort.clone(),
             event_tx: crate::tap_subagent(t.index, subagent),
             directory: None,
+            origin: SubagentOrigin::Workflow {
+                kind: "plan".to_string(),
+            },
         };
         spawner.spawn(req).await.map_err(WfError::from)
     }

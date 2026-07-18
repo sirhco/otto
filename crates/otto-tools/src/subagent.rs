@@ -15,6 +15,24 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tool::ToolError;
 
+/// Where a [`SubagentRequest`] originated — the model-facing `task` tool
+/// (ad-hoc, one dispatch per model tool call) vs. a workflow engine's
+/// automated dispatch (`sdd`/`tdd`/`plan`). Otto extension — no opencode
+/// analog. Threaded through to `SessionSubagentSpawner::spawn` so the child
+/// session's `metadata.kind` can tag its provenance for the multi-agent
+/// dashboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentOrigin {
+    /// Spawned by the model-facing `task` tool.
+    AdHocTool,
+    /// Spawned by a workflow engine, carrying the workflow kind
+    /// (`"sdd"`/`"tdd"`/`"plan"`).
+    Workflow {
+        /// The workflow engine's kind string.
+        kind: String,
+    },
+}
+
 /// The request the `task` tool hands to a [`SubagentSpawner`] — the fields of
 /// `TaskTool`'s parameters plus the owning-turn identity taken from
 /// `ToolContext` (`ctx.sessionID`/`ctx.messageID`/`ctx.abort`, task.ts:121-160).
@@ -51,6 +69,10 @@ pub struct SubagentRequest {
     /// otto-workflow's SDD engine can give each spawned implementer its own
     /// isolated git worktree.
     pub directory: Option<PathBuf>,
+    /// Where this request originated (ad-hoc `task` tool vs. a workflow
+    /// engine). Otto extension — no opencode analog — used to tag the child
+    /// session's `metadata.kind` for the multi-agent dashboard.
+    pub origin: SubagentOrigin,
 }
 
 /// The seam the `task` tool calls to run a subagent turn — port of the inline
@@ -102,6 +124,7 @@ mod tests {
             abort: CancellationToken::new(),
             event_tx: None,
             directory: None,
+            origin: SubagentOrigin::AdHocTool,
         }
     }
 

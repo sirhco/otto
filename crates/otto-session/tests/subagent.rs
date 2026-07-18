@@ -24,7 +24,8 @@ use otto_storage::model::{
 };
 use otto_storage::{Session, SessionTokens, Store};
 use otto_tools::{
-    ExecuteResult, PermissionRequest, SubagentSpawner, Tool, ToolContext, ToolError, ToolRegistry,
+    ExecuteResult, PermissionRequest, SubagentOrigin, SubagentSpawner, Tool, ToolContext,
+    ToolError, ToolRegistry,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -284,7 +285,9 @@ async fn subagent_spawn_end_to_end() {
         hooks: None,
     };
 
-    run_loop(&cfg, &sid(parent_id)).await.expect("parent run_loop");
+    run_loop(&cfg, &sid(parent_id))
+        .await
+        .expect("parent run_loop");
 
     // The child ran exactly once.
     assert_eq!(child_calls.load(Ordering::SeqCst), 1, "child ran once");
@@ -320,6 +323,11 @@ async fn subagent_spawn_end_to_end() {
             .as_ref()
             .is_some_and(|m| m.get("permission").is_some())
     );
+    // Spawned via the `task` tool (ad-hoc), so the child is tagged "subagent".
+    assert_eq!(
+        child.metadata.as_ref().and_then(|m| m.get("kind")),
+        Some(&json!("subagent"))
+    );
 }
 
 // -- 1z. SubagentStop deny re-injects a synthetic continuation ---------------
@@ -341,10 +349,8 @@ async fn subagent_stop_deny_reruns_the_child_loop() {
         &json!({ "*": "allow" }),
     )));
 
-    let marker = std::env::temp_dir().join(format!(
-        "otto-subagent-stop-marker-{}",
-        std::process::id()
-    ));
+    let marker =
+        std::env::temp_dir().join(format!("otto-subagent-stop-marker-{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
     let hooks_cfg = otto_hooks::HooksConfig {
         subagent_stop: vec![otto_hooks::HookMatcherGroup {
@@ -388,6 +394,7 @@ async fn subagent_stop_deny_reruns_the_child_loop() {
             abort: CancellationToken::new(),
             event_tx: None,
             directory: None,
+            origin: SubagentOrigin::AdHocTool,
         })
         .await
         .expect("spawn completes");
@@ -461,6 +468,7 @@ async fn subagent_stop_ask_approved_ends_the_child_loop() {
                 abort: CancellationToken::new(),
                 event_tx: None,
                 directory: None,
+                origin: SubagentOrigin::AdHocTool,
             })
             .await
     });
@@ -542,6 +550,7 @@ async fn subagent_stop_ask_rejected_injects_the_human_message_and_reruns() {
                 abort: CancellationToken::new(),
                 event_tx: None,
                 directory: None,
+                origin: SubagentOrigin::AdHocTool,
             })
             .await
     });
@@ -650,8 +659,7 @@ async fn ruleset_deny_fails_tool_but_turn_continues() {
     turn1.push(tool_call("call_1", "todowrite", json!({})));
     turn1.push(step_finish(FinishReason::ToolCalls));
     turn1.push(finish(FinishReason::ToolCalls));
-    let (route, calls) =
-        ScriptedRoute::build(vec![turn1, text_turn("t2", r#"{"status":"DONE"}"#)]);
+    let (route, calls) = ScriptedRoute::build(vec![turn1, text_turn("t2", r#"{"status":"DONE"}"#)]);
 
     let cfg = RunConfig {
         store: store.clone(),
@@ -759,6 +767,7 @@ async fn spawned_child_inherits_parent_permission_mode() {
             abort: CancellationToken::new(),
             event_tx: None,
             directory: None,
+            origin: SubagentOrigin::AdHocTool,
         })
         .await
         .expect("child spawn");
@@ -775,6 +784,88 @@ async fn spawned_child_inherits_parent_permission_mode() {
         permission.mode(&child.id),
         otto_permission::PermissionMode::FullAuto,
         "child inherits parent's mode live"
+    );
+}
+
+// -- 1a2. child session.metadata.kind tags the request's origin -------------
+
+#[tokio::test]
+async fn spawn_tags_child_session_kind_by_origin() {
+    let store = Store::open_in_memory().await.expect("store");
+    let permission = Arc::new(Permission::new(Ruleset::from_config(
+        &json!({ "*": "allow" }),
+    )));
+    // Each spawn call gets its own fresh single-turn route (route_for is
+    // invoked once per `spawn`), so the two spawns below resolve
+    // independently.
+    let route_for: RouteFor = Arc::new(move |_agent: &AgentInfo| {
+        let (route, _) = ScriptedRoute::build(vec![text_turn("c1", "child answer")]);
+        (route, model())
+    });
+
+    let spawner = SessionSubagentSpawner::new(
+        store.clone(),
+        registry(vec![]),
+        permission.clone(),
+        Arc::new(otto_question::Question::new()),
+        Ruleset::new(),
+        json!({}),
+        route_for,
+        std::env::temp_dir(),
+        "prj_1",
+        "1.0.0",
+        None,
+        None,
+    );
+
+    let base_req = |origin: SubagentOrigin, parent_session_id: &str| otto_tools::SubagentRequest {
+        subagent_type: "general".into(),
+        description: "d".into(),
+        prompt: "do X".into(),
+        parent_session_id: parent_session_id.into(),
+        parent_message_id: "msg_x".into(),
+        task_id: None,
+        command: None,
+        abort: CancellationToken::new(),
+        event_tx: None,
+        directory: None,
+        origin,
+    };
+
+    // Ad-hoc `task`-tool origin tags the child "subagent".
+    spawner
+        .spawn(base_req(SubagentOrigin::AdHocTool, "ses_adhoc"))
+        .await
+        .expect("ad-hoc spawn");
+    let sessions = store.list_sessions().await.expect("sessions");
+    let adhoc_child = sessions
+        .iter()
+        .find(|s| s.parent_id.as_deref() == Some("ses_adhoc"))
+        .expect("ad-hoc child session");
+    assert_eq!(
+        adhoc_child.metadata.as_ref().and_then(|m| m.get("kind")),
+        Some(&json!("subagent"))
+    );
+
+    // Workflow origin tags the child "workflow_task", regardless of which
+    // workflow kind dispatched it.
+    spawner
+        .spawn(base_req(
+            SubagentOrigin::Workflow {
+                kind: "sdd".to_string(),
+            },
+            "ses_workflow",
+        ))
+        .await
+        .expect("workflow spawn");
+    let sessions = store.list_sessions().await.expect("sessions");
+    let workflow_child = sessions
+        .iter()
+        .find(|s| s.parent_id.as_deref() == Some("ses_workflow"))
+        .expect("workflow child session");
+    assert_eq!(
+        workflow_child.metadata.as_ref().and_then(|m| m.get("kind")),
+        Some(&json!("workflow_task"))
     );
 }
 
@@ -820,6 +911,7 @@ async fn spawn_many_delegates_in_order() {
         abort: CancellationToken::new(),
         event_tx: None,
         directory: None,
+        origin: SubagentOrigin::AdHocTool,
     };
     let reqs = vec![make_req("one"), make_req("two")];
 
@@ -869,6 +961,7 @@ async fn unknown_subagent_type_errors() {
             abort: CancellationToken::new(),
             event_tx: None,
             directory: None,
+            origin: SubagentOrigin::AdHocTool,
         })
         .await
         .unwrap_err();
@@ -920,6 +1013,7 @@ async fn event_tx_forwards_child_run_events() {
             abort: CancellationToken::new(),
             event_tx: Some(tx),
             directory: None,
+            origin: SubagentOrigin::AdHocTool,
         })
         .await
         .expect("child run");
@@ -1026,7 +1120,9 @@ async fn nested_subagent_spawn() {
         hooks: None,
     };
 
-    run_loop(&cfg, &sid(parent_id)).await.expect("parent run_loop");
+    run_loop(&cfg, &sid(parent_id))
+        .await
+        .expect("parent run_loop");
 
     // The grandchild ran — nested spawner re-injection worked.
     assert_eq!(grandchild_calls.load(Ordering::SeqCst), 1, "grandchild ran");
@@ -1189,7 +1285,10 @@ async fn permission_ask_admits_on_reply_once() {
     };
     run_loop(&cfg, &sid(ses)).await.expect("run_loop");
 
-    match tool_state(&store, &sid(ses), "askedit").await.expect("part") {
+    match tool_state(&store, &sid(ses), "askedit")
+        .await
+        .expect("part")
+    {
         ToolState::Completed { output, .. } => assert_eq!(output, "edited"),
         other => panic!("expected completed after reply Once, got {other:?}"),
     }
@@ -1242,6 +1341,7 @@ async fn spawn_honors_directory_override() {
             abort: CancellationToken::new(),
             event_tx: None,
             directory: Some(override_directory.clone()),
+            origin: SubagentOrigin::AdHocTool,
         })
         .await
         .expect("spawn completes");

@@ -1118,6 +1118,15 @@ async fn workflow_run(
             body.parent.clone().map(SessionId::from),
         )
         .await?;
+    // Tag the workflow's own root session for the multi-agent dashboard
+    // (otto extension — no opencode analog): distinguishes it from an
+    // ordinary chat session and its per-task workflow children.
+    rt.store()
+        .update_session_metadata(
+            &session_id,
+            json!({ "kind": "workflow_root", "workflowKind": kind }),
+        )
+        .await?;
     let spawner = rt
         .subagent_spawner(&agent, &model)
         .map_err(|e| ApiError::internal(e.to_string()))?;

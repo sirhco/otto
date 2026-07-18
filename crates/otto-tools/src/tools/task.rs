@@ -12,7 +12,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::subagent::SubagentRequest;
+use crate::subagent::{SubagentOrigin, SubagentRequest};
 use crate::tool::{ExecuteResult, Tool, ToolContext, ToolError, decode_args};
 
 /// Parameters for `task` (task.ts:43-62).
@@ -120,6 +120,7 @@ impl Tool for TaskTool {
             abort: ctx.abort.clone(),
             event_tx,
             directory: None,
+            origin: SubagentOrigin::AdHocTool,
         };
 
         let text = spawner.spawn(req).await?;
