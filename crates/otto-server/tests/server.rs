@@ -440,6 +440,139 @@ async fn permission_flow() {
 }
 
 #[tokio::test]
+async fn session_busy_reflects_an_in_flight_turn() {
+    let mut turn1 = vec![step_start()];
+    turn1.push(tool_call("call_1", "guard", json!({})));
+    turn1.push(step_finish(FinishReason::ToolCalls));
+    turn1.push(finish(FinishReason::ToolCalls));
+    let (factory, _calls) = ScriptedRouteFactory::new(vec![turn1, text_turn("t2", "done")]);
+
+    let config = Config {
+        permission: Some(json!({ "danger": "ask" })),
+        ..Config::default()
+    };
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(GuardTool));
+    let runtime = Arc::new(
+        Runtime::in_memory(config)
+            .await
+            .unwrap()
+            .with_route_factory(factory)
+            .with_tools(Arc::new(registry)),
+    );
+    let base = spawn(runtime, no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let created: Value = http
+        .post(format!("{base}/session"))
+        .json(&json!({ "title": "Busy" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    fn busy_of(sessions: &Value, id: &str) -> bool {
+        sessions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .and_then(|s| s["busy"].as_bool())
+            .unwrap_or(false)
+    }
+
+    let sessions: Value = http
+        .get(format!("{base}/session"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!busy_of(&sessions, &id), "not busy before any turn starts");
+
+    let prompt = {
+        let http = http.clone();
+        let base = base.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            http.post(format!("{base}/session/{id}/message"))
+                .json(&json!({ "prompt": "do danger" }))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        })
+    };
+
+    let mut saw_busy = false;
+    for _ in 0..100 {
+        let sessions: Value = http
+            .get(format!("{base}/session"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if busy_of(&sessions, &id) {
+            saw_busy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        saw_busy,
+        "session should report busy while the turn is in flight"
+    );
+
+    let pending: Value = http
+        .get(format!("{base}/permission"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let request_id = pending.as_array().unwrap().first().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    http.post(format!("{base}/permission/{request_id}/reply"))
+        .json(&json!({ "reply": "once" }))
+        .send()
+        .await
+        .unwrap();
+    prompt.await.unwrap();
+
+    let mut cleared = false;
+    for _ in 0..100 {
+        let sessions: Value = http
+            .get(format!("{base}/session"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if !busy_of(&sessions, &id) {
+            cleared = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        cleared,
+        "session should report idle again once the turn ends"
+    );
+}
+
+#[tokio::test]
 async fn permission_mode_route_sets_mode_and_rejects_unknown() {
     let runtime = plain_runtime().await;
     let base = spawn(runtime.clone(), no_auth()).await;

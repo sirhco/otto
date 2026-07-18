@@ -123,6 +123,10 @@ impl TokenRegistry {
             None => false,
         }
     }
+    /// Whether `session` currently has a registered (running) token.
+    fn contains(&self, session: &str) -> bool {
+        self.0.lock().unwrap().contains_key(session)
+    }
 }
 
 /// Shared handler state: the runtime plus a process-wide event bus that `/event`
@@ -413,8 +417,18 @@ struct CreateSessionBody {
 }
 
 /// `GET /session` — list sessions (opencode `session.ts`).
-async fn session_list(State(state): State<AppState>) -> ApiResult<Json<Vec<Session>>> {
-    Ok(Json(state.runtime.store().list_sessions().await?))
+async fn session_list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let sessions = state.runtime.store().list_sessions().await?;
+    let out: Vec<Value> = sessions
+        .into_iter()
+        .map(|session| {
+            let busy = state.runs.contains(session.id.as_str());
+            let mut v = json!(session);
+            v["busy"] = json!(busy);
+            v
+        })
+        .collect();
+    Ok(Json(Value::Array(out)))
 }
 
 /// `POST /session` — create a session and return it (opencode `session.ts`).
