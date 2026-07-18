@@ -212,6 +212,66 @@ struct QuestionAskedProps {
     questions: Vec<QuestionPromptProps>,
 }
 
+/// Build a [`QuestionAsked`] from the raw wire props — shared by
+/// [`decode_event`]'s `question.asked` arm and [`decode_question_list`],
+/// since a `GET /question` array element has the exact same field shape as
+/// one `question.asked` event's `properties`.
+fn question_asked_from_props(q: QuestionAskedProps) -> QuestionAsked {
+    QuestionAsked {
+        id: q.id,
+        session_id: q.session_id,
+        questions: q
+            .questions
+            .into_iter()
+            .map(|p| QuestionPromptView {
+                question: p.question,
+                header: p.header,
+                options: p
+                    .options
+                    .into_iter()
+                    .map(|o| QuestionOptionView {
+                        label: o.label,
+                        description: o.description,
+                    })
+                    .collect(),
+                multiple: p.multiple,
+            })
+            .collect(),
+    }
+}
+
+/// Decode a `GET /permission` array response into pending asks. Each
+/// element has the same field shape as a `permission.asked` event's
+/// `properties`. Non-array input, or an element that fails to decode, is
+/// dropped rather than erroring — a poll-based caller prefers a partial
+/// list over losing the whole dashboard refresh to one bad entry.
+#[must_use]
+pub fn decode_permission_list(json: &serde_json::Value) -> Vec<PermissionAsked> {
+    json.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| serde_json::from_value::<PermProps>(v.clone()).ok())
+        .map(|p| PermissionAsked {
+            id: p.id,
+            session_id: p.session_id,
+            permission: p.permission,
+            patterns: p.patterns,
+        })
+        .collect()
+}
+
+/// Decode a `GET /question` array response into pending asks. Same
+/// tolerant-of-partial-failure behavior as [`decode_permission_list`].
+#[must_use]
+pub fn decode_question_list(json: &serde_json::Value) -> Vec<QuestionAsked> {
+    json.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| serde_json::from_value::<QuestionAskedProps>(v.clone()).ok())
+        .map(question_asked_from_props)
+        .collect()
+}
+
 /// Parse a `/event` envelope frame. Unknown envelope types map to
 /// [`ServerEvent::Other`]; malformed frames also map to `Other`.
 #[must_use]
@@ -240,27 +300,7 @@ pub fn decode_event(frame: &str) -> ServerEvent {
             }
         }
         "question.asked" => match serde_json::from_value::<QuestionAskedProps>(env.properties) {
-            Ok(q) => ServerEvent::QuestionAsked(QuestionAsked {
-                id: q.id,
-                session_id: q.session_id,
-                questions: q
-                    .questions
-                    .into_iter()
-                    .map(|p| QuestionPromptView {
-                        question: p.question,
-                        header: p.header,
-                        options: p
-                            .options
-                            .into_iter()
-                            .map(|o| QuestionOptionView {
-                                label: o.label,
-                                description: o.description,
-                            })
-                            .collect(),
-                        multiple: p.multiple,
-                    })
-                    .collect(),
-            }),
+            Ok(q) => ServerEvent::QuestionAsked(question_asked_from_props(q)),
             Err(_) => ServerEvent::Other,
         },
         "workflow.started" | "workflow.progress" | "workflow.done" => {
@@ -493,5 +533,71 @@ mod tests {
     fn decode_event_question_asked_malformed_is_other() {
         let frame = "{\"type\":\"question.asked\",\"properties\":{}}";
         assert_eq!(decode_event(frame), ServerEvent::Other);
+    }
+
+    #[test]
+    fn decode_permission_list_reads_pending_array() {
+        let json = serde_json::json!([
+            {"id": "perm_1", "sessionID": "ses_1", "permission": "edit", "patterns": ["*.rs"]},
+            {"id": "perm_2", "sessionID": "ses_2", "permission": "bash", "patterns": []},
+        ]);
+        let out = decode_permission_list(&json);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, "perm_1");
+        assert_eq!(out[0].session_id, "ses_1");
+        assert_eq!(out[1].permission, "bash");
+    }
+
+    #[test]
+    fn decode_permission_list_empty_on_non_array() {
+        assert!(decode_permission_list(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn decode_question_list_reads_pending_array() {
+        let json = serde_json::json!([
+            {
+                "id": "que_1",
+                "sessionID": "ses_1",
+                "questions": [{
+                    "question": "Pick one",
+                    "header": "choice",
+                    "options": [{"label": "A", "description": "first"}],
+                    "multiple": false
+                }]
+            }
+        ]);
+        let out = decode_question_list(&json);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "que_1");
+        assert_eq!(out[0].questions[0].header, "choice");
+    }
+
+    #[test]
+    fn decode_question_list_empty_on_non_array() {
+        assert!(decode_question_list(&serde_json::json!(null)).is_empty());
+    }
+
+    #[test]
+    fn decode_event_question_asked_matches_decode_question_list_shape() {
+        // The list endpoint's per-item shape is identical to a
+        // `question.asked` event's `properties` — pin that equivalence
+        // since decode_question_list reuses QuestionAskedProps for both.
+        let props = serde_json::json!({
+            "id": "que_1", "sessionID": "ses_1",
+            "questions": [{
+                "question": "Q", "header": "h",
+                "options": [{"label": "A", "description": "a"}],
+                "multiple": true
+            }]
+        });
+        let from_list = decode_question_list(&serde_json::json!([props.clone()]));
+        let from_event = match decode_event(
+            &serde_json::json!({"type": "question.asked", "properties": props}).to_string(),
+        ) {
+            ServerEvent::QuestionAsked(q) => q,
+            other => panic!("expected QuestionAsked, got {other:?}"),
+        };
+        assert_eq!(from_list[0], from_event);
     }
 }
