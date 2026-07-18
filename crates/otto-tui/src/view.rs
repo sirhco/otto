@@ -1625,10 +1625,7 @@ mod tests {
             c.lines.len(),
             "one start per assembled line"
         );
-        assert!(
-            c.wrap_total >= target_row,
-            "total covers every line's rows"
-        );
+        assert!(c.wrap_total >= target_row, "total covers every line's rows");
     }
 
     /// A render must publish the scroll bound so `App::scroll_up` clamps
@@ -3151,6 +3148,7 @@ mod tests {
                     ..Default::default()
                 },
                 status: DashboardStatus::Busy,
+                indent: false,
             },
             DashboardRow {
                 session: SessionInfo {
@@ -3159,6 +3157,7 @@ mod tests {
                     ..Default::default()
                 },
                 status: DashboardStatus::Idle,
+                indent: false,
             },
         ];
         let text = render(&app);
@@ -3182,6 +3181,7 @@ mod tests {
                 permission: "edit".into(),
                 patterns: vec!["*.rs".into()],
             }),
+            indent: false,
         }];
         app.dashboard.peek = DashboardPeek::Permission;
         let text = render(&app);

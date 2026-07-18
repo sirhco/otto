@@ -1371,10 +1371,12 @@ mod tests {
             DashboardRow {
                 session: dash_session("a"),
                 status: DashboardStatus::Idle,
+                indent: false,
             },
             DashboardRow {
                 session: dash_session("b"),
                 status: DashboardStatus::Idle,
+                indent: false,
             },
         ];
         app.dashboard.selected = 0;
@@ -1391,6 +1393,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("target"),
             status: DashboardStatus::Idle,
+            indent: false,
         }];
         let out = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(out, Some(Msg::SwitchSession(id)) if id == "target"));
@@ -1407,6 +1410,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("s"),
             status: DashboardStatus::AwaitingPermission(dash_perm("s")),
+            indent: false,
         }];
         app.dashboard.peek = DashboardPeek::Permission;
         let out = app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
@@ -1424,6 +1428,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("s"),
             status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+            indent: false,
         }];
         app.dashboard.peek = DashboardPeek::Question { highlight: 0 };
         let out = app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
@@ -1441,6 +1446,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("s"),
             status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+            indent: false,
         }];
         app.dashboard.peek = DashboardPeek::Question { highlight: 0 };
         // dash_single_question has 2 options (indices 0-1); '9' -> index 8.
