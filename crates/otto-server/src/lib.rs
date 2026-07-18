@@ -460,6 +460,24 @@ async fn session_create(
         .get_session(&id)
         .await?
         .ok_or_else(|| ApiError::internal("created session vanished"))?;
+
+    // Fan a `session.created` frame out over `/event` so a dashboard-style
+    // client picks up new top-level sessions without polling `GET /session`.
+    // Workflow-root creation already emits its own `workflow.started` event as
+    // an equivalent reconcile signal, so this handler alone is sufficient.
+    // Otto extension, no opencode analog.
+    let _ = state.events.send(
+        json!({
+            "type": "session.created",
+            "properties": {
+                "sessionID": session.id,
+                "title": session.title,
+                "parentID": session.parent_id,
+            }
+        })
+        .to_string(),
+    );
+
     Ok(Json(session))
 }
 
@@ -655,6 +673,13 @@ async fn session_prompt(
     let abort = CancellationToken::new();
     let run_generation = state.runs.insert(&id, abort.clone());
 
+    // Fan `session.busy` out over `/event` so a dashboard-style client picks
+    // up a turn starting without polling `GET /session`. Otto extension, no
+    // opencode analog.
+    let _ = state
+        .events
+        .send(json!({ "type": "session.busy", "properties": { "sessionID": id } }).to_string());
+
     let RunHandle { mut events, join } =
         state
             .runtime
@@ -696,6 +721,14 @@ async fn session_prompt(
         // finished turn returns `false`. Generation-checked: if a newer turn
         // already replaced this one, its token stays registered.
         runs.remove(&run_session, run_generation);
+        // Fan `session.idle` out over `/event`. This chokepoint runs on every
+        // exit path (success, provider error, cancellation), so it stays in
+        // sync with the `session.busy` frame sent above. Otto extension, no
+        // opencode analog.
+        let _ = bus.send(
+            json!({ "type": "session.idle", "properties": { "sessionID": run_session } })
+                .to_string(),
+        );
     };
     // Keep-alive comments so a legitimately slow turn (tools running, or the
     // provider mid-generation) keeps bytes flowing to the client during quiet
