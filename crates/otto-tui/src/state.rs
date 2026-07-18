@@ -362,9 +362,6 @@ pub(crate) fn build_dashboard_rows(
 /// running the full markdown transcript pipeline `load_history` does for
 /// the attached session. Matches the wire shape of `otto_storage::WithParts`
 /// (`{"info": {"role": "user"|"assistant", ...}, "parts": [{"type": "text", "text": ...}, ...]}`).
-// Not yet called anywhere — `lib.rs`'s dashboard peek-fetch (Task 8) is the
-// first caller. Remove this allow once that lands.
-#[allow(dead_code)]
 pub(crate) fn latest_message_text(rows: &[serde_json::Value]) -> String {
     rows.iter()
         .rev()

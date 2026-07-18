@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 
 use crate::client::Client;
 use crate::spawn::LocalServer;
-use crate::state::{App, LoopAction, Msg, Overlay};
+use crate::state::{App, DashboardPeek, LoopAction, Msg, Overlay};
 
 /// Whether we successfully pushed Kitty keyboard-enhancement flags at startup.
 /// Gates the conditional pops so unsupported terminals (and the panic/suspend
@@ -357,6 +357,8 @@ pub fn route_message(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<
             // text-input), all of which flag `loading` when they open.
             let was_loading_files = app.file_fetch_pending();
             let was_sessions = matches!(app.overlay, Overlay::Sessions);
+            let was_dashboard = matches!(app.overlay, Overlay::Dashboard);
+            let dashboard_selected_before = app.dashboard.selected;
             let next = app.on_key(k);
             let now_loading_files = app.file_fetch_pending();
             if now_loading_files && !was_loading_files {
@@ -376,6 +378,38 @@ pub fn route_message(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<
                 tokio::spawn(async move {
                     if let Ok(sessions) = client.sessions().await {
                         let _ = tx.send(Msg::SessionsLoaded(sessions));
+                    }
+                });
+            }
+            // Fetch once immediately on opening the dashboard.
+            if matches!(app.overlay, Overlay::Dashboard) && !was_dashboard {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Some(msg) = fetch_dashboard(&client).await {
+                        let _ = tx.send(msg);
+                    }
+                });
+            }
+            // A row-selection change (arrow keys) needs its own peek fetch
+            // for idle/busy rows — `dashboard_move` already set
+            // `app.dashboard.peek` to `Loading` synchronously (Task 6);
+            // this spawns the async fetch that resolves it.
+            if matches!(app.overlay, Overlay::Dashboard)
+                && app.dashboard.selected != dashboard_selected_before
+                && matches!(app.dashboard.peek, DashboardPeek::Loading)
+                && let Some(row) = app.dashboard.rows.get(app.dashboard.selected)
+            {
+                let sid = row.session.id.clone();
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(rows) = client.history(&sid).await {
+                        let text = crate::state::latest_message_text(&rows);
+                        let _ = tx.send(Msg::DashboardPeekLoaded {
+                            session_id: sid,
+                            text,
+                        });
                     }
                 });
             }
@@ -426,6 +460,10 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
     if let Msg::PermissionReply { id, reply } = &msg {
         let id = id.clone();
         let reply = reply.clone();
+        app.update(Msg::PermissionReply {
+            id: id.clone(),
+            reply: reply.clone(),
+        });
         let client = client.clone();
         tokio::spawn(async move {
             let _ = client.reply_permission(&id, &reply, None).await;
@@ -435,6 +473,10 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
     if let Msg::QuestionReply { id, reply } = &msg {
         let id = id.clone();
         let reply = reply.clone();
+        app.update(Msg::QuestionReply {
+            id: id.clone(),
+            reply: reply.clone(),
+        });
         let client = client.clone();
         tokio::spawn(async move {
             let _ = client.reply_question(&id, &reply).await;
@@ -552,7 +594,47 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         });
         return;
     }
+    if let Msg::Tick = &msg
+        && matches!(app.overlay, Overlay::Dashboard)
+        && dashboard_poll_due(app.tick)
+    {
+        let client = client.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Some(msg) = fetch_dashboard(&client).await {
+                let _ = tx.send(msg);
+            }
+        });
+    }
     app.update(msg);
+}
+
+/// How often (in ticks of the existing 125ms tick) the dashboard polls
+/// `GET /session`/`GET /permission`/`GET /question` while open: 16 ticks =
+/// 2s.
+const DASHBOARD_POLL_TICKS: u32 = 16;
+
+/// Whether a dashboard poll is due on this tick.
+fn dashboard_poll_due(tick: u32) -> bool {
+    tick.is_multiple_of(DASHBOARD_POLL_TICKS)
+}
+
+/// Fetch the three dashboard endpoints and fold them into a `DashboardLoaded`
+/// message, or `None` if any of the three fails. Per the design spec's
+/// error-handling section, a poll failure must keep the last-known
+/// `DashboardState` on screen rather than clearing it — so a partial
+/// failure here is deliberately all-or-nothing (never sends a message built
+/// from only the endpoints that happened to succeed), leaving
+/// `app.dashboard.rows` untouched until the next successful poll.
+async fn fetch_dashboard(client: &Client) -> Option<Msg> {
+    let sessions = client.sessions().await.ok()?;
+    let permissions = client.permission_list().await.ok()?;
+    let questions = client.question_list().await.ok()?;
+    Some(Msg::DashboardLoaded {
+        sessions,
+        permissions,
+        questions,
+    })
 }
 
 /// Backoff before `/event` reconnect attempt `attempt` (1-based):
@@ -801,6 +883,15 @@ mod tests {
     #[test]
     fn cursor_color_reset_sequence_is_osc112() {
         assert_eq!(CURSOR_COLOR_RESET_SEQUENCE, "\x1b]112\x07");
+    }
+
+    #[test]
+    fn dashboard_poll_due_every_16_ticks() {
+        assert!(dashboard_poll_due(0));
+        assert!(!dashboard_poll_due(1));
+        assert!(!dashboard_poll_due(15));
+        assert!(dashboard_poll_due(16));
+        assert!(dashboard_poll_due(32));
     }
 
     #[test]
