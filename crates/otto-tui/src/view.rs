@@ -86,11 +86,7 @@ pub fn view(app: &App, frame: &mut Frame) {
                 .collect::<Vec<_>>(),
             &app.theme,
         ),
-        // TODO(Task 7): render the dashboard. This no-op arm exists only so
-        // the crate compiles now that `Overlay::Dashboard` exists (Task 5) —
-        // exhaustiveness here forced a one-line touch outside state.rs's
-        // otherwise-exclusive file scope for that task.
-        Overlay::Dashboard => {}
+        Overlay::Dashboard => dashboard_overlay(frame, area, &app.dashboard, &app.theme),
         Overlay::Models => list_overlay(
             frame,
             area,
@@ -997,6 +993,108 @@ fn question_overlay(
     );
 }
 
+/// Render the multi-agent dashboard: a row list (session title + status
+/// glyph) on top, the selected row's peek/reply panel below. Mirrors
+/// `question_overlay`'s direct `Line`-styling (a plain-string body would
+/// lose the status-color coding) and `list_overlay`'s dynamic-height sizing.
+fn dashboard_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    dash: &crate::state::DashboardState,
+    theme: &crate::theme::Theme,
+) {
+    use crate::state::{DashboardPeek, DashboardStatus};
+
+    let mut lines: Vec<Line> = Vec::new();
+    if dash.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no other sessions",
+            theme.text_muted,
+        )));
+    }
+    for (i, row) in dash.rows.iter().enumerate() {
+        let (glyph, style) = match &row.status {
+            DashboardStatus::AwaitingPermission(_) | DashboardStatus::AwaitingQuestion(_) => {
+                ("●", theme.status_warn)
+            }
+            DashboardStatus::Busy => ("⋅", theme.accent),
+            DashboardStatus::Idle => ("○", theme.text_muted),
+        };
+        let title = row
+            .session
+            .title
+            .clone()
+            .unwrap_or_else(|| row.session.id.clone());
+        let text = format!("{glyph} {title}");
+        let line = if i == dash.selected {
+            Line::from(Span::styled(text, theme.selection))
+        } else {
+            Line::from(Span::styled(text, style))
+        };
+        lines.push(line);
+    }
+    lines.push(Line::from(""));
+    match &dash.peek {
+        DashboardPeek::Loading => {
+            lines.push(Line::from(Span::styled("loading…", theme.text_muted)));
+        }
+        DashboardPeek::Message(text) => lines.push(Line::from(text.as_str())),
+        DashboardPeek::Permission => {
+            if let Some(DashboardStatus::AwaitingPermission(p)) =
+                dash.rows.get(dash.selected).map(|r| &r.status)
+            {
+                lines.push(Line::from(format!(
+                    "allow `{}`? {}",
+                    p.permission,
+                    p.patterns.join(", ")
+                )));
+                lines.push(Line::from(Span::styled(
+                    "y once · a always · n reject · enter open session",
+                    theme.text_muted,
+                )));
+            }
+        }
+        DashboardPeek::Question { .. } => {
+            if let Some(DashboardStatus::AwaitingQuestion(q)) =
+                dash.rows.get(dash.selected).map(|r| &r.status)
+                && let Some(question) = q.questions.first()
+            {
+                lines.push(Line::from(question.question.as_str()));
+                for (i, opt) in question.options.iter().enumerate() {
+                    lines.push(Line::from(format!(
+                        "{}. {} — {}",
+                        i + 1,
+                        opt.label,
+                        opt.description
+                    )));
+                }
+                lines.push(Line::from(Span::styled(
+                    "1-9 select · enter open session",
+                    theme.text_muted,
+                )));
+            }
+        }
+        DashboardPeek::NeedsFullSession => {
+            lines.push(Line::from(Span::styled(
+                "multi-select question — press enter to open this session",
+                theme.text_muted,
+            )));
+        }
+    }
+    let h = (lines.len() as u16 + 2).clamp(3, area.height);
+    let r = centered(area, 70, h);
+    frame.render_widget(Clear, r);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .title(" Dashboard ")
+                .borders(Borders::ALL)
+                .border_style(theme.border_focus),
+        ),
+        r,
+    );
+}
+
 fn list_overlay(
     frame: &mut Frame,
     area: Rect,
@@ -1354,8 +1452,12 @@ fn workflow_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::SessionInfo;
     use crate::sse::PermissionAsked;
-    use crate::state::{App, Overlay, TodoItem, TodoStatus, ToolStatus, TranscriptItem};
+    use crate::state::{
+        App, DashboardPeek, DashboardRow, DashboardStatus, Overlay, TodoItem, TodoStatus,
+        ToolStatus, TranscriptItem,
+    };
     use ratatui::{Terminal, backend::TestBackend};
 
     fn render(app: &App) -> String {
@@ -3035,5 +3137,63 @@ mod tests {
             cur_none, cur_men,
             "mention overlay keeps the editor focused (cursor unchanged)"
         );
+    }
+
+    #[test]
+    fn dashboard_overlay_shows_rows_and_titles() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: SessionInfo {
+                    id: "s1".into(),
+                    title: Some("busy one".into()),
+                    ..Default::default()
+                },
+                status: DashboardStatus::Busy,
+            },
+            DashboardRow {
+                session: SessionInfo {
+                    id: "s2".into(),
+                    title: Some("idle one".into()),
+                    ..Default::default()
+                },
+                status: DashboardStatus::Idle,
+            },
+        ];
+        let text = render(&app);
+        assert!(text.contains("busy one"));
+        assert!(text.contains("idle one"));
+    }
+
+    #[test]
+    fn dashboard_overlay_shows_permission_peek() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![DashboardRow {
+            session: SessionInfo {
+                id: "s".into(),
+                title: Some("waiting".into()),
+                ..Default::default()
+            },
+            status: DashboardStatus::AwaitingPermission(crate::sse::PermissionAsked {
+                id: "perm_s".into(),
+                session_id: "s".into(),
+                permission: "edit".into(),
+                patterns: vec!["*.rs".into()],
+            }),
+        }];
+        app.dashboard.peek = DashboardPeek::Permission;
+        let text = render(&app);
+        assert!(text.contains("edit"));
+        assert!(text.contains('y') && text.contains('n'));
+    }
+
+    #[test]
+    fn dashboard_overlay_empty_shows_placeholder() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        let text = render(&app);
+        assert!(text.contains("no other sessions"));
     }
 }
