@@ -4,6 +4,19 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.10.0] - 2026-07-17
+
+### Added
+
+- **The `question` tool is now interactive.** Previously it unconditionally
+  errored `"question tool requires an interactive client"`; now the model
+  can ask you a multiple-choice question mid-turn and get a real answer
+  back. Works in `otto run` (TTY prompt), `otto tui` (a new question
+  overlay — arrow keys to highlight, space to multi-select, enter to
+  confirm/advance through a batch), and `otto serve`
+  (`GET /question`, `POST /question/{id}/reply`, `question.asked` SSE
+  event).
+
 ## [0.9.0] - 2026-07-17
 
 ### Added
