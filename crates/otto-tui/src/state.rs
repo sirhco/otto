@@ -392,8 +392,11 @@ fn derive_dashboard_status(
 /// `parent_id` and ordered oldest-`time_updated`-first within a group (task
 /// order roughly matches creation recency). A `workflow_task` whose parent
 /// isn't a primary row in this list (e.g. the parent itself got excluded)
-/// is dropped rather than surfaced as an orphan. Ad-hoc `subagent`/kindless
-/// sessions with a `parent_id` are excluded from both passes, unchanged.
+/// is dropped rather than surfaced as an orphan, and (like the primary-row
+/// pass) a `workflow_task` matching `attached` is excluded too -- the
+/// dashboard never shows the currently-attached session, indented or not.
+/// Ad-hoc `subagent`/kindless sessions with a `parent_id` are excluded from
+/// both passes, unchanged.
 ///
 /// Does not apply pin ordering or the title filter — see
 /// `apply_pin_and_filter`, which the caller runs over this function's
@@ -430,6 +433,7 @@ pub(crate) fn build_dashboard_rows(
         std::collections::HashMap::new();
     for s in sessions {
         if s.kind.as_deref() == Some("workflow_task")
+            && Some(s.id.as_str()) != attached
             && let Some(parent) = s.parent_id.as_deref()
         {
             children_by_parent.entry(parent).or_default().push(s);
@@ -5544,6 +5548,26 @@ mod tests {
         let rows = build_dashboard_rows(&sessions, &[], &[], None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session.id, "root");
+    }
+
+    #[test]
+    fn build_dashboard_rows_excludes_attached_workflow_task_child() {
+        // The user attached directly into "task_attached" (a workflow_task
+        // child, reachable via Enter on an indented row) and reopened the
+        // dashboard. It must not reappear as an indented child under its
+        // workflow_root parent -- the dashboard never shows the attached
+        // session, primary or indented.
+        let sessions = vec![
+            dash_session_kind("root", 10, None, "workflow_root"),
+            dash_session_kind("task_attached", 20, Some("root"), "workflow_task"),
+            dash_session_kind("task_other", 5, Some("root"), "workflow_task"),
+        ];
+        let rows = build_dashboard_rows(&sessions, &[], &[], Some("task_attached"));
+        let order: Vec<(&str, bool)> = rows
+            .iter()
+            .map(|r| (r.session.id.as_str(), r.indent))
+            .collect();
+        assert_eq!(order, vec![("root", false), ("task_other", true)]);
     }
 
     #[test]
