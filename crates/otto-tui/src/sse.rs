@@ -33,6 +33,21 @@ pub enum ServerEvent {
     },
     Workflow(WorkflowMsg),
     Subagent(SubagentMsg),
+    /// A `session.busy` envelope: the session started work on a turn.
+    SessionBusy {
+        session_id: String,
+    },
+    /// A `session.idle` envelope: the session finished its turn.
+    SessionIdle {
+        session_id: String,
+    },
+    /// A `session.created` envelope: a new session (possibly a subagent
+    /// child, when `parent_id` is set) was created.
+    SessionCreated {
+        session_id: String,
+        title: Option<String>,
+        parent_id: Option<String>,
+    },
     Other,
 }
 
@@ -189,6 +204,23 @@ struct ModeChangedProps {
     mode: String,
 }
 
+/// Shared shape for `session.busy` and `session.idle`, which both carry
+/// nothing but the session id.
+#[derive(Deserialize)]
+struct SessionIdProps {
+    #[serde(rename = "sessionID")]
+    session_id: String,
+}
+
+#[derive(Deserialize)]
+struct SessionCreatedProps {
+    #[serde(rename = "sessionID")]
+    session_id: String,
+    title: Option<String>,
+    #[serde(rename = "parentID")]
+    parent_id: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct QuestionOptionProps {
     label: String,
@@ -299,6 +331,26 @@ pub fn decode_event(frame: &str) -> ServerEvent {
                 Err(_) => ServerEvent::Other,
             }
         }
+        "session.busy" => match serde_json::from_value::<SessionIdProps>(env.properties) {
+            Ok(p) => ServerEvent::SessionBusy {
+                session_id: p.session_id,
+            },
+            Err(_) => ServerEvent::Other,
+        },
+        "session.idle" => match serde_json::from_value::<SessionIdProps>(env.properties) {
+            Ok(p) => ServerEvent::SessionIdle {
+                session_id: p.session_id,
+            },
+            Err(_) => ServerEvent::Other,
+        },
+        "session.created" => match serde_json::from_value::<SessionCreatedProps>(env.properties) {
+            Ok(p) => ServerEvent::SessionCreated {
+                session_id: p.session_id,
+                title: p.title,
+                parent_id: p.parent_id,
+            },
+            Err(_) => ServerEvent::Other,
+        },
         "question.asked" => match serde_json::from_value::<QuestionAskedProps>(env.properties) {
             Ok(q) => ServerEvent::QuestionAsked(question_asked_from_props(q)),
             Err(_) => ServerEvent::Other,
@@ -448,6 +500,76 @@ mod tests {
                 mode: "full-auto".into(),
             }
         );
+    }
+
+    #[test]
+    fn decode_event_reads_session_busy() {
+        let frame = "{\"type\":\"session.busy\",\"properties\":{\"sessionID\":\"ses_1\"}}";
+        let ev = decode_event(frame);
+        assert_eq!(
+            ev,
+            ServerEvent::SessionBusy {
+                session_id: "ses_1".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn decode_event_session_busy_malformed_is_other() {
+        let frame = "{\"type\":\"session.busy\",\"properties\":{}}";
+        assert_eq!(decode_event(frame), ServerEvent::Other);
+    }
+
+    #[test]
+    fn decode_event_reads_session_idle() {
+        let frame = "{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"ses_1\"}}";
+        let ev = decode_event(frame);
+        assert_eq!(
+            ev,
+            ServerEvent::SessionIdle {
+                session_id: "ses_1".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn decode_event_session_idle_malformed_is_other() {
+        let frame = "{\"type\":\"session.idle\",\"properties\":{}}";
+        assert_eq!(decode_event(frame), ServerEvent::Other);
+    }
+
+    #[test]
+    fn decode_event_reads_session_created() {
+        let frame = "{\"type\":\"session.created\",\"properties\":{\"sessionID\":\"ses_2\",\"title\":\"child task\",\"parentID\":\"ses_1\"}}";
+        let ev = decode_event(frame);
+        assert_eq!(
+            ev,
+            ServerEvent::SessionCreated {
+                session_id: "ses_2".into(),
+                title: Some("child task".into()),
+                parent_id: Some("ses_1".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn decode_event_reads_session_created_with_null_title_and_parent() {
+        let frame = "{\"type\":\"session.created\",\"properties\":{\"sessionID\":\"ses_1\",\"title\":null,\"parentID\":null}}";
+        let ev = decode_event(frame);
+        assert_eq!(
+            ev,
+            ServerEvent::SessionCreated {
+                session_id: "ses_1".into(),
+                title: None,
+                parent_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn decode_event_session_created_malformed_is_other() {
+        let frame = "{\"type\":\"session.created\",\"properties\":{}}";
+        assert_eq!(decode_event(frame), ServerEvent::Other);
     }
 
     #[test]
