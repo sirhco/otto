@@ -358,7 +358,6 @@ pub fn route_message(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<
             let was_loading_files = app.file_fetch_pending();
             let was_sessions = matches!(app.overlay, Overlay::Sessions);
             let was_dashboard = matches!(app.overlay, Overlay::Dashboard);
-            let dashboard_selected_before = app.dashboard.selected;
             let next = app.on_key(k);
             let now_loading_files = app.file_fetch_pending();
             if now_loading_files && !was_loading_files {
@@ -391,28 +390,11 @@ pub fn route_message(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<
                     }
                 });
             }
-            // A row-selection change (arrow keys) needs its own peek fetch
-            // for idle/busy rows — `dashboard_move` already set
-            // `app.dashboard.peek` to `Loading` synchronously (Task 6);
-            // this spawns the async fetch that resolves it.
-            if matches!(app.overlay, Overlay::Dashboard)
-                && app.dashboard.selected != dashboard_selected_before
-                && matches!(app.dashboard.peek, DashboardPeek::Loading)
-                && let Some(row) = app.dashboard.rows.get(app.dashboard.selected)
-            {
-                let sid = row.session.id.clone();
-                let client = client.clone();
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    if let Ok(rows) = client.history(&sid).await {
-                        let text = crate::state::latest_message_text(&rows);
-                        let _ = tx.send(Msg::DashboardPeekLoaded {
-                            session_id: sid,
-                            text,
-                        });
-                    }
-                });
-            }
+            // Any keypress may have moved the dashboard selection (arrow
+            // keys) onto a row whose peek is `Loading` — fire the fetch that
+            // resolves it. `maybe_fetch_dashboard_peek` is itself gated on
+            // `peek == Loading`, so this is a no-op on every other keypress.
+            maybe_fetch_dashboard_peek(app, client, tx);
             if let Some(next) = next {
                 dispatch(app, client, tx, next);
             }
@@ -464,6 +446,10 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
             id: id.clone(),
             reply: reply.clone(),
         });
+        // A reply to the currently-selected dashboard row resets its peek to
+        // `Loading` (see the matching `App::update` arm) — fire the fetch
+        // that resolves it, or the panel is stuck blank until the next poll.
+        maybe_fetch_dashboard_peek(app, client, tx);
         let client = client.clone();
         tokio::spawn(async move {
             let _ = client.reply_permission(&id, &reply, None).await;
@@ -477,6 +463,8 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
             id: id.clone(),
             reply: reply.clone(),
         });
+        // See the matching comment in the `PermissionReply` arm above.
+        maybe_fetch_dashboard_peek(app, client, tx);
         let client = client.clone();
         tokio::spawn(async move {
             let _ = client.reply_question(&id, &reply).await;
@@ -607,6 +595,42 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         });
     }
     app.update(msg);
+    // Covers `Msg::DashboardLoaded` (dashboard just opened, or a recurring
+    // poll landed) — either can set `app.dashboard.peek` to `Loading` for
+    // the selected row (a fresh idle/busy row, or one whose status just
+    // changed), and nothing else would spawn the fetch that resolves it.
+    maybe_fetch_dashboard_peek(app, client, tx);
+}
+
+/// If the dashboard is open, its peek is `Loading`, and the selected row is
+/// idle/busy (not an ask — those resolve synchronously via `derive_peek`),
+/// spawn the `GET /session/{id}/message` fetch that resolves it. Safe to
+/// call redundantly — a no-op once the peek is no longer `Loading` (already
+/// resolved to `Message`/`Permission`/`Question`/`NeedsFullSession`), so
+/// every call site that might have just set `Loading` calls it unconditionally
+/// rather than re-deriving the narrower "did this specific condition trigger
+/// it" logic itself.
+fn maybe_fetch_dashboard_peek(app: &App, client: &Client, tx: &mpsc::UnboundedSender<Msg>) {
+    if !matches!(app.overlay, Overlay::Dashboard)
+        || !matches!(app.dashboard.peek, DashboardPeek::Loading)
+    {
+        return;
+    }
+    let Some(row) = app.dashboard.rows.get(app.dashboard.selected) else {
+        return;
+    };
+    let sid = row.session.id.clone();
+    let client = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        if let Ok(rows) = client.history(&sid).await {
+            let text = crate::state::latest_message_text(&rows);
+            let _ = tx.send(Msg::DashboardPeekLoaded {
+                session_id: sid,
+                text,
+            });
+        }
+    });
 }
 
 /// How often (in ticks of the existing 125ms tick) the dashboard polls

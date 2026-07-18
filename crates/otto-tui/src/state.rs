@@ -1655,17 +1655,30 @@ impl App {
             // the matching dashboard row Idle (if the dashboard is tracking
             // it) — the next poll confirms it either way.
             Msg::PermissionReply { id, .. } => {
-                if let Some(row) = self.dashboard.rows.iter_mut().find(
+                if let Some(idx) = self.dashboard.rows.iter().position(
                     |r| matches!(&r.status, DashboardStatus::AwaitingPermission(p) if p.id == id),
                 ) {
-                    row.status = DashboardStatus::Idle;
+                    self.dashboard.rows[idx].status = DashboardStatus::Idle;
+                    // The peek panel was showing `DashboardPeek::Permission` for
+                    // this row (if it's the selected one) — that variant is now
+                    // stale (the row is `Idle`), so re-derive it. `derive_peek`
+                    // maps `Idle` to `Loading`, which sets up the async fetch
+                    // (`maybe_fetch_dashboard_peek` in lib.rs) to resolve the
+                    // real latest-message text.
+                    if idx == self.dashboard.selected {
+                        self.dashboard.peek = self.dashboard.derive_peek();
+                    }
                 }
             }
             Msg::QuestionReply { id, .. } => {
-                if let Some(row) = self.dashboard.rows.iter_mut().find(
+                if let Some(idx) = self.dashboard.rows.iter().position(
                     |r| matches!(&r.status, DashboardStatus::AwaitingQuestion(q) if q.id == id),
                 ) {
-                    row.status = DashboardStatus::Idle;
+                    self.dashboard.rows[idx].status = DashboardStatus::Idle;
+                    // See the matching comment in `PermissionReply` above.
+                    if idx == self.dashboard.selected {
+                        self.dashboard.peek = self.dashboard.derive_peek();
+                    }
                 }
             }
             // The loop performs the session switch (reload history); no state update here.
@@ -5206,6 +5219,49 @@ mod tests {
     }
 
     #[test]
+    fn derive_peek_idle_or_busy_row_is_loading() {
+        let idle = DashboardState {
+            rows: vec![DashboardRow {
+                session: dash_session("s", 0, false, None),
+                status: DashboardStatus::Idle,
+            }],
+            selected: 0,
+            peek: DashboardPeek::Loading,
+        };
+        assert_eq!(idle.derive_peek(), DashboardPeek::Loading);
+
+        let busy = DashboardState {
+            rows: vec![DashboardRow {
+                session: dash_session("s", 0, true, None),
+                status: DashboardStatus::Busy,
+            }],
+            selected: 0,
+            peek: DashboardPeek::Loading,
+        };
+        assert_eq!(busy.derive_peek(), DashboardPeek::Loading);
+    }
+
+    #[test]
+    fn dashboard_loaded_on_first_open_leaves_idle_row_peek_loading() {
+        // Mirrors the dashboard opening for the first time (or a poll
+        // finding a session for the first time): `App::new()` starts with
+        // an empty `dashboard.rows`, so `prev` is `None` and the freshly
+        // built row 0 is treated as a status change, re-deriving the peek.
+        // An `Idle` row must land on `Loading` — the state
+        // `maybe_fetch_dashboard_peek` (lib.rs) watches to fire the async
+        // `GET /session/{id}/message` fetch that resolves it.
+        let mut app = App::new();
+        app.update(Msg::DashboardLoaded {
+            sessions: vec![dash_session("s", 0, false, None)],
+            permissions: vec![],
+            questions: vec![],
+        });
+        assert_eq!(app.dashboard.selected, 0);
+        assert_eq!(app.dashboard.rows[0].status, DashboardStatus::Idle);
+        assert_eq!(app.dashboard.peek, DashboardPeek::Loading);
+    }
+
+    #[test]
     fn dashboard_peek_loaded_ignored_if_selection_moved() {
         let mut app = App::new();
         app.dashboard.rows = vec![
@@ -5258,6 +5314,124 @@ mod tests {
             app.dashboard.rows[0].status,
             DashboardStatus::Idle
         ));
+    }
+
+    #[test]
+    fn permission_reply_for_selected_row_resets_peek_to_loading() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s", 0, false, None),
+            status: DashboardStatus::AwaitingPermission(dash_perm("s")),
+        }];
+        app.dashboard.selected = 0;
+        app.dashboard.peek = DashboardPeek::Permission;
+        app.update(Msg::PermissionReply {
+            id: "perm_s".into(),
+            reply: "once".into(),
+        });
+        assert!(matches!(
+            app.dashboard.rows[0].status,
+            DashboardStatus::Idle
+        ));
+        assert_eq!(
+            app.dashboard.peek,
+            DashboardPeek::Loading,
+            "replied-to selected row's stale Permission peek must be re-derived, \
+             not left stale — Loading is what triggers the fetch"
+        );
+    }
+
+    #[test]
+    fn permission_reply_for_unselected_row_leaves_peek_untouched() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session("a", 0, false, None),
+                status: DashboardStatus::AwaitingPermission(dash_perm("a")),
+            },
+            DashboardRow {
+                session: dash_session("b", 0, false, None),
+                status: DashboardStatus::AwaitingPermission(dash_perm("b")),
+            },
+        ];
+        // Selected row is "b"; the reply is for "a".
+        app.dashboard.selected = 1;
+        app.dashboard.peek = DashboardPeek::Permission;
+        app.update(Msg::PermissionReply {
+            id: "perm_a".into(),
+            reply: "once".into(),
+        });
+        assert!(matches!(
+            app.dashboard.rows[0].status,
+            DashboardStatus::Idle
+        ));
+        assert!(matches!(
+            app.dashboard.rows[1].status,
+            DashboardStatus::AwaitingPermission(_)
+        ));
+        assert_eq!(
+            app.dashboard.peek,
+            DashboardPeek::Permission,
+            "reply to a non-selected row must not touch the selected row's peek"
+        );
+    }
+
+    #[test]
+    fn question_reply_for_selected_row_resets_peek_to_loading() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s", 0, false, None),
+            status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+        }];
+        app.dashboard.selected = 0;
+        app.dashboard.peek = DashboardPeek::Question { highlight: 0 };
+        app.update(Msg::QuestionReply {
+            id: "que_s".into(),
+            reply: QuestionReplyKind::Answered(vec![vec![0]]),
+        });
+        assert!(matches!(
+            app.dashboard.rows[0].status,
+            DashboardStatus::Idle
+        ));
+        assert_eq!(
+            app.dashboard.peek,
+            DashboardPeek::Loading,
+            "replied-to selected row's stale Question peek must be re-derived"
+        );
+    }
+
+    #[test]
+    fn question_reply_for_unselected_row_leaves_peek_untouched() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session("a", 0, false, None),
+                status: DashboardStatus::AwaitingQuestion(dash_single_question("a")),
+            },
+            DashboardRow {
+                session: dash_session("b", 0, false, None),
+                status: DashboardStatus::AwaitingQuestion(dash_single_question("b")),
+            },
+        ];
+        app.dashboard.selected = 1;
+        app.dashboard.peek = DashboardPeek::Question { highlight: 0 };
+        app.update(Msg::QuestionReply {
+            id: "que_a".into(),
+            reply: QuestionReplyKind::Answered(vec![vec![0]]),
+        });
+        assert!(matches!(
+            app.dashboard.rows[0].status,
+            DashboardStatus::Idle
+        ));
+        assert!(matches!(
+            app.dashboard.rows[1].status,
+            DashboardStatus::AwaitingQuestion(_)
+        ));
+        assert_eq!(
+            app.dashboard.peek,
+            DashboardPeek::Question { highlight: 0 },
+            "reply to a non-selected row must not touch the selected row's peek"
+        );
     }
 
     #[test]
