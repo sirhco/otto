@@ -4,6 +4,26 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.11.0] - 2026-07-18
+
+### Added
+
+- **`otto tui` gains a multi-agent dashboard.** Open it from the command
+  palette (`ctrl+k` → "Dashboard…") to see your other sessions at a
+  glance — busy, idle, or awaiting a permission/question ask — without
+  leaving the session you're attached to. Select a row to peek its
+  latest message or a pending ask's options, and answer permission
+  (`y`/`a`/`n`) or question (`1`-`9`) asks right there; press enter to
+  fully switch into a session.
+
+### Fixed
+
+- **A permission or question ask for a different session no longer
+  hijacks your current screen.** Previously, an ask arriving for a
+  backgrounded session would pop open its prompt over whatever you were
+  looking at; it now only surfaces for the session you're attached to
+  (the dashboard is what shows you asks from other sessions).
+
 ## [0.10.0] - 2026-07-17
 
 ### Added
