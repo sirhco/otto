@@ -86,6 +86,11 @@ pub fn view(app: &App, frame: &mut Frame) {
                 .collect::<Vec<_>>(),
             &app.theme,
         ),
+        // TODO(Task 7): render the dashboard. This no-op arm exists only so
+        // the crate compiles now that `Overlay::Dashboard` exists (Task 5) —
+        // exhaustiveness here forced a one-line touch outside state.rs's
+        // otherwise-exclusive file scope for that task.
+        Overlay::Dashboard => {}
         Overlay::Models => list_overlay(
             frame,
             area,

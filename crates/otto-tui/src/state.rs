@@ -201,6 +201,12 @@ pub enum Overlay {
     Permission(PermissionAsked),
     Question(QuestionSession),
     Sessions,
+    /// The multi-agent dashboard: top-level sessions other than the
+    /// attached one, each with a derived busy/idle/awaiting-ask status, a
+    /// peek panel for the selected row, and inline reply for a pending
+    /// ask. State lives in `App.dashboard` (own selection cursor, not the
+    /// shared `App.selected` the plain pickers use).
+    Dashboard,
     Models,
     Agents,
     Palette(PaletteState),
@@ -222,6 +228,158 @@ pub enum Overlay {
     /// (`ctrl+w`) only while `App.workflow.is_some()`, so the render can
     /// assume `Some`.
     WorkflowStatus,
+}
+
+/// One session row in the multi-agent dashboard (`Overlay::Dashboard`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DashboardRow {
+    pub(crate) session: SessionInfo,
+    pub(crate) status: DashboardStatus,
+}
+
+/// A dashboard row's derived status. Sorted `Awaiting* -> Busy -> Idle`
+/// (needs-your-input first) by [`build_dashboard_rows`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DashboardStatus {
+    /// The full pending permission ask — already carries everything the
+    /// peek panel needs to render inline reply options, so selecting this
+    /// row needs no extra fetch.
+    AwaitingPermission(crate::sse::PermissionAsked),
+    /// The full pending question ask (see [`AwaitingPermission`](Self::AwaitingPermission)
+    /// for the same no-extra-fetch rationale).
+    AwaitingQuestion(crate::sse::QuestionAsked),
+    Busy,
+    Idle,
+}
+
+/// Peek/reply UI state for the currently-selected dashboard row.
+/// `Permission`/`Question` don't duplicate the ask data (already sitting in
+/// the selected row's [`DashboardStatus`]) — this only tracks interaction-
+/// transient state (or `Loading`/`Message` for the async idle/busy-row peek).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) enum DashboardPeek {
+    #[default]
+    Loading,
+    /// The peeked session's latest response text (idle/busy rows).
+    Message(String),
+    /// A pending permission ask — render `Overlay::Permission`-style y/a/n.
+    Permission,
+    /// A pending single-question, single-select ask — render inline reply
+    /// options. `highlight` is reserved for a future arrow-key cursor;
+    /// v1 answers by number key (see Task 6), so it is always `0` today.
+    Question { highlight: usize },
+    /// A multi-select or multi-question ask (out of scope for inline
+    /// reply — see this plan's Global Constraints) — the peek panel shows
+    /// "press Enter to open this session" instead.
+    NeedsFullSession,
+}
+
+/// State for the multi-agent dashboard overlay (`Overlay::Dashboard`):
+/// top-level sessions other than the attached one, each with a derived
+/// status, a selection cursor, and the selected row's peek/reply state.
+/// Deliberately has its own `selected` cursor rather than reusing the
+/// shared `App.selected` the plain Sessions/Models/Agents pickers use —
+/// this overlay's key handling (Task 6) is fully custom, not routed through
+/// `picker_move`/`picker_confirm`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DashboardState {
+    pub(crate) rows: Vec<DashboardRow>,
+    pub(crate) selected: usize,
+    pub(crate) peek: DashboardPeek,
+}
+
+impl DashboardState {
+    /// Compute the peek state for the currently-selected row from its
+    /// derived status. `Busy`/`Idle` rows need an async fetch the caller
+    /// triggers separately (this only returns the synchronous `Loading`
+    /// placeholder for them); ask rows resolve immediately since their
+    /// full prompt already came down with the periodic poll.
+    pub(crate) fn derive_peek(&self) -> DashboardPeek {
+        match self.rows.get(self.selected).map(|r| &r.status) {
+            Some(DashboardStatus::AwaitingPermission(_)) => DashboardPeek::Permission,
+            Some(DashboardStatus::AwaitingQuestion(q))
+                if q.questions.len() == 1 && !q.questions[0].multiple =>
+            {
+                DashboardPeek::Question { highlight: 0 }
+            }
+            Some(DashboardStatus::AwaitingQuestion(_)) => DashboardPeek::NeedsFullSession,
+            Some(DashboardStatus::Busy | DashboardStatus::Idle) | None => DashboardPeek::Loading,
+        }
+    }
+}
+
+/// Build sorted dashboard rows from a poll's three responses. Excludes
+/// subagent/workflow child sessions (`parent_id.is_some()`) and the
+/// currently-attached session (nothing to peek/reply to in your own
+/// transcript). Sorted `AwaitingAsk -> Busy -> Idle`, tie-broken within a
+/// status by `time_updated` descending (most-recently-active first, same
+/// recency bias `most_recent_session` already uses for session reopening).
+pub(crate) fn build_dashboard_rows(
+    sessions: &[SessionInfo],
+    permissions: &[crate::sse::PermissionAsked],
+    questions: &[crate::sse::QuestionAsked],
+    attached: Option<&str>,
+) -> Vec<DashboardRow> {
+    let mut rows: Vec<DashboardRow> = sessions
+        .iter()
+        .filter(|s| s.parent_id.is_none() && Some(s.id.as_str()) != attached)
+        .map(|s| {
+            let status = permissions
+                .iter()
+                .find(|p| p.session_id == s.id)
+                .map(|p| DashboardStatus::AwaitingPermission(p.clone()))
+                .or_else(|| {
+                    questions
+                        .iter()
+                        .find(|q| q.session_id == s.id)
+                        .map(|q| DashboardStatus::AwaitingQuestion(q.clone()))
+                })
+                .unwrap_or(if s.busy {
+                    DashboardStatus::Busy
+                } else {
+                    DashboardStatus::Idle
+                });
+            DashboardRow {
+                session: s.clone(),
+                status,
+            }
+        })
+        .collect();
+    rows.sort_by_key(|r| {
+        let rank = match r.status {
+            DashboardStatus::AwaitingPermission(_) | DashboardStatus::AwaitingQuestion(_) => 0,
+            DashboardStatus::Busy => 1,
+            DashboardStatus::Idle => 2,
+        };
+        (rank, std::cmp::Reverse(r.session.time_updated))
+    });
+    rows
+}
+
+/// Extract a lightweight preview of the last assistant text part across
+/// `rows` (the raw JSON returned by `GET /session/{id}/message`) — used
+/// for the dashboard's peek panel, which shows a short preview rather than
+/// running the full markdown transcript pipeline `load_history` does for
+/// the attached session. Matches the wire shape of `otto_storage::WithParts`
+/// (`{"info": {"role": "user"|"assistant", ...}, "parts": [{"type": "text", "text": ...}, ...]}`).
+// Not yet called anywhere — `lib.rs`'s dashboard peek-fetch (Task 8) is the
+// first caller. Remove this allow once that lands.
+#[allow(dead_code)]
+pub(crate) fn latest_message_text(rows: &[serde_json::Value]) -> String {
+    rows.iter()
+        .rev()
+        .find(|row| row["info"]["role"] == "assistant")
+        .and_then(|row| {
+            row["parts"]
+                .as_array()?
+                .iter()
+                .rev()
+                .find(|p| p["type"] == "text")?
+                .get("text")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "(no response yet)".to_string())
 }
 
 /// State for the free-text input overlay (`Overlay::TextInput`): the prompt
@@ -318,6 +476,18 @@ pub enum Msg {
     Key(KeyEvent),
     Resize,
     SessionsLoaded(Vec<SessionInfo>),
+    /// `GET /session` + `GET /permission` + `GET /question` all resolved —
+    /// the dashboard's periodic poll result.
+    DashboardLoaded {
+        sessions: Vec<SessionInfo>,
+        permissions: Vec<crate::sse::PermissionAsked>,
+        questions: Vec<crate::sse::QuestionAsked>,
+    },
+    /// The peeked session's latest message fetched (idle/busy row peek).
+    DashboardPeekLoaded {
+        session_id: String,
+        text: String,
+    },
     AgentsLoaded(Vec<AgentInfo>),
     ModelsLoaded(Vec<ModelChoice>),
     HistoryLoaded(Vec<serde_json::Value>),
@@ -415,6 +585,8 @@ pub struct App {
     pub transcript: Vec<TranscriptItem>,
     pub overlay: Overlay,
     pub sessions: Vec<SessionInfo>,
+    /// State for `Overlay::Dashboard` (Task 5).
+    pub(crate) dashboard: DashboardState,
     pub session_id: Option<String>,
     pub agents: Vec<AgentInfo>,
     pub models: Vec<ModelChoice>,
@@ -635,6 +807,7 @@ impl App {
             transcript: Vec::new(),
             overlay: Overlay::None,
             sessions: Vec::new(),
+            dashboard: DashboardState::default(),
             session_id: None,
             agents: Vec::new(),
             models: Vec::new(),
@@ -765,6 +938,14 @@ impl App {
         self.overlay = overlay;
     }
 
+    /// Open the dashboard, clearing any stale rows/peek from a previous
+    /// time it was open (the caller — `route_message`, Task 8 — spawns the
+    /// fresh fetch right after this returns).
+    pub fn open_dashboard(&mut self) {
+        self.dashboard = DashboardState::default();
+        self.overlay = Overlay::Dashboard;
+    }
+
     #[must_use]
     pub fn picker_len(&self) -> usize {
         match self.overlay {
@@ -858,6 +1039,10 @@ impl App {
             Command::Quit => Some(Msg::Quit),
             Command::SwitchSession => {
                 self.open_picker(Overlay::Sessions);
+                None
+            }
+            Command::Dashboard => {
+                self.open_dashboard();
                 None
             }
             Command::ChangeModel => {
@@ -1396,6 +1581,55 @@ impl App {
                 self.load_history(rows);
                 self.status = "ready".into();
             }
+            Msg::DashboardLoaded {
+                sessions,
+                permissions,
+                questions,
+            } => {
+                let prev = self
+                    .dashboard
+                    .rows
+                    .get(self.dashboard.selected)
+                    .map(|r| (r.session.id.clone(), std::mem::discriminant(&r.status)));
+                self.dashboard.rows = build_dashboard_rows(
+                    &sessions,
+                    &permissions,
+                    &questions,
+                    self.session_id.as_deref(),
+                );
+                let same_id = prev.as_ref().and_then(|(id, _)| {
+                    self.dashboard.rows.iter().position(|r| &r.session.id == id)
+                });
+                self.dashboard.selected = same_id.unwrap_or_else(|| {
+                    self.dashboard
+                        .selected
+                        .min(self.dashboard.rows.len().saturating_sub(1))
+                });
+                // Only re-derive the peek if the selected row's identity or
+                // status *kind* actually changed — otherwise a still-idle
+                // row's freshly-loaded `Message` peek would flicker back to
+                // `Loading` on every ~2s poll for no reason.
+                let status_changed = same_id.is_none()
+                    || prev.is_some_and(|(_, kind)| {
+                        self.dashboard
+                            .rows
+                            .get(self.dashboard.selected)
+                            .is_some_and(|r| std::mem::discriminant(&r.status) != kind)
+                    });
+                if status_changed {
+                    self.dashboard.peek = self.dashboard.derive_peek();
+                }
+            }
+            Msg::DashboardPeekLoaded { session_id, text } => {
+                if self
+                    .dashboard
+                    .rows
+                    .get(self.dashboard.selected)
+                    .is_some_and(|r| r.session.id == session_id)
+                {
+                    self.dashboard.peek = DashboardPeek::Message(text);
+                }
+            }
             Msg::Submitted(text) => {
                 self.transcript.push(TranscriptItem::User(text));
                 self.open_text = None;
@@ -1420,10 +1654,23 @@ impl App {
             Msg::Quit => self.should_quit = true,
             // Key/Resize are handled in input.rs (Task 6); ignore here.
             Msg::Key(_) | Msg::Resize => {}
-            // The loop performs the HTTP call; no state update needed here.
-            Msg::PermissionReply { .. } => {}
-            // The loop performs the HTTP call; no state update needed here.
-            Msg::QuestionReply { .. } => {}
+            // The loop performs the HTTP call; here we optimistically mark
+            // the matching dashboard row Idle (if the dashboard is tracking
+            // it) — the next poll confirms it either way.
+            Msg::PermissionReply { id, .. } => {
+                if let Some(row) = self.dashboard.rows.iter_mut().find(
+                    |r| matches!(&r.status, DashboardStatus::AwaitingPermission(p) if p.id == id),
+                ) {
+                    row.status = DashboardStatus::Idle;
+                }
+            }
+            Msg::QuestionReply { id, .. } => {
+                if let Some(row) = self.dashboard.rows.iter_mut().find(
+                    |r| matches!(&r.status, DashboardStatus::AwaitingQuestion(q) if q.id == id),
+                ) {
+                    row.status = DashboardStatus::Idle;
+                }
+            }
             // The loop performs the session switch (reload history); no state update here.
             Msg::SwitchSession(_) => {}
             // The loop creates the session then routes a SwitchSession.
@@ -2064,6 +2311,7 @@ impl Default for App {
 pub(crate) enum Command {
     NewSession,
     SwitchSession,
+    Dashboard,
     ChangeModel,
     ChangeAgent,
     ToggleTool,
@@ -2082,6 +2330,7 @@ pub(crate) enum Command {
 pub(crate) const COMMANDS: &[(&str, &str, Command)] = &[
     ("New session", "ctrl+n", Command::NewSession),
     ("Switch session…", "", Command::SwitchSession),
+    ("Dashboard…", "", Command::Dashboard),
     ("Change model…", "", Command::ChangeModel),
     ("Change agent…", "ctrl+g", Command::ChangeAgent),
     ("Toggle tool detail", "ctrl+t", Command::ToggleTool),
@@ -4278,10 +4527,10 @@ mod tests {
 
     #[test]
     fn every_command_has_a_key_hint() {
-        // Switch session / Change model are intentionally palette-only (no
-        // real key binding); everything else must have one.
+        // Switch session / Dashboard / Change model are intentionally
+        // palette-only (no real key binding); everything else must have one.
         for (label, key, _cmd) in COMMANDS {
-            let palette_only = matches!(*label, "Switch session…" | "Change model…");
+            let palette_only = matches!(*label, "Switch session…" | "Dashboard…" | "Change model…");
             assert_eq!(
                 key.is_empty(),
                 palette_only,
@@ -4798,5 +5047,243 @@ mod tests {
         let done = qs.confirm_current();
         assert!(done, "last question confirmed");
         assert_eq!(qs.answers, vec![vec![0], vec![0, 1]]);
+    }
+
+    fn dash_perm(session_id: &str) -> crate::sse::PermissionAsked {
+        crate::sse::PermissionAsked {
+            id: format!("perm_{session_id}"),
+            session_id: session_id.into(),
+            permission: "edit".into(),
+            patterns: vec!["*.rs".into()],
+        }
+    }
+
+    fn dash_single_question(session_id: &str) -> crate::sse::QuestionAsked {
+        crate::sse::QuestionAsked {
+            id: format!("que_{session_id}"),
+            session_id: session_id.into(),
+            questions: vec![crate::sse::QuestionPromptView {
+                question: "Pick one".into(),
+                header: "choice".into(),
+                options: vec![
+                    crate::sse::QuestionOptionView {
+                        label: "A".into(),
+                        description: "a".into(),
+                    },
+                    crate::sse::QuestionOptionView {
+                        label: "B".into(),
+                        description: "b".into(),
+                    },
+                ],
+                multiple: false,
+            }],
+        }
+    }
+
+    fn dash_session(id: &str, updated: i64, busy: bool, parent: Option<&str>) -> SessionInfo {
+        SessionInfo {
+            id: id.into(),
+            title: None,
+            time_updated: updated,
+            time_created: updated,
+            busy,
+            parent_id: parent.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn build_dashboard_rows_excludes_attached_and_subagent_sessions() {
+        let sessions = vec![
+            dash_session("ses_attached", 10, false, None),
+            dash_session("ses_child", 20, false, Some("ses_attached")),
+            dash_session("ses_other", 30, false, None),
+        ];
+        let rows = build_dashboard_rows(&sessions, &[], &[], Some("ses_attached"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session.id, "ses_other");
+    }
+
+    #[test]
+    fn build_dashboard_rows_sorts_awaiting_before_busy_before_idle() {
+        let sessions = vec![
+            dash_session("ses_idle", 10, false, None),
+            dash_session("ses_busy", 20, true, None),
+            dash_session("ses_ask", 5, false, None),
+        ];
+        let rows = build_dashboard_rows(&sessions, &[dash_perm("ses_ask")], &[], None);
+        let order: Vec<&str> = rows.iter().map(|r| r.session.id.as_str()).collect();
+        assert_eq!(order, vec!["ses_ask", "ses_busy", "ses_idle"]);
+    }
+
+    #[test]
+    fn build_dashboard_rows_ties_break_by_recency() {
+        let sessions = vec![
+            dash_session("ses_a", 10, true, None),
+            dash_session("ses_b", 20, true, None),
+        ];
+        let rows = build_dashboard_rows(&sessions, &[], &[], None);
+        assert_eq!(rows[0].session.id, "ses_b");
+    }
+
+    #[test]
+    fn derive_peek_permission_row() {
+        let dash = DashboardState {
+            rows: vec![DashboardRow {
+                session: dash_session("s", 0, false, None),
+                status: DashboardStatus::AwaitingPermission(dash_perm("s")),
+            }],
+            selected: 0,
+            peek: DashboardPeek::Loading,
+        };
+        assert_eq!(dash.derive_peek(), DashboardPeek::Permission);
+    }
+
+    #[test]
+    fn derive_peek_single_select_question_row() {
+        let dash = DashboardState {
+            rows: vec![DashboardRow {
+                session: dash_session("s", 0, false, None),
+                status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+            }],
+            selected: 0,
+            peek: DashboardPeek::Loading,
+        };
+        assert_eq!(dash.derive_peek(), DashboardPeek::Question { highlight: 0 });
+    }
+
+    #[test]
+    fn derive_peek_multi_select_question_needs_full_session() {
+        let mut q = dash_single_question("s");
+        q.questions[0].multiple = true;
+        let dash = DashboardState {
+            rows: vec![DashboardRow {
+                session: dash_session("s", 0, false, None),
+                status: DashboardStatus::AwaitingQuestion(q),
+            }],
+            selected: 0,
+            peek: DashboardPeek::Loading,
+        };
+        assert_eq!(dash.derive_peek(), DashboardPeek::NeedsFullSession);
+    }
+
+    #[test]
+    fn dashboard_loaded_preserves_message_peek_when_status_kind_unchanged() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s", 0, false, None),
+            status: DashboardStatus::Idle,
+        }];
+        app.dashboard.selected = 0;
+        app.dashboard.peek = DashboardPeek::Message("hi".into());
+        app.update(Msg::DashboardLoaded {
+            sessions: vec![dash_session("s", 5, false, None)],
+            permissions: vec![],
+            questions: vec![],
+        });
+        assert_eq!(
+            app.dashboard.peek,
+            DashboardPeek::Message("hi".into()),
+            "still idle -> peek untouched"
+        );
+    }
+
+    #[test]
+    fn dashboard_loaded_resets_peek_when_status_kind_changes() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s", 0, false, None),
+            status: DashboardStatus::Idle,
+        }];
+        app.dashboard.selected = 0;
+        app.dashboard.peek = DashboardPeek::Message("hi".into());
+        app.update(Msg::DashboardLoaded {
+            sessions: vec![dash_session("s", 5, false, None)],
+            permissions: vec![dash_perm("s")],
+            questions: vec![],
+        });
+        assert_eq!(
+            app.dashboard.peek,
+            DashboardPeek::Permission,
+            "status flipped -> peek re-derived"
+        );
+    }
+
+    #[test]
+    fn dashboard_peek_loaded_ignored_if_selection_moved() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session("a", 0, false, None),
+                status: DashboardStatus::Idle,
+            },
+            DashboardRow {
+                session: dash_session("b", 0, false, None),
+                status: DashboardStatus::Idle,
+            },
+        ];
+        app.dashboard.selected = 1;
+        app.update(Msg::DashboardPeekLoaded {
+            session_id: "a".into(),
+            text: "stale".into(),
+        });
+        assert_ne!(app.dashboard.peek, DashboardPeek::Message("stale".into()));
+    }
+
+    #[test]
+    fn permission_reply_marks_matching_dashboard_row_idle() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s", 0, false, None),
+            status: DashboardStatus::AwaitingPermission(dash_perm("s")),
+        }];
+        app.update(Msg::PermissionReply {
+            id: "perm_s".into(),
+            reply: "once".into(),
+        });
+        assert!(matches!(
+            app.dashboard.rows[0].status,
+            DashboardStatus::Idle
+        ));
+    }
+
+    #[test]
+    fn question_reply_marks_matching_dashboard_row_idle() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s", 0, false, None),
+            status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+        }];
+        app.update(Msg::QuestionReply {
+            id: "que_s".into(),
+            reply: QuestionReplyKind::Answered(vec![vec![0]]),
+        });
+        assert!(matches!(
+            app.dashboard.rows[0].status,
+            DashboardStatus::Idle
+        ));
+    }
+
+    #[test]
+    fn open_dashboard_resets_state_and_opens_overlay() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("stale", 0, false, None),
+            status: DashboardStatus::Idle,
+        }];
+        app.open_dashboard();
+        assert!(matches!(app.overlay, Overlay::Dashboard));
+        assert!(app.dashboard.rows.is_empty(), "stale rows cleared on open");
+    }
+
+    #[test]
+    fn palette_dashboard_command_opens_dashboard() {
+        let mut app = App::new();
+        app.open_palette();
+        if let Overlay::Palette(ps) = &mut app.overlay {
+            ps.query = "Dashboard".into();
+        }
+        let msg = app.palette_confirm();
+        assert!(msg.is_none());
+        assert!(matches!(app.overlay, Overlay::Dashboard));
     }
 }
