@@ -46,6 +46,12 @@ pub struct SessionInfo {
     /// dashboard (`Overlay::Dashboard`) filters to top-level sessions only.
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Session provenance tag (server's computed `kind` field, read from
+    /// `Session.metadata.kind`): `"subagent"` | `"workflow_task"` |
+    /// `"workflow_root"`, or `None` for a plain top-level session or an old
+    /// server. Otto extension, no opencode analog — feeds the dashboard.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// The session to reopen on startup: the most-recently-updated one (ties broken
@@ -616,6 +622,7 @@ mod tests {
             time_created: created,
             busy: false,
             parent_id: None,
+            kind: None,
         }
     }
 

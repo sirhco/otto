@@ -422,9 +422,20 @@ async fn session_list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let out: Vec<Value> = sessions
         .into_iter()
         .map(|session| {
-            let busy = state.runs.contains(session.id.as_str());
+            // A workflow-root session's run lives in `state.workflows`, not
+            // `state.runs` (only prompt turns register there) — otherwise a
+            // running workflow root always reports idle. Otto extension, no
+            // opencode analog.
+            let busy = state.runs.contains(session.id.as_str())
+                || state.workflows.contains(session.id.as_str());
+            let kind = session
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("kind"))
+                .cloned();
             let mut v = json!(session);
             v["busy"] = json!(busy);
+            v["kind"] = kind.unwrap_or(Value::Null);
             v
         })
         .collect();
@@ -1535,5 +1546,86 @@ mod tests {
             "newer turn must still be cancellable after a stale remove"
         );
         assert!(second.is_cancelled());
+    }
+
+    /// `GET /session` must stamp each session's `kind` from
+    /// `metadata.kind` (string, or `null` for a plain/no-metadata session —
+    /// same always-present convention as `busy`), and `busy` must be `true`
+    /// for a session registered only in `state.workflows` (a running
+    /// workflow root, which never touches `state.runs`).
+    #[tokio::test]
+    async fn session_list_stamps_kind_and_workflow_busy() {
+        use otto_storage::{Session, SessionCacheTokens, SessionTokens};
+
+        let runtime = Arc::new(
+            Runtime::in_memory(otto_config::Config::default())
+                .await
+                .unwrap(),
+        );
+
+        async fn insert(runtime: &Runtime, id: &str, metadata: Option<Value>) {
+            let session = Session {
+                id: id.into(),
+                project_id: "prj_1".into(),
+                parent_id: None,
+                directory: "/work".into(),
+                title: "Test".into(),
+                version: "0.0.0".into(),
+                cost: 0.0,
+                tokens: SessionTokens {
+                    input: 0,
+                    output: 0,
+                    reasoning: 0,
+                    cache: SessionCacheTokens { read: 0, write: 0 },
+                },
+                metadata,
+                time_created: 0,
+                time_updated: 0,
+            };
+            runtime.store().create_session(&session).await.unwrap();
+        }
+
+        insert(&runtime, "ses_sub", Some(json!({"kind": "subagent"}))).await;
+        insert(&runtime, "ses_task", Some(json!({"kind": "workflow_task"}))).await;
+        insert(&runtime, "ses_plain", None).await;
+        insert(
+            &runtime,
+            "ses_wfroot",
+            Some(json!({"kind": "workflow_root"})),
+        )
+        .await;
+
+        let (events, _) = broadcast::channel::<String>(16);
+        let state = AppState {
+            runtime: runtime.clone(),
+            password: None,
+            events,
+            workflows: TokenRegistry::default(),
+            runs: TokenRegistry::default(),
+        };
+        // Register the workflow-root session only in `workflows`, never in
+        // `runs` — mirrors what `workflow_run` actually does.
+        state
+            .workflows
+            .insert("ses_wfroot", CancellationToken::new());
+
+        let Json(list) = session_list(State(state))
+            .await
+            .unwrap_or_else(|_| panic!("session_list failed"));
+        let by_id = |id: &str| -> Value {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == id)
+                .unwrap_or_else(|| panic!("missing session {id}"))
+                .clone()
+        };
+
+        assert_eq!(by_id("ses_sub")["kind"], "subagent");
+        assert_eq!(by_id("ses_task")["kind"], "workflow_task");
+        assert!(by_id("ses_plain")["kind"].is_null());
+
+        assert_eq!(by_id("ses_wfroot")["busy"], true, "workflow-only busy");
+        assert_eq!(by_id("ses_sub")["busy"], false, "no run/workflow token");
     }
 }

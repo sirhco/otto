@@ -5098,6 +5098,7 @@ mod tests {
             time_created: updated,
             busy,
             parent_id: parent.map(str::to_string),
+            kind: None,
         }
     }
 
