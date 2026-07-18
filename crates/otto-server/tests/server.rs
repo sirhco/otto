@@ -1017,6 +1017,55 @@ async fn file_list_route_returns_workspace_files() {
     assert_eq!(body["truncated"], false, "truncated: {body}");
 }
 
+// -- workflow ------------------------------------------------------------
+
+/// `POST /workflow/{kind}` must stamp the workflow's root session with
+/// `metadata.kind == "workflow_root"` and `metadata.workflowKind == <kind>`
+/// (otto extension, no opencode analog — feeds the multi-agent dashboard)
+/// synchronously, before the workflow itself runs. The `arg` here points at a
+/// nonexistent plan file, so the engine fails once it runs on its detached
+/// background task; that's fine — the assertion only needs the session to
+/// exist with the stamped metadata, not the workflow to complete.
+#[tokio::test]
+async fn workflow_run_stamps_root_session_metadata() {
+    // `workflow_run` discovers a git root (for its worktree context) before
+    // returning, so the runtime's directory must sit inside a real repo —
+    // unlike `plain_runtime()`, which points at a bare temp dir. Point it at
+    // this crate's own directory, which lives inside the otto repo/worktree.
+    let (factory, _) = ScriptedRouteFactory::new(vec![]);
+    let runtime = Arc::new(
+        Runtime::in_memory(Config::default())
+            .await
+            .unwrap()
+            .with_route_factory(factory)
+            .with_directory(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+    );
+    let base = spawn(runtime, no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let resp = http
+        .post(format!("{base}/workflow/plan"))
+        .json(&json!({ "arg": "/nonexistent/plan.md" }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let created: Value = resp.json().await.unwrap();
+    assert!(status.is_success(), "status {status}: {created}");
+    let id = created["session"].as_str().unwrap().to_string();
+
+    let got: Value = http
+        .get(format!("{base}/session/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["metadata"]["kind"], "workflow_root", "session: {got}");
+    assert_eq!(got["metadata"]["workflowKind"], "plan", "session: {got}");
+}
+
 // -- run-failure surfacing ---------------------------------------------------
 
 /// A route that fails mid-stream — models a bad model id / auth / transport
