@@ -47,7 +47,7 @@ impl State {
     /// least one observable chunk). Used by reducers whose `on_halt` must
     /// distinguish "stream produced nothing at all" (emit nothing) from "the
     /// stream opened a step but ended before a terminal event" (still emit a
-    /// closing finish); see `bedrock_converse::BedrockConverse::on_halt`.
+    /// closing finish).
     #[must_use]
     pub fn is_started(&self) -> bool {
         self.step_started
@@ -171,9 +171,9 @@ impl State {
     /// Like [`State::finish`], but attaches `metadata` to both the
     /// `step-finish` and `finish` events. Port of `Lifecycle.finish`'s
     /// `providerMetadata` input field (`lifecycle.ts:80-100`) — otto's base
-    /// [`State::finish`] hard-codes `None` for callers (bedrock/anthropic/
-    /// openai-chat) that never carry per-finish metadata; OpenAI Responses
-    /// does (`responseId`/`serviceTier`).
+    /// [`State::finish`] hard-codes `None` for callers (anthropic/openai-chat)
+    /// that never carry per-finish metadata; OpenAI Responses does
+    /// (`responseId`/`serviceTier`).
     pub fn finish_with_metadata(
         &mut self,
         reason: FinishReason,

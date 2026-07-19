@@ -42,7 +42,7 @@ pub use message::{ContentPart, Message, Role, SystemPart, ToolChoice, ToolDefini
 pub use model::{Model, ModelCapabilities, ModelCost, ModelId, ModelLimits, ProviderId};
 pub use protocol::Protocol;
 pub use providers::{
-    Anthropic, Azure, Bedrock, Copilot, Google, OpenAI, OpenAICompatible, Provider, Vertex,
+    Anthropic, Azure, Copilot, Google, OpenAI, OpenAICompatible, Provider, Vertex,
 };
 pub use registry::{lookup, model_or_default, parse_model};
 pub use request::{
@@ -51,12 +51,9 @@ pub use request::{
 };
 pub use response::LLMResponse;
 pub use route::{Endpoint, GenericRoute, Route, run_stream};
-pub use transport::bedrock::BedrockTransport;
 pub use transport::{HttpTransport, PreparedHttp, Transport, sse};
 
 /// The shared lifecycle state machine ([`protocols::utils::lifecycle`]).
 pub use protocols::utils::lifecycle;
-/// AWS SigV4 credentials, used by [`Bedrock`] ([`protocols::utils::sigv4`]).
-pub use protocols::utils::sigv4::AwsCredentials;
 /// The shared tool-stream accumulator ([`protocols::utils::tool_stream`]).
 pub use protocols::utils::tool_stream;

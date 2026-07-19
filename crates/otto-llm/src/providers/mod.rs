@@ -18,7 +18,6 @@
 
 mod anthropic;
 mod azure;
-mod bedrock;
 mod copilot;
 mod google;
 mod openai;
@@ -33,7 +32,6 @@ use crate::route::Route;
 
 pub use anthropic::Anthropic;
 pub use azure::Azure;
-pub use bedrock::Bedrock;
 pub use copilot::Copilot;
 pub use google::Google;
 pub use openai::OpenAI;

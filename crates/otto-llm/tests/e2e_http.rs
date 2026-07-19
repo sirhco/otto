@@ -9,10 +9,9 @@
 
 use std::sync::Arc;
 
-use otto_llm::providers::{Anthropic, Bedrock, Google, OpenAI, Provider};
+use otto_llm::providers::{Anthropic, Google, OpenAI, Provider};
 use otto_llm::transport::HttpTransport;
-use otto_llm::transport::bedrock::BedrockTransport;
-use otto_llm::{AwsCredentials, ContentPart, FinishReason, LLMRequest, Message};
+use otto_llm::{ContentPart, FinishReason, LLMRequest, Message};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -140,110 +139,6 @@ async fn google_end_to_end_over_http() {
     let usage = resp.usage.expect("usage reported");
     assert_eq!(usage.input_tokens, Some(1));
     assert_eq!(usage.output_tokens, Some(1));
-}
-
-/// Build a single AWS binary event-stream frame carrying a `:event-type`
-/// string header and a payload. Local copy of
-/// `otto_llm::transport::aws_event_stream`'s `#[cfg(test)] pub(crate)`
-/// `make_frame` helper — not visible from an external integration test crate,
-/// so the framing logic is duplicated here rather than exposed publicly just
-/// for tests.
-fn make_frame(event_type: &str, payload: &str) -> Vec<u8> {
-    let name = ":event-type";
-    let mut headers = Vec::new();
-    headers.push(name.len() as u8);
-    headers.extend_from_slice(name.as_bytes());
-    headers.push(7u8); // string type
-    headers.extend_from_slice(&(event_type.len() as u16).to_be_bytes());
-    headers.extend_from_slice(event_type.as_bytes());
-    let payload_bytes = payload.as_bytes();
-    let total = 4 + 4 + 4 + headers.len() + payload_bytes.len() + 4;
-    let mut f = Vec::new();
-    f.extend_from_slice(&(total as u32).to_be_bytes());
-    f.extend_from_slice(&(headers.len() as u32).to_be_bytes());
-    f.extend_from_slice(&0u32.to_be_bytes()); // prelude crc (unvalidated)
-    f.extend_from_slice(&headers);
-    f.extend_from_slice(payload_bytes);
-    f.extend_from_slice(&0u32.to_be_bytes()); // message crc (unvalidated)
-    f
-}
-
-/// Serve `body` as a binary AWS event-stream for a single POST to `route`.
-async fn eventstream_server(route: &str, body: Vec<u8>) -> MockServer {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path(route))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/vnd.amazon.eventstream")
-                .set_body_raw(body, "application/vnd.amazon.eventstream"),
-        )
-        .mount(&server)
-        .await;
-    server
-}
-
-#[tokio::test]
-async fn bedrock_end_to_end_over_http() {
-    // A minimal-but-realistic Converse event-stream: messageStart, two text
-    // deltas, contentBlockStop, messageStop (end_turn), then a separate
-    // metadata chunk carrying usage (Bedrock splits finish across two
-    // frames; `BedrockConverse::on_halt` combines them once the stream
-    // ends).
-    let mut body = Vec::new();
-    body.extend(make_frame("messageStart", r#"{"role":"assistant"}"#));
-    body.extend(make_frame(
-        "contentBlockDelta",
-        r#"{"contentBlockIndex":0,"delta":{"text":"Hello"}}"#,
-    ));
-    body.extend(make_frame(
-        "contentBlockDelta",
-        r#"{"contentBlockIndex":0,"delta":{"text":" world"}}"#,
-    ));
-    body.extend(make_frame("contentBlockStop", r#"{"contentBlockIndex":0}"#));
-    body.extend(make_frame("messageStop", r#"{"stopReason":"end_turn"}"#));
-    body.extend(make_frame(
-        "metadata",
-        r#"{"usage":{"inputTokens":10,"outputTokens":2}}"#,
-    ));
-
-    let model_id = "anthropic.claude-3-sonnet";
-    let server = eventstream_server(&format!("/model/{model_id}/converse-stream"), body).await;
-
-    let creds = AwsCredentials {
-        access_key_id: "AKIDEXAMPLE".into(),
-        secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
-        session_token: None,
-        region: "us-east-1".into(),
-    };
-    let provider = Bedrock::new(creds.clone())
-        .with_base_url(server.uri())
-        .with_transport(BedrockTransport::with_fixed_clock(creds, 1_700_000_000));
-    let client = provider.client(model_id);
-
-    let resp = client
-        .generate(user_request(provider.model(model_id)))
-        .await
-        .expect("generate over http");
-
-    assert_eq!(assistant_text(&resp), "Hello world");
-    assert_eq!(resp.finish_reason, Some(FinishReason::Stop));
-    let usage = resp.usage.expect("usage reported");
-    assert_eq!(usage.input_tokens, Some(10));
-    assert_eq!(usage.output_tokens, Some(2));
-
-    let received = server.received_requests().await.expect("recording enabled");
-    assert_eq!(received.len(), 1);
-    let authorization = received[0]
-        .headers
-        .get("authorization")
-        .expect("authorization header present")
-        .to_str()
-        .unwrap();
-    assert!(
-        authorization.starts_with("AWS4-HMAC-SHA256"),
-        "unexpected authorization header: {authorization}"
-    );
 }
 
 /// Live smoke test against the real Anthropic API. Ignored by default; run with

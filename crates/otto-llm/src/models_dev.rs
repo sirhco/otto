@@ -88,7 +88,6 @@ pub fn route_id_for(provider_id: &str) -> &'static str {
         "openai" => "openai-chat",
         "azure" => "azure-openai-chat",
         "google" => "gemini",
-        "amazon-bedrock" => "bedrock-converse",
         _ => "openai-compatible-chat",
     }
 }

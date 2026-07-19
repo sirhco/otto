@@ -7,8 +7,8 @@ use std::sync::Arc;
 use otto_agent::ModelRef;
 use otto_auth::{AuthMap, Credential};
 use otto_llm::{
-    Anthropic, AwsCredentials, Azure, Bedrock, Copilot, Google, HttpTransport, Model, OpenAI,
-    OpenAICompatible, Provider, Route, Secret, Vertex,
+    Anthropic, Azure, Copilot, Google, HttpTransport, Model, OpenAI, OpenAICompatible, Provider,
+    Route, Secret, Vertex,
 };
 
 use crate::{Error, Result};
@@ -221,16 +221,6 @@ impl RouteFactory for AuthRouteFactory {
             }
             "google" | "gemini" => {
                 let p = Google::new(key, self.transport.clone());
-                (Arc::from(p.route(model_id)), p.model(model_id))
-            }
-            "amazon-bedrock" | "bedrock" => {
-                let creds = AwsCredentials::from_env().ok_or_else(|| {
-                    Error::Route(
-                        "bedrock: AWS credentials not found (set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)"
-                            .to_string(),
-                    )
-                })?;
-                let p = Bedrock::new(creds);
                 (Arc::from(p.route(model_id)), p.model(model_id))
             }
             "vertex" => {

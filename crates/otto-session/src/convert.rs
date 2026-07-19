@@ -81,9 +81,6 @@ fn supports_media_in_tool_result(provider: &ProviderId, model: &ModelId, mime: &
     if p == "openai" || p.contains("openai") {
         return true;
     }
-    if p.contains("bedrock") {
-        return mime.starts_with("image/");
-    }
     if p == "xai" || p.contains("xai") {
         return mime.starts_with("image/");
     }

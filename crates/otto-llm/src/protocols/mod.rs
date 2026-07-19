@@ -4,7 +4,6 @@
 //! the shared lifecycle / tool-stream state machines every protocol composes;
 //! each concrete protocol implements [`crate::protocol::Protocol`].
 pub mod anthropic_messages;
-pub mod bedrock_converse;
 pub mod copilot_cache;
 pub mod gemini;
 pub mod openai_chat;

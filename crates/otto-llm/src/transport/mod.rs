@@ -5,8 +5,6 @@
 //! the SSE `data:` payload frames; [`HttpTransport`] is the `reqwest`-backed
 //! implementation, and [`sse`] provides the reusable framing.
 
-pub mod aws_event_stream;
-pub mod bedrock;
 pub mod sse;
 
 use std::collections::BTreeMap;

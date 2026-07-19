@@ -1027,8 +1027,7 @@ impl crate::protocol::Protocol for OpenAIChat {
     fn on_halt(&self, state: &mut Self::State) -> Vec<LLMEvent> {
         let has_tool_calls = !state.tool_call_events.is_empty();
         // A stream that produced nothing and carried no finish_reason: don't
-        // fabricate a terminal event (mirrors `bedrock_converse::on_halt`'s
-        // `is_started()` guard).
+        // fabricate a terminal event.
         if state.finish_reason.is_none() && !has_tool_calls && !state.lifecycle.is_started() {
             return Vec::new();
         }
@@ -1280,8 +1279,7 @@ mod tests {
 
     #[test]
     fn empty_stream_emits_nothing() {
-        // A stream that produces no frames at all must NOT fabricate a finish
-        // (mirrors bedrock_converse::on_halt's is_started() guard).
+        // A stream that produces no frames at all must NOT fabricate a finish.
         let events = drive(&[]);
         assert!(
             events.is_empty(),

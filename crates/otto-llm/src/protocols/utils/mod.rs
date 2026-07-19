@@ -6,5 +6,4 @@
 
 pub mod gemini_tool_schema;
 pub mod lifecycle;
-pub mod sigv4;
 pub mod tool_stream;
