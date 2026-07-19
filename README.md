@@ -120,7 +120,7 @@ Actively developed toward parity with upstream opencode. Known limitations:
 - **OpenAI Responses (v1):** streaming reasoning + tool calls work; reasoning *input-replay* across turns is intentionally dropped, and hosted (provider-executed) tools + the WebSocket transport are deferred.
 - **share / sync / GitHub-app** features are deliberately not ported (they depend on opencode's hosted cloud backend).
 - **Workflow engine (`otto-workflow`)** ships three working driver engines (`otto workflow tdd|sdd|plan`) above the run loop; ongoing hardening as usage grows.
-- **Anthropic OAuth** endpoints are `TODO(confirm)` — the API-key path is solid; OAuth is unverified against a live login.
+- **Anthropic OAuth** (Claude Pro/Max login) is verified end to end against a live login: exchange, Bearer auth, and inference all confirmed working. Whether a given account's plan covers third-party OAuth usage is an Anthropic-side setting (`claude.ai/settings/usage`), not an otto limitation.
 - **Bedrock** reads AWS credentials from environment only (no profile/SSO chain); **Gemini** is AI-Studio only (no Vertex).
 - The server mirrors opencode API *shapes* but has not been byte-diffed against an external OpenAPI spec.
 
