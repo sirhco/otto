@@ -113,6 +113,83 @@ then the on-disk file (a missing file yields an empty map).
 
 Full variable list in [../reference/env.md](../reference/env.md).
 
+## GitHub Copilot
+
+Copilot needs no provider configuration. Log in, then name a model — the
+models.dev registry already carries the context and output windows, so unlike
+[local models](#local-models-ollama) no `limits` block is required.
+
+```bash
+otto auth login github-copilot     # device code: opens a URL, you paste a code
+```
+
+```json
+{ "model": "github-copilot/claude-opus-4.8" }
+```
+
+Or per run: `otto --model github-copilot/gpt-5.4 run "..."`.
+
+The provider id is `github-copilot`, with a hyphen. The underscore form
+`github_copilot/...` is a *gateway* model name — see
+[Model ids with slashes](#model-ids-with-slashes).
+
+### Available models
+
+`otto models github-copilot` prints the live list (25 entries at time of
+writing). A sample:
+
+| model | context | $/M in → out |
+| --- | --- | --- |
+| `claude-sonnet-5` | 1000k | 2 → 10 |
+| `claude-opus-4.8` | 200k | 5 → 25 |
+| `claude-haiku-4.5` | 200k | 1 → 5 |
+| `gpt-5.4` | 400k | 2.5 → 15 |
+| `gpt-5.4-nano` | 400k | 0.2 → 1.25 |
+| `gemini-3.1-pro-preview` | 200k | 2 → 12 |
+
+Also available: `claude-fable-5`, `claude-sonnet-4`/`4.5`/`4.6`,
+`claude-opus-4.5`/`4.6`/`4.7`, `gpt-4.1`, `gpt-5-mini`, `gpt-5.2`, `gpt-5.5`,
+several `*-codex` variants, `gemini-2.5-pro`, `gemini-3-flash-preview`,
+`gemini-3.5-flash`, `kimi-k2.7-code`, `mai-code-1-flash-picker`.
+
+### Three protocols behind one provider
+
+Copilot fronts models from three vendors, so otto picks the wire protocol from
+the model id. This is automatic and not configurable.
+
+| model id | protocol | endpoint |
+| --- | --- | --- |
+| starts with `claude` | Anthropic Messages | `POST {base}/v1/messages` |
+| `gpt-N` where N ≥ 5, **except** the `gpt-5-mini` family | OpenAI Responses | `POST {base}/responses` |
+| everything else | OpenAI Chat | `POST {base}/chat/completions` |
+
+<!-- src: crates/otto-llm/src/providers/copilot.rs — is_claude() is starts_with("claude"); route() branches on is_claude then should_use_responses; crates/otto-llm/src/protocols/openai_responses.rs, should_use_responses() -->
+
+So `gpt-5-mini` deliberately takes the Chat route while `gpt-5.4` takes
+Responses. All three are wrapped in `CopilotCache`, which applies the
+`copilot_cache_control` markers in the shape the active protocol expects and
+strips `max_tokens` for any `gpt*` model, because Copilot rejects it there.
+<!-- src: crates/otto-llm/src/protocols/copilot_cache.rs — strip_max_tokens() gated on model_id.starts_with("gpt"); BodyShape::{OpenAi,Anthropic} -->
+
+Requests carry the GitHub token as a `Bearer` header plus Copilot's required
+static headers (`X-GitHub-Api-Version`); claude models additionally get an
+`anthropic-beta: interleaved-thinking-2025-05-14` header.
+
+### Enterprise
+
+If the stored OAuth credential carries an `enterprise_url`, the base URL
+switches from `https://api.githubcopilot.com` to
+`https://copilot-api.<your-domain>` automatically. This comes from the
+credential, not from config — `provider.github-copilot.options.baseURL` is
+**ignored** (see [Gateways](#b-native-anthropic-protocol-pointed-at-the-gateway)
+for which arms honor `baseURL`).
+<!-- src: crates/otto-llm/src/providers/copilot.rs, with_enterprise(); crates/otto-app/src/route_factory.rs, the "github-copilot" arm reads Credential::Oauth{enterprise_url} -->
+
+> [!NOTE]
+> Copilot OAuth has **no refresh flow**. Unlike Anthropic OAuth, the token is
+> not renewed on load — when it lapses, re-run `otto auth login github-copilot`.
+<!-- src: crates/otto-auth/src/providers/mod.rs — only the anthropic arm refreshes -->
+
 ## Local models (Ollama)
 
 `ollama` is not a native arm, so it takes the OpenAI-compatible route. Ollama
