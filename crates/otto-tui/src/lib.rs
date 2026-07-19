@@ -439,6 +439,26 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         });
         return;
     }
+    if let Msg::CreateDashboardSession(title) = &msg {
+        let title = title.clone();
+        // `App::update`'s arm just ends the inline "new session" text-entry
+        // mode (see its doc comment) — run that synchronously before
+        // spawning, mirroring the `PermissionReply`/`StartWorkflow` shape.
+        app.update(Msg::CreateDashboardSession(title.clone()));
+        let client = client.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            match client.create_session(&title).await {
+                Ok(s) => {
+                    let _ = tx.send(Msg::DashboardSessionCreated(s));
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Error(e.to_string()));
+                }
+            }
+        });
+        return;
+    }
     if let Msg::PermissionReply { id, reply } = &msg {
         let id = id.clone();
         let reply = reply.clone();
@@ -584,7 +604,7 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
     }
     if let Msg::Tick = &msg
         && matches!(app.overlay, Overlay::Dashboard)
-        && dashboard_poll_due(app.tick)
+        && (dashboard_poll_due(app.tick) || app.dashboard.needs_refetch)
     {
         let client = client.clone();
         let tx = tx.clone();
@@ -634,9 +654,14 @@ fn maybe_fetch_dashboard_peek(app: &App, client: &Client, tx: &mpsc::UnboundedSe
 }
 
 /// How often (in ticks of the existing 125ms tick) the dashboard polls
-/// `GET /session`/`GET /permission`/`GET /question` while open: 16 ticks =
-/// 2s.
-const DASHBOARD_POLL_TICKS: u32 = 16;
+/// `GET /session`/`GET /permission`/`GET /question` while open: 80 ticks =
+/// 10s. Push events (see `DashboardState::needs_refetch`) drive the primary
+/// refresh path and resolve far faster than this; the poll is a
+/// reconciliation fallback for a dropped or missed event (`broadcast` gives
+/// no replay/backpressure guarantee — `RecvError::Lagged` is already
+/// silently skipped-ahead), not the main update mechanism, hence the slower
+/// cadence.
+const DASHBOARD_POLL_TICKS: u32 = 80;
 
 /// Whether a dashboard poll is due on this tick.
 fn dashboard_poll_due(tick: u32) -> bool {
@@ -910,12 +935,148 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_poll_due_every_16_ticks() {
+    fn dashboard_poll_due_every_80_ticks() {
         assert!(dashboard_poll_due(0));
         assert!(!dashboard_poll_due(1));
-        assert!(!dashboard_poll_due(15));
-        assert!(dashboard_poll_due(16));
-        assert!(dashboard_poll_due(32));
+        assert!(!dashboard_poll_due(79));
+        assert!(dashboard_poll_due(80));
+        assert!(dashboard_poll_due(160));
+    }
+
+    /// Bind a fresh in-memory `Runtime` (no route factory needed — session
+    /// create/list and the permission/question lists never touch it) to an
+    /// ephemeral port and return a `Client` for it, mirroring
+    /// `tests/harness.rs::spawn` (not reused directly: that harness lives in
+    /// the integration-test binary, which can't see this crate's
+    /// `pub(crate)` `dispatch`/`DashboardState` internals).
+    async fn spawn_test_client() -> Client {
+        let runtime = std::sync::Arc::new(
+            otto_app::Runtime::in_memory(otto_config::Config::default())
+                .await
+                .unwrap(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener); // free the port for `serve` to rebind
+        tokio::spawn(async move {
+            let _ = otto_server::serve(
+                runtime,
+                addr,
+                otto_server::ServeOptions {
+                    password: None,
+                    cors: false,
+                },
+            )
+            .await;
+        });
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        Client::new(format!("http://{addr}"), None)
+    }
+
+    /// `Msg::CreateDashboardSession` mirrors `Msg::NewSession`'s dispatch
+    /// shape (spawn `create_session`, success -> a follow-up `Msg` on the
+    /// channel) but — unlike `NewSession` — also has real `App::update` work
+    /// (ending the inline "new session" text-entry mode), which must happen
+    /// synchronously rather than being dropped.
+    #[tokio::test]
+    async fn dispatch_create_dashboard_session_ends_entry_mode_and_creates_session() {
+        use crate::state::DashboardMode;
+
+        let client = spawn_test_client().await;
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.mode = DashboardMode::NewSession("my title".into());
+        let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
+
+        dispatch(
+            &mut app,
+            &client,
+            &tx,
+            Msg::CreateDashboardSession("my title".into()),
+        );
+        assert_eq!(
+            app.dashboard.mode,
+            DashboardMode::Browsing,
+            "the text-entry mode must end synchronously, not wait on the HTTP call"
+        );
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("CreateDashboardSession must trigger a create_session call")
+            .expect("channel closed before the create resolved");
+        let session = match msg {
+            Msg::DashboardSessionCreated(s) => s,
+            other => panic!("expected Msg::DashboardSessionCreated, got {other:?}"),
+        };
+        assert_eq!(session.title.as_deref(), Some("my title"));
+
+        // Feed the result back through `dispatch`, exactly as the real event
+        // loop does — confirms the optimistic insert (already `App::update`'s
+        // responsibility, Task 5) actually gets driven end to end from here.
+        dispatch(
+            &mut app,
+            &client,
+            &tx,
+            Msg::DashboardSessionCreated(session.clone()),
+        );
+        assert!(
+            app.dashboard
+                .rows
+                .iter()
+                .any(|r| r.session.id == session.id),
+            "the newly created session must appear as a dashboard row"
+        );
+    }
+
+    /// A push event flags `needs_refetch` while the dashboard is open (Task
+    /// 5); the tick handler must fire an immediate fetch for it rather than
+    /// waiting out the full `DASHBOARD_POLL_TICKS` interval.
+    #[tokio::test]
+    async fn dispatch_tick_fetches_dashboard_immediately_when_needs_refetch_set() {
+        let client = spawn_test_client().await;
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.tick = 1; // not a multiple of DASHBOARD_POLL_TICKS — poll alone wouldn't fire
+        app.dashboard.needs_refetch = true;
+        let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
+
+        dispatch(&mut app, &client, &tx, Msg::Tick);
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("needs_refetch must trigger an immediate dashboard fetch")
+            .expect("channel closed before the fetch resolved");
+        assert!(
+            matches!(msg, Msg::DashboardLoaded { .. }),
+            "expected Msg::DashboardLoaded, got {msg:?}"
+        );
+    }
+
+    /// Negative case for the above: off-cadence tick, no pending refetch —
+    /// must NOT fire a fetch (guards against the tick handler over-firing on
+    /// every 125ms tick instead of only on poll-due/needs_refetch ticks).
+    #[tokio::test]
+    async fn dispatch_tick_does_not_fetch_when_neither_poll_due_nor_needs_refetch() {
+        let client = spawn_test_client().await;
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.tick = 1; // not a multiple of DASHBOARD_POLL_TICKS
+        assert!(!app.dashboard.needs_refetch);
+        let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
+
+        dispatch(&mut app, &client, &tx, Msg::Tick);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "no fetch should have fired"
+        );
     }
 
     #[test]
