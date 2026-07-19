@@ -4,6 +4,7 @@ use crate::state::{
     App, DashboardMode, DashboardPeek, DashboardStatus, LoopAction, Msg, Overlay, QuestionReplyKind,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::{Duration, Instant};
 
 /// One visual row produced by soft-wrapping a logical line: the logical line
 /// it came from and the byte range `[start, end)` within that line. An empty
@@ -57,6 +58,34 @@ pub fn wrap_rows(lines: &[String], width: u16) -> Vec<WrapRow> {
     out
 }
 
+/// Consecutive same-kind edits within this window merge into one undo step,
+/// so undo doesn't require one keystroke per undo.
+const UNDO_MERGE_WINDOW: Duration = Duration::from_millis(1000);
+/// Oldest entries are evicted past this depth.
+const UNDO_MAX_DEPTH: usize = 100;
+
+/// A full snapshot of `Editor`'s buffer + cursor for undo/redo. The prompt
+/// buffer is small (a chat message, not a file), so snapshotting the whole
+/// thing is cheap — no need for a diff-based scheme.
+#[derive(Debug, Clone)]
+struct UndoEntry {
+    lines: Vec<String>,
+    row: usize,
+    col: usize,
+}
+
+/// What kind of mutation just happened, used to decide whether it merges
+/// with the previous undo step or starts a new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MutationKind {
+    /// Character-by-character typing and newlines — batched.
+    Insert,
+    /// Backspace — batched.
+    Delete,
+    /// `replace_to_cursor` (mention accept) — always discrete.
+    Replace,
+}
+
 /// A minimal multiline text buffer with a cursor. No wrapping, no undo.
 ///
 /// `col` is a BYTE offset into `lines[row]`, not a character count. This
@@ -72,6 +101,10 @@ pub struct Editor {
     /// restores the original column instead of snapping to end-of-line.
     /// Cleared by every other cursor-affecting operation.
     preferred_col: Option<u16>,
+    undo: Vec<UndoEntry>,
+    redo: Vec<UndoEntry>,
+    last_kind: Option<MutationKind>,
+    last_edit_at: Option<Instant>,
 }
 
 impl Editor {
@@ -82,16 +115,22 @@ impl Editor {
             row: 0,
             col: 0,
             preferred_col: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_kind: None,
+            last_edit_at: None,
         }
     }
 
     pub fn insert(&mut self, c: char) {
+        self.record_undo(MutationKind::Insert);
         self.preferred_col = None;
         self.lines[self.row].insert(self.col, c);
         self.col += c.len_utf8();
     }
 
     pub fn newline(&mut self) {
+        self.record_undo(MutationKind::Insert);
         self.preferred_col = None;
         let rest = self.lines[self.row].split_off(self.col);
         self.lines.insert(self.row + 1, rest);
@@ -100,6 +139,7 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) {
+        self.record_undo(MutationKind::Delete);
         self.preferred_col = None;
         if self.col > 0 {
             let prev = self.lines[self.row][..self.col]
@@ -219,6 +259,63 @@ impl Editor {
         self.col = self.lines[self.row].len();
     }
 
+    fn snapshot(&self) -> UndoEntry {
+        UndoEntry {
+            lines: self.lines.clone(),
+            row: self.row,
+            col: self.col,
+        }
+    }
+
+    /// Checkpoint the state *before* a mutation of `kind`. Consecutive
+    /// same-kind mutations within `UNDO_MERGE_WINDOW` extend the current
+    /// undo step instead of starting a new one; `MutationKind::Replace` is
+    /// always discrete. Any new mutation clears the redo stack.
+    fn record_undo(&mut self, kind: MutationKind) {
+        let now = Instant::now();
+        let merge = kind != MutationKind::Replace
+            && self.last_kind == Some(kind)
+            && self
+                .last_edit_at
+                .is_some_and(|t| now.duration_since(t) < UNDO_MERGE_WINDOW);
+        if !merge {
+            self.undo.push(self.snapshot());
+            if self.undo.len() > UNDO_MAX_DEPTH {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+        self.last_kind = Some(kind);
+        self.last_edit_at = Some(now);
+    }
+
+    /// Undo the last edit (or batched run of edits). No-op if there's
+    /// nothing to undo.
+    pub fn undo(&mut self) {
+        if let Some(prev) = self.undo.pop() {
+            self.redo.push(self.snapshot());
+            self.lines = prev.lines;
+            self.row = prev.row;
+            self.col = prev.col;
+            self.last_kind = None;
+            self.preferred_col = None;
+        }
+    }
+
+    /// Redo the last undone edit. No-op if there's nothing to redo, and no-op
+    /// (does not clear the redo stack) if called repeatedly with nothing new
+    /// in between.
+    pub fn redo(&mut self) {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(self.snapshot());
+            self.lines = next.lines;
+            self.row = next.row;
+            self.col = next.col;
+            self.last_kind = None;
+            self.preferred_col = None;
+        }
+    }
+
     /// The character immediately before the cursor on the current row, if any.
     /// Used to gate the `@`-mention trigger to word boundaries (so `foo@bar`
     /// emails type literally).
@@ -233,6 +330,7 @@ impl Editor {
     /// boundaries on `row` (the mention layer only ever calls this on the
     /// cursor's own row, so `col` is valid).
     pub fn replace_to_cursor(&mut self, row: usize, start_col: usize, text: &str) {
+        self.record_undo(MutationKind::Replace);
         self.preferred_col = None;
         self.lines[row].replace_range(start_col..self.col, text);
         self.row = row;
@@ -2121,5 +2219,90 @@ mod tests {
         let (row, col) = app.input.cursor();
         assert_eq!(row, 0); // still one logical line
         assert!(col > 0, "Down must have advanced the cursor into the wrapped tail");
+    }
+
+    #[test]
+    fn undo_redo_round_trips_a_single_edit() {
+        let mut e = Editor::new();
+        e.insert('a');
+        e.undo();
+        assert_eq!(e.text(), "");
+        e.redo();
+        assert_eq!(e.text(), "a");
+    }
+
+    #[test]
+    fn consecutive_typing_batches_into_one_undo_step() {
+        let mut e = Editor::new();
+        for c in "abc".chars() {
+            e.insert(c);
+        }
+        assert_eq!(e.text(), "abc");
+        e.undo();
+        assert_eq!(e.text(), "", "a fast burst of typing must undo as one step");
+    }
+
+    #[test]
+    fn insert_then_delete_are_distinct_undo_steps() {
+        let mut e = Editor::new();
+        e.insert('a');
+        e.insert('b');
+        e.backspace();
+        assert_eq!(e.text(), "a");
+        e.undo(); // undoes the backspace
+        assert_eq!(e.text(), "ab");
+        e.undo(); // undoes the "ab" insert batch
+        assert_eq!(e.text(), "");
+    }
+
+    #[test]
+    fn replace_to_cursor_is_always_a_discrete_undo_step() {
+        let mut e = Editor::new();
+        for c in "@fo".chars() {
+            e.insert(c);
+        }
+        e.replace_to_cursor(0, 0, "@foo.rs");
+        assert_eq!(e.text(), "@foo.rs");
+        e.undo(); // undoes only the replace, not the preceding "@fo" typing
+        assert_eq!(e.text(), "@fo");
+        e.undo();
+        assert_eq!(e.text(), "");
+    }
+
+    #[test]
+    fn new_edit_after_undo_clears_redo() {
+        let mut e = Editor::new();
+        e.insert('a');
+        e.undo();
+        e.insert('b');
+        e.redo(); // nothing to redo — the 'b' edit cleared it
+        assert_eq!(e.text(), "b");
+    }
+
+    #[test]
+    fn undo_redo_are_no_ops_at_stack_boundaries() {
+        let mut e = Editor::new();
+        e.undo(); // nothing to undo
+        assert_eq!(e.text(), "");
+        e.insert('a');
+        e.redo(); // nothing to redo (no prior undo)
+        assert_eq!(e.text(), "a");
+    }
+
+    #[test]
+    fn undo_depth_is_capped() {
+        let mut e = Editor::new();
+        // Each insert is forced into its own undo step by alternating with a
+        // discrete `replace_to_cursor` no-op-ish edit, so 150 edits produce more
+        // than the 100-entry cap and the oldest ones are evicted.
+        for i in 0..150 {
+            e.insert('a');
+            e.replace_to_cursor(0, e.cursor().1, ""); // discrete step, breaks batching
+            let _ = i;
+        }
+        for _ in 0..150 {
+            e.undo();
+        }
+        assert!(!e.is_empty(), "undo stack cap must have evicted the oldest entries");
     }
 }
