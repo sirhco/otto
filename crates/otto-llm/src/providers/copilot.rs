@@ -81,9 +81,12 @@ where
     /// (`https://copilot-api.<domain>`).
     #[must_use]
     pub fn with_enterprise(mut self, domain: &str) -> Self {
+        // Mirrors `normalizeDomain` in copilot.ts: users paste either
+        // `company.ghe.com` or a full URL, with either scheme.
         let d = domain
             .trim()
             .trim_start_matches("https://")
+            .trim_start_matches("http://")
             .trim_end_matches('/');
         self.base = format!("https://copilot-api.{d}");
         self
@@ -279,6 +282,26 @@ mod tests {
             p.base_for("claude-sonnet-4.5"),
             "https://copilot-api.acme.ghe.com/v1"
         );
+    }
+
+    /// A pasted URL normalizes to the same host as a bare domain, with either
+    /// scheme — port of `normalizeDomain`'s `/^https?:\/\//`.
+    #[test]
+    fn enterprise_normalizes_a_pasted_url() {
+        for raw in [
+            "acme.ghe.com",
+            "https://acme.ghe.com",
+            "http://acme.ghe.com",
+            "https://acme.ghe.com/",
+        ] {
+            let p =
+                Copilot::new(Some(Secret::literal("gho_x")), test_transport()).with_enterprise(raw);
+            assert_eq!(
+                p.base_for("gpt-4o"),
+                "https://copilot-api.acme.ghe.com",
+                "input: {raw:?}"
+            );
+        }
     }
 
     /// `config.provider.github-copilot.options.baseURL` overrides both the

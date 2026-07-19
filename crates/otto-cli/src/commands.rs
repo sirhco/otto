@@ -245,22 +245,22 @@ async fn login(runtime: &Runtime, provider: &str, enterprise: Option<&str>) -> R
     }
 
     if provider == "github-copilot" {
-        // Without a domain the credential's `enterprise_url` stays None and
-        // every request goes to the public Copilot host — which an enterprise
-        // network typically cannot reach, surfacing as a connect failure that
-        // the retry layer treats as transient and retries silently.
-        let mut flow = copilot::CopilotOAuth::new();
-        if let Some(domain) = enterprise {
-            let domain = domain
-                .trim()
-                .trim_start_matches("https://")
-                .trim_end_matches('/');
-            if domain.is_empty() {
-                bail!("--enterprise needs a domain, e.g. --enterprise acme.ghe.com");
+        // `enterprise` selects BOTH the host the device flow authenticates
+        // against and the domain stamped on the credential. Without it the
+        // credential records no domain and every request goes to the public
+        // Copilot host, which an enterprise network typically cannot reach —
+        // surfacing as a connect failure the retry layer treats as transient.
+        let flow = match enterprise {
+            Some(raw) => {
+                let domain = copilot::normalize_domain(raw);
+                if domain.is_empty() {
+                    bail!("--enterprise needs a domain, e.g. --enterprise acme.ghe.com");
+                }
+                println!("using GitHub Enterprise domain: {domain}");
+                copilot::CopilotOAuth::enterprise(&domain)
             }
-            flow = flow.with_enterprise_domain(domain);
-            println!("using GitHub Enterprise domain: {domain}");
-        }
+            None => copilot::CopilotOAuth::new(),
+        };
         let start = flow
             .start_device()
             .await

@@ -17,6 +17,14 @@ All notable changes to otto are documented here. Format follows
   which is classified retryable, so it retried instead of reporting a bad
   endpoint.
 
+  The flag drives both halves, matching `copilot.ts`: the device flow
+  authenticates against `https://<domain>` rather than `github.com`, and the
+  API base becomes `https://copilot-api.<domain>`. Authenticating against
+  github.com while claiming an enterprise deployment yields a token the
+  enterprise API will not honor. Domains normalize like upstream's
+  `normalizeDomain`, so `acme.ghe.com` and `https://acme.ghe.com/` are
+  equivalent.
+
 ### Fixed
 
 - **`provider.github-copilot.options.baseURL` is now honored.** The

@@ -177,19 +177,33 @@ static headers (`X-GitHub-Api-Version`); claude models additionally get an
 
 ### Enterprise
 
-Pass your GitHub Enterprise domain at login. This is what populates the
-credential's `enterprise_url`, which switches the base URL from
-`https://api.githubcopilot.com` to `https://copilot-api.<your-domain>`:
+Pass your GitHub Enterprise domain at login:
 
 ```bash
 otto auth login github-copilot --enterprise acme.ghe.com
 ```
 
+The flag drives **both** halves of an enterprise deployment:
+
+| | public | `--enterprise acme.ghe.com` |
+| --- | --- | --- |
+| device flow authenticates against | `github.com` | `acme.ghe.com` |
+| Copilot API base | `api.githubcopilot.com` | `copilot-api.acme.ghe.com` |
+
+A full URL works too — `https://acme.ghe.com` and `acme.ghe.com` normalize to
+the same host.
+
 Without the flag the credential records no domain and **every request goes to
 the public host** — which an enterprise network typically cannot reach. The
 failure surfaces as a connect error that the retry layer treats as transient,
 so it retries rather than telling you the endpoint is wrong.
-<!-- src: crates/otto-cli/src/cli.rs, the --enterprise arg on Login; crates/otto-auth/src/providers/copilot.rs, with_enterprise_domain(); crates/otto-llm/src/providers/copilot.rs, with_enterprise() -->
+<!-- src: crates/otto-cli/src/cli.rs, the --enterprise arg on Login; crates/otto-auth/src/providers/copilot.rs, CopilotOAuth::enterprise() + normalize_domain(); crates/otto-llm/src/providers/copilot.rs, with_enterprise() -->
+
+> [!NOTE]
+> Copilot API access is gated by GitHub org policy, separately from having
+> Copilot seats. If your organization has not enabled it, requests fail at
+> connect no matter how otto is configured — ask an org admin before
+> debugging further.
 
 If the derived host is still wrong — a proxy-fronted Copilot, or a domain that
 does not follow the `copilot-api.<domain>` convention — override it explicitly.

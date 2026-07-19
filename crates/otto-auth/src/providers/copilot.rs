@@ -48,6 +48,21 @@ pub enum DevicePoll {
     SlowDown,
 }
 
+/// Strip a URL scheme and any trailing slash, leaving a bare domain.
+///
+/// Port of `normalizeDomain` in `copilot.ts`
+/// (`url.replace(/^https?:\/\//, "").replace(/\/$/, "")`) — users paste either
+/// `company.ghe.com` or `https://company.ghe.com`, and both must resolve to
+/// the same host.
+#[must_use]
+pub fn normalize_domain(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
 /// The GitHub Copilot device-flow client.
 pub struct CopilotOAuth {
     device_code_url: String,
@@ -67,6 +82,21 @@ impl CopilotOAuth {
     #[must_use]
     pub fn new() -> Self {
         Self::with_base_url(GITHUB_BASE)
+    }
+
+    /// Client for a GitHub Enterprise deployment.
+    ///
+    /// Points the device flow at the enterprise host **and** records the
+    /// domain for the resulting credential — both halves are required. Port
+    /// of `copilot.ts`'s enterprise branch, where
+    /// `domain = normalizeDomain(enterpriseUrl)` feeds `getUrls(domain)`.
+    ///
+    /// Authenticating against `github.com` while claiming an enterprise
+    /// deployment yields a token the enterprise Copilot API will not honor.
+    #[must_use]
+    pub fn enterprise(domain: &str) -> Self {
+        let domain = normalize_domain(domain);
+        Self::with_base_url(format!("https://{domain}")).with_enterprise_domain(domain)
     }
 
     /// Client pointed at an explicit base URL (test mock, or a GitHub
@@ -187,4 +217,53 @@ impl CopilotOAuth {
 struct TokenResponse {
     access_token: Option<String>,
     error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_domain_strips_scheme_and_trailing_slash() {
+        for raw in [
+            "company.ghe.com",
+            "https://company.ghe.com",
+            "http://company.ghe.com",
+            "https://company.ghe.com/",
+            "  https://company.ghe.com/  ",
+        ] {
+            assert_eq!(normalize_domain(raw), "company.ghe.com", "input: {raw:?}");
+        }
+    }
+
+    /// The public client authenticates against github.com.
+    #[test]
+    fn default_client_targets_github_dot_com() {
+        let f = CopilotOAuth::new();
+        assert_eq!(f.device_code_url, "https://github.com/login/device/code");
+        assert_eq!(
+            f.access_token_url,
+            "https://github.com/login/oauth/access_token"
+        );
+        assert_eq!(f.enterprise_domain, None);
+    }
+
+    /// Regression: `--enterprise` recorded the domain on the credential but
+    /// left the device flow pointed at github.com, so an enterprise
+    /// deployment authenticated against the wrong server and received a token
+    /// its Copilot API would not honor. Upstream derives BOTH from the
+    /// domain (`getUrls(domain)` + `result.enterpriseUrl = domain`).
+    #[test]
+    fn enterprise_client_targets_the_enterprise_host_and_records_the_domain() {
+        let f = CopilotOAuth::enterprise("https://company.ghe.com/");
+        assert_eq!(
+            f.device_code_url,
+            "https://company.ghe.com/login/device/code"
+        );
+        assert_eq!(
+            f.access_token_url,
+            "https://company.ghe.com/login/oauth/access_token"
+        );
+        assert_eq!(f.enterprise_domain.as_deref(), Some("company.ghe.com"));
+    }
 }

@@ -136,8 +136,9 @@ pub enum ProvidersCommand {
         /// The provider id (e.g. `anthropic`, `openai`).
         provider: String,
         /// GitHub Enterprise domain for `github-copilot` (e.g. `acme.ghe.com`).
-        /// Routes API calls to `https://copilot-api.<domain>` instead of the
-        /// public host. Ignored by other providers.
+        /// Authenticates against that host instead of github.com, and routes
+        /// API calls to `https://copilot-api.<domain>`. Ignored by other
+        /// providers.
         #[arg(long, value_name = "DOMAIN")]
         enterprise: Option<String>,
     },
@@ -166,8 +167,9 @@ pub enum AuthCommand {
         /// The provider id.
         provider: String,
         /// GitHub Enterprise domain for `github-copilot` (e.g. `acme.ghe.com`).
-        /// Routes API calls to `https://copilot-api.<domain>` instead of the
-        /// public host. Ignored by other providers.
+        /// Authenticates against that host instead of github.com, and routes
+        /// API calls to `https://copilot-api.<domain>`. Ignored by other
+        /// providers.
         #[arg(long, value_name = "DOMAIN")]
         enterprise: Option<String>,
     },
