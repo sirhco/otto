@@ -1039,7 +1039,11 @@ fn dashboard_overlay(
         // block's `Wrap { trim: true }` (trims leading whitespace per
         // line), so the child marker has to be a non-whitespace glyph.
         let indent = if row.indent { "↳ " } else { "" };
-        let pin = if dash.pinned.contains(&row.session.id) {
+        // Pinning only affects primary-row ordering (`apply_pin_and_filter`
+        // partitions by parent, a pinned child id is a silent no-op) — never
+        // show the glyph on a child row, it would claim an effect that isn't
+        // there.
+        let pin = if !row.indent && dash.pinned.contains(&row.session.id) {
             "★ "
         } else {
             ""
@@ -3266,8 +3270,22 @@ mod tests {
                 status: DashboardStatus::Idle,
                 indent: false,
             },
+            DashboardRow {
+                session: SessionInfo {
+                    id: "pinned-child".into(),
+                    title: Some("pinned child".into()),
+                    ..Default::default()
+                },
+                status: DashboardStatus::Idle,
+                indent: true,
+            },
         ];
         app.dashboard.pinned.insert("pinned".to_string());
+        // Pinning a child row is a no-op in `apply_pin_and_filter` (it only
+        // partitions primary rows) — its id can still land in `pinned`
+        // (e.g. selection landed there before the row became a child), but
+        // the glyph must not claim an effect the pin doesn't actually have.
+        app.dashboard.pinned.insert("pinned-child".to_string());
         let text = render(&app);
         assert!(
             text.contains("★ ○ pinned one"),
@@ -3277,7 +3295,15 @@ mod tests {
             text.contains("○ plain one") && !text.contains("★ ○ plain one"),
             "unpinned row has no ★: {text}"
         );
-        assert_eq!(text.matches('★').count(), 1, "only the pinned row gets ★");
+        assert!(
+            text.contains("○ pinned child") && !text.contains("★ ○ pinned child"),
+            "a pinned id on a child row does not render the glyph, pinning has no effect there: {text}"
+        );
+        assert_eq!(
+            text.matches('★').count(),
+            1,
+            "only the pinned primary row gets ★"
+        );
     }
 
     #[test]
