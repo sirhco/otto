@@ -10,7 +10,7 @@
 
 Source of behavioral truth: the upstream `opencode/packages/` (primarily `opencode/src` and `llm/src`). otto is a faithful port, not a fork.
 
-> **Status:** `v0.13.1` · **pre-release / unstable** · 20-crate workspace · `clippy -D warnings` + `fmt` clean.
+> **Status:** `v0.13.2` · **pre-release / unstable** · 20-crate workspace · `clippy -D warnings` + `fmt` clean.
 
 ## Documentation
 

@@ -52,7 +52,7 @@ or signatures are published** — the release job uploads only `dist/*.tar.gz`.
 <!-- src: .github/workflows/release.yml, softprops/action-gh-release with files: dist/*.tar.gz -->
 
 ```bash
-tar -xzf otto-v0.13.1-aarch64-apple-darwin.tar.gz
+tar -xzf otto-v0.13.2-aarch64-apple-darwin.tar.gz
 ./otto --version
 ```
 

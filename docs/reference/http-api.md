@@ -118,7 +118,7 @@ Both paths route to the same handler. <!-- src: crates/otto-server/src/lib.rs:18
 
 ```json
 {
-  "version": "0.13.1",
+  "version": "0.13.2",
   "directory": "/Users/me/project",
   "path": { "directory": "/Users/me/project", "cwd": "/Users/me/project", "root": "/Users/me/project" }
 }
@@ -210,7 +210,7 @@ Array of sessions, oldest-created first. Each row is the persisted `Session` plu
     "parent_id": null,
     "directory": "/Users/me/project",
     "title": "New Session",
-    "version": "0.13.1",
+    "version": "0.13.2",
     "cost": 0.0132,
     "tokens": { "input": 4210, "output": 388, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
     "metadata": null,
