@@ -187,10 +187,6 @@ impl RouteFactory for AuthRouteFactory {
                 }
                 (Arc::from(p.route(model_id)), p.model(model_id))
             }
-            "xai" => {
-                let p = OpenAICompatible::xai(key, self.transport.clone());
-                (Arc::from(p.route(model_id)), p.model(model_id))
-            }
             "google" | "gemini" => {
                 let p = Google::new(key, self.transport.clone());
                 (Arc::from(p.route(model_id)), p.model(model_id))

@@ -76,96 +76,17 @@ fn openai_uses_bearer_and_chat_completions() {
 }
 
 #[test]
-fn openai_compatible_profiles_have_right_base_urls() {
-    let cases = [
-        (
-            OpenAICompatible::deepseek(None, transport()),
-            "deepseek",
-            "https://api.deepseek.com/v1",
-        ),
-        (
-            OpenAICompatible::groq(None, transport()),
-            "groq",
-            "https://api.groq.com/openai/v1",
-        ),
-        (
-            OpenAICompatible::togetherai(None, transport()),
-            "togetherai",
-            "https://api.together.xyz/v1",
-        ),
-        (
-            OpenAICompatible::cerebras(None, transport()),
-            "cerebras",
-            "https://api.cerebras.ai/v1",
-        ),
-        (
-            OpenAICompatible::fireworks(None, transport()),
-            "fireworks",
-            "https://api.fireworks.ai/inference/v1",
-        ),
-        (
-            OpenAICompatible::deepinfra(None, transport()),
-            "deepinfra",
-            "https://api.deepinfra.com/v1/openai",
-        ),
-        (
-            OpenAICompatible::baseten(None, transport()),
-            "baseten",
-            "https://inference.baseten.co/v1",
-        ),
-        (
-            OpenAICompatible::openrouter(None, transport()),
-            "openrouter",
-            "https://openrouter.ai/api/v1",
-        ),
-        (
-            OpenAICompatible::xai(None, transport()),
-            "xai",
-            "https://api.x.ai/v1",
-        ),
-    ];
-    for (provider, id, base_url) in cases {
-        assert_eq!(provider.id(), id);
-        assert_eq!(provider.endpoint().base_url, base_url);
-        assert_eq!(provider.endpoint().path, "/chat/completions");
-        assert_eq!(provider.route("m").id(), "openai-compatible-chat");
-        // No key configured → no auth header.
-        assert!(matches!(provider.auth(), AuthDef::None));
-    }
-}
-
-#[test]
 fn openai_compatible_bearer_when_key_present() {
-    let provider = OpenAICompatible::deepseek(Some(Secret::literal("sk-ds")), transport());
+    let provider = OpenAICompatible::new(
+        "custom",
+        "https://example.com/v1",
+        Some(Secret::literal("sk-ds")),
+        transport(),
+    );
     match provider.auth() {
         AuthDef::Bearer(secret) => assert_eq!(secret, Secret::literal("sk-ds")),
         other => panic!("expected bearer, got {other:?}"),
     }
-}
-
-#[test]
-fn xai_profile_uses_x_ai_base_url_and_bearer_auth() {
-    let provider = OpenAICompatible::xai(Some(Secret::literal("xk")), transport());
-
-    let endpoint = provider.endpoint();
-    assert_eq!(endpoint.base_url, "https://api.x.ai/v1");
-    assert_eq!(endpoint.path, "/chat/completions");
-    assert_eq!(
-        endpoint.url(),
-        "https://api.x.ai/v1/chat/completions".to_string()
-    );
-    assert!(
-        endpoint
-            .url()
-            .starts_with("https://api.x.ai/v1/chat/completions")
-    );
-
-    let mut headers = std::collections::BTreeMap::new();
-    provider.auth().apply(&mut headers).expect("apply auth");
-    assert_eq!(
-        headers.get("authorization").map(String::as_str),
-        Some("Bearer xk")
-    );
 }
 
 #[test]

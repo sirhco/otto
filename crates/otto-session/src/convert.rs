@@ -71,18 +71,15 @@ fn data_url_payload(url: &str) -> &str {
 /// Port of `supportsMediaInToolResult` (`message-v2.ts:147-159`).
 ///
 /// opencode keys on the AI-SDK npm package of the model's api; otto has no
-/// `api.npm`, so this keys on the provider id string (and, for Google, the model
-/// id). `mime` decides the image-only providers.
-fn supports_media_in_tool_result(provider: &ProviderId, model: &ModelId, mime: &str) -> bool {
+/// `api.npm`, so this keys on the provider id string (and, for Google, the
+/// model id).
+fn supports_media_in_tool_result(provider: &ProviderId, model: &ModelId) -> bool {
     let p = provider.0.to_lowercase();
     if p.contains("anthropic") {
         return true;
     }
     if p == "openai" || p.contains("openai") {
         return true;
-    }
-    if p == "xai" || p.contains("xai") {
-        return mime.starts_with("image/");
     }
     if p.contains("google") || p.contains("vertex") {
         let id = model.0.to_lowercase();
@@ -374,7 +371,7 @@ fn convert_tool(
                 else {
                     continue;
                 };
-                if is_media(mime) && !supports_media_in_tool_result(provider, model, mime) {
+                if is_media(mime) && !supports_media_in_tool_result(provider, model) {
                     extracted_media.push((mime.clone(), url.clone(), filename.clone()));
                 } else {
                     final_attachments.push((mime, url));

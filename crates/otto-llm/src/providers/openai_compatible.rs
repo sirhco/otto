@@ -1,13 +1,12 @@
-//! OpenAI-compatible providers (DeepSeek, Groq, TogetherAI, …).
+//! Generic OpenAI-compatible provider — the catch-all wire shape for local
+//! and gateway tooling (litellm, ollama, vllm, or any other endpoint that
+//! speaks the OpenAI Chat Completions shape).
 //!
-//! Port of opencode `packages/llm/src/providers/openai-compatible.ts` and
-//! `openai-compatible-profile.ts`. These providers speak the OpenAI Chat wire
-//! shape at a provider-specific `baseURL`, so they reuse the
-//! [`OpenAICompatibleChat`] protocol and differ only in id, base URL, and key.
-//! Auth is `Bearer` with **no** env-var fallback list
-//! (`AuthOptions.bearer(input, [])`): pass an explicit [`Secret`] (a literal, or
-//! [`Secret::config`] to read a provider-specific env var) or `None` for no
-//! auth header.
+//! Port of opencode `packages/llm/src/providers/openai-compatible.ts`. Reuses
+//! the [`OpenAICompatibleChat`] protocol at a caller-supplied `baseURL`. Auth
+//! is `Bearer` with **no** env-var fallback list (`AuthOptions.bearer(input,
+//! [])`): pass an explicit [`Secret`] (a literal, or [`Secret::config`] to
+//! read a provider-specific env var) or `None` for no auth header.
 
 use std::sync::Arc;
 
@@ -28,25 +27,12 @@ const ROUTE_ID: &str = "openai-compatible-chat";
 /// A generic OpenAI-compatible provider, generic over the [`Transport`].
 ///
 /// Port of the `configure` facade in `openai-compatible.ts`. Construct one
-/// directly with [`OpenAICompatible::new`], or use a prebuilt profile
-/// ([`OpenAICompatible::deepseek`], [`OpenAICompatible::groq`], …).
+/// with [`OpenAICompatible::new`].
 pub struct OpenAICompatible<T> {
     provider: String,
     base_url: String,
     api_key: Option<Secret>,
     transport: Arc<T>,
-}
-
-/// Generate a prebuilt profile constructor (port of the `define(profile)`
-/// entries in `openai-compatible-profile.ts`).
-macro_rules! profile {
-    ($(#[$meta:meta])* $name:ident, $provider:literal, $base_url:literal) => {
-        $(#[$meta])*
-        #[must_use]
-        pub fn $name(api_key: Option<Secret>, transport: Arc<T>) -> Self {
-            Self::new($provider, $base_url, api_key, transport)
-        }
-    };
 }
 
 impl<T> OpenAICompatible<T>
@@ -92,43 +78,6 @@ where
             None => AuthDef::none(),
         }
     }
-
-    profile!(
-        /// DeepSeek (`https://api.deepseek.com/v1`).
-        deepseek, "deepseek", "https://api.deepseek.com/v1"
-    );
-    profile!(
-        /// Groq (`https://api.groq.com/openai/v1`).
-        groq, "groq", "https://api.groq.com/openai/v1"
-    );
-    profile!(
-        /// TogetherAI (`https://api.together.xyz/v1`).
-        togetherai, "togetherai", "https://api.together.xyz/v1"
-    );
-    profile!(
-        /// Cerebras (`https://api.cerebras.ai/v1`).
-        cerebras, "cerebras", "https://api.cerebras.ai/v1"
-    );
-    profile!(
-        /// Fireworks (`https://api.fireworks.ai/inference/v1`).
-        fireworks, "fireworks", "https://api.fireworks.ai/inference/v1"
-    );
-    profile!(
-        /// DeepInfra (`https://api.deepinfra.com/v1/openai`).
-        deepinfra, "deepinfra", "https://api.deepinfra.com/v1/openai"
-    );
-    profile!(
-        /// Baseten (`https://inference.baseten.co/v1`).
-        baseten, "baseten", "https://inference.baseten.co/v1"
-    );
-    profile!(
-        /// OpenRouter (`https://openrouter.ai/api/v1`).
-        openrouter, "openrouter", "https://openrouter.ai/api/v1"
-    );
-    profile!(
-        /// xAI (`https://api.x.ai/v1`).
-        xai, "xai", "https://api.x.ai/v1"
-    );
 }
 
 impl<T> Provider for OpenAICompatible<T>

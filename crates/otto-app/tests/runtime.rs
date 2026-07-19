@@ -438,12 +438,6 @@ async fn auth_route_factory_selects_provider() {
             .expect("route");
     assert_eq!(route.id(), "openai-compatible-chat");
     assert_eq!(model.route_id, "openai-compatible-chat");
-
-    // xai → OpenAI-compatible route (explicit arm, wired to api.x.ai).
-    let (route, model) =
-        otto_app::RouteFactory::route_for(&factory, &ModelRef::parse("xai/grok-2")).expect("route");
-    assert_eq!(route.id(), "openai-compatible-chat");
-    assert_eq!(model.route_id, "openai-compatible-chat");
 }
 
 /// `Runtime::subagent_spawner` wires the same private services
