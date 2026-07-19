@@ -4,6 +4,21 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [Unreleased]
+
+### Fixed
+
+- **Plan mode's edit restriction was bypassable via the `write` tool.** The
+  `plan` agent's ruleset denied only the `edit` permission, but `WriteTool`
+  asks under its own `write` permission — and the base ruleset is `"*":
+  "allow"`, so `write` fell through to allow. A plan-mode session could
+  therefore create or overwrite arbitrary files despite the agent being
+  documented as read-only. `plan()` now carries a `write` deny mirroring the
+  `edit` one, with the same `.otto/plans/*.md` exception. `apply_patch` was
+  never affected — it asks under `edit`. Added a regression test; the existing
+  `plan_denies_edits_except_plan_files` test carried a comment asserting that
+  `write` mapped to `edit` at gate time, which was never true.
+
 ## [0.13.0] - 2026-07-19
 
 ### Removed

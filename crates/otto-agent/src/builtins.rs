@@ -119,6 +119,15 @@ pub fn plan() -> AgentInfo {
             "edit": {
                 "*": "deny",
                 ".otto/plans/*.md": "allow"
+            },
+            // The `write` tool asks its own `write` permission (write.rs:71),
+            // so the `edit` key above does not cover it; without this key it
+            // falls through to the `"*": "allow"` in `defaults()` and plan
+            // mode can write arbitrary files. `apply_patch` needs no key — it
+            // asks `edit` (apply_patch.rs:215).
+            "write": {
+                "*": "deny",
+                ".otto/plans/*.md": "allow"
             }
         })),
         model: None,
@@ -307,12 +316,28 @@ mod tests {
 
     #[test]
     fn plan_denies_edits_except_plan_files() {
-        // The write/apply_patch tools map to the `edit` permission at gate
-        // time; the ruleset only carries the `edit` key (agent.ts:171-175).
+        // `apply_patch` asks the `edit` permission at gate time
+        // (apply_patch.rs:215), so the `edit` key covers it. The `write` tool
+        // asks its own `write` permission (write.rs:71), so the ruleset must
+        // carry both keys — see `plan_denies_write_tool_outside_plan_files`.
         let rs = plan().permission;
         assert_eq!(eval(&rs, "edit", "src/main.rs"), Action::Deny);
         assert_eq!(eval(&rs, "edit", ".otto/plans/design.md"), Action::Allow);
         assert_eq!(eval(&rs, "plan_exit", "*"), Action::Allow);
+    }
+
+    /// Regression: plan mode's edit-deny was bypassable via the `write` tool.
+    ///
+    /// `WriteTool` asks `permission: "write"` (write.rs:71), not `"edit"`, and
+    /// `defaults()` is `"*": "allow"` — so with only an `edit` key in the
+    /// ruleset, `write` fell through to the default allow and plan mode could
+    /// create or overwrite arbitrary files.
+    #[test]
+    fn plan_denies_write_tool_outside_plan_files() {
+        let rs = plan().permission;
+        assert_eq!(eval(&rs, "write", "src/main.rs"), Action::Deny);
+        assert_eq!(eval(&rs, "write", "Cargo.toml"), Action::Deny);
+        assert_eq!(eval(&rs, "write", ".otto/plans/design.md"), Action::Allow);
     }
 
     /// The ruleset ALLOWS writing `.otto/plans/*.md`, but without a system
