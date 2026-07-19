@@ -696,6 +696,30 @@ impl App {
             KeyCode::PageUp => Some(Msg::ScrollUp),
             KeyCode::PageDown => Some(Msg::ScrollDown),
             KeyCode::End if self.input.is_empty() => Some(Msg::ScrollBottom),
+            KeyCode::Left => {
+                self.input.move_left();
+                None
+            }
+            KeyCode::Right => {
+                self.input.move_right();
+                None
+            }
+            KeyCode::Up => {
+                self.input.move_up(crate::view::input_inner_width(self.width));
+                None
+            }
+            KeyCode::Down => {
+                self.input.move_down(crate::view::input_inner_width(self.width));
+                None
+            }
+            KeyCode::Home => {
+                self.input.move_home();
+                None
+            }
+            KeyCode::End => {
+                self.input.move_end();
+                None
+            }
             // `@` at a word boundary opens inline file/folder completion; a
             // mid-word `@` (e.g. an email) types literally.
             KeyCode::Char('@')
@@ -2043,5 +2067,59 @@ mod tests {
         assert_eq!(app.dashboard.selected, 1);
         let out = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(out, Some(Msg::SwitchSession(id)) if id == "b"));
+    }
+
+    // ----- Task 4: arrow keys into on_key editor navigation ------------------
+
+    #[test]
+    fn arrow_keys_move_cursor_when_input_nonempty() {
+        let mut app = App::new();
+        app.width = 80;
+        for c in "hi".chars() {
+            app.input.insert(c);
+        }
+        assert_eq!(app.input.cursor(), (0, 2));
+        let out = app.on_key(key(KeyCode::Left));
+        assert!(out.is_none());
+        assert_eq!(app.input.cursor(), (0, 1));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.input.cursor(), (0, 2));
+        app.on_key(key(KeyCode::Home));
+        assert_eq!(app.input.cursor(), (0, 0));
+        app.on_key(key(KeyCode::End));
+        assert_eq!(app.input.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn up_down_still_cycle_tools_when_input_empty() {
+        let mut app = app_with_two_tools();
+        assert!(app.input.is_empty());
+        let out = app.on_key(key(KeyCode::Up));
+        assert!(out.is_none());
+        assert!(app.tool_cursor.is_some(), "Up on empty input must still select a tool");
+    }
+
+    #[test]
+    fn end_still_scrolls_bottom_when_input_empty() {
+        let mut app = App::new();
+        assert!(app.input.is_empty());
+        let out = app.on_key(key(KeyCode::End));
+        assert!(matches!(out, Some(crate::state::Msg::ScrollBottom)));
+    }
+
+    #[test]
+    fn up_down_wrap_aware_using_app_width() {
+        let mut app = App::new();
+        app.width = 6; // input_inner_width(6) leaves very little room; use a
+                       // deliberately narrow value paired with a long line below
+                       // so it soft-wraps across at least two visual rows.
+        for c in "abcdefghij".chars() {
+            app.input.insert(c);
+        }
+        app.input.move_home();
+        app.on_key(key(KeyCode::Down));
+        let (row, col) = app.input.cursor();
+        assert_eq!(row, 0); // still one logical line
+        assert!(col > 0, "Down must have advanced the cursor into the wrapped tail");
     }
 }
