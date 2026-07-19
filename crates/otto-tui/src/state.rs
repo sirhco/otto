@@ -2104,7 +2104,13 @@ impl App {
                 self.dashboard.peek = self.dashboard.derive_peek();
             }
             Msg::DashboardTogglePin => {
-                if let Some(row) = self.dashboard.rows.get(self.dashboard.selected) {
+                if let Some(row) = self.dashboard.rows.get(self.dashboard.selected)
+                    && !row.indent
+                {
+                    // `apply_pin_and_filter` only partitions primary rows —
+                    // pinning a child row would silently do nothing (no
+                    // reorder, no glyph, see view.rs), so skip it entirely
+                    // rather than let its id pollute `pinned` for no effect.
                     let id = row.session.id.clone();
                     if !self.dashboard.pinned.remove(&id) {
                         self.dashboard.pinned.insert(id.clone());
@@ -6275,6 +6281,38 @@ mod tests {
         // Toggling again unpins it.
         app.update(Msg::DashboardTogglePin);
         assert!(!app.dashboard.pinned.contains("b"));
+    }
+
+    #[test]
+    fn dashboard_toggle_pin_on_child_row_is_a_no_op() {
+        // `apply_pin_and_filter` only partitions primary rows, so pinning an
+        // indented child would silently do nothing (no reorder, no glyph) —
+        // the toggle must skip it rather than let its id sit uselessly in
+        // `pinned`.
+        let mut app = App::new();
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session("parent", 30, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session("child", 20, false, None),
+                status: DashboardStatus::Idle,
+                indent: true,
+            },
+        ];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
+        app.dashboard.selected = 1; // "child"
+        app.update(Msg::DashboardTogglePin);
+        assert!(
+            app.dashboard.pinned.is_empty(),
+            "toggling pin on a child row must not insert its id"
+        );
+        assert_eq!(
+            app.dashboard.selected, 1,
+            "selection is unchanged since nothing was toggled"
+        );
     }
 
     #[test]

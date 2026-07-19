@@ -606,6 +606,12 @@ fn dispatch(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Msg>, msg
         && matches!(app.overlay, Overlay::Dashboard)
         && (dashboard_poll_due(app.tick) || app.dashboard.needs_refetch)
     {
+        // Clear at spawn time, not just on `DashboardLoaded` fold: the flag
+        // is level-triggered (stays true until a load lands), so leaving it
+        // set here would spawn another redundant fetch on every intervening
+        // tick until this one resolves. A fetch that fails just falls back
+        // to the next poll-due tick, same as any other dropped/missed event.
+        app.dashboard.needs_refetch = false;
         let client = client.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
@@ -1046,6 +1052,14 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
 
         dispatch(&mut app, &client, &tx, Msg::Tick);
+
+        // Cleared synchronously at spawn time, not left set until the fetch
+        // resolves — otherwise every intervening tick before the fetch lands
+        // would spawn another redundant one (the flag is level-triggered).
+        assert!(
+            !app.dashboard.needs_refetch,
+            "needs_refetch must clear as soon as the fetch is spawned"
+        );
 
         let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
