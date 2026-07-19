@@ -1,7 +1,7 @@
 //! The hand-rolled multiline prompt editor and key routing.
 
 use crate::state::{
-    App, DashboardPeek, DashboardStatus, LoopAction, Msg, Overlay, QuestionReplyKind,
+    App, DashboardMode, DashboardPeek, DashboardStatus, LoopAction, Msg, Overlay, QuestionReplyKind,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -402,6 +402,39 @@ impl App {
                 }
                 return None;
             }
+            // Dashboard sub-modes (Filter/NewSession): full-capture block,
+            // mirroring the Search/TextInput blocks above. `Browsing` never
+            // reaches here, so it falls through unaffected to the generic
+            // dashboard bindings (y/a/n/digits/Up/Down/Enter) below.
+            if matches!(self.overlay, Overlay::Dashboard)
+                && !matches!(self.dashboard.mode, DashboardMode::Browsing)
+            {
+                match key.code {
+                    // Filter's "buffer" is `dashboard.filter` itself, so
+                    // clearing back to Browsing also clears and re-applies
+                    // an empty filter — otherwise the last typed filter
+                    // would silently linger applied while looking dismissed.
+                    // NewSession's buffer lives only in the enum variant, so
+                    // resetting `mode` already discards it.
+                    KeyCode::Esc => {
+                        if matches!(self.dashboard.mode, DashboardMode::Filter) {
+                            self.dashboard_apply_filter(String::new());
+                        }
+                        self.dashboard.mode = DashboardMode::Browsing;
+                    }
+                    KeyCode::Enter => return self.dashboard_confirm_mode(),
+                    KeyCode::Backspace => self.dashboard_mode_backspace(),
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        self.dashboard_mode_char(c);
+                    }
+                    _ => {}
+                }
+                return None;
+            }
             match key.code {
                 KeyCode::Esc if self.is_question() => return self.question_cancel(),
                 KeyCode::Esc => self.close_overlay(),
@@ -431,6 +464,20 @@ impl App {
                     return None;
                 }
                 KeyCode::Enter if self.is_dashboard() => return self.dashboard_open_selected(),
+                // `self.is_dashboard()` alone is a sufficient guard here (the
+                // scoped block above already intercepts every key once
+                // `dashboard.mode` leaves `Browsing`, so these three only
+                // ever fire while Browsing), but keep the reasoning close by
+                // rather than relying on that other block's shape silently.
+                KeyCode::Char('/') if self.is_dashboard() => {
+                    self.dashboard.mode = DashboardMode::Filter;
+                    return None;
+                }
+                KeyCode::Char('c') if self.is_dashboard() => {
+                    self.dashboard.mode = DashboardMode::NewSession(String::new());
+                    return None;
+                }
+                KeyCode::Char('p') if self.is_dashboard() => return Some(Msg::DashboardTogglePin),
                 KeyCode::Up if self.is_question() => {
                     self.question_move_highlight(-1);
                 }
@@ -628,6 +675,81 @@ impl App {
             id: q.id.clone(),
             reply: QuestionReplyKind::Answered(vec![vec![index]]),
         })
+    }
+
+    /// Apply a new filter string via `Msg::DashboardFilterChanged` rather
+    /// than re-deriving `apply_pin_and_filter`/selection/peek logic here —
+    /// that arm (`App::update`, already exercised by
+    /// `dashboard_filter_changed_applies_live_and_preserves_selection`)
+    /// re-applies pin/filter ordering and re-selects the same session id
+    /// (or resets to row 0) on every call, which is exactly what live,
+    /// per-keystroke filtering needs.
+    fn dashboard_apply_filter(&mut self, filter: String) {
+        self.update(Msg::DashboardFilterChanged(filter));
+    }
+
+    /// Append `c` to the current dashboard sub-mode's buffer: `Filter`'s
+    /// buffer is `dashboard.filter` itself (routed through
+    /// `dashboard_apply_filter` so it re-derives live); `NewSession`'s
+    /// buffer is the string carried inline in the enum variant.
+    fn dashboard_mode_char(&mut self, c: char) {
+        match &self.dashboard.mode {
+            DashboardMode::Filter => {
+                let mut filter = self.dashboard.filter.clone();
+                filter.push(c);
+                self.dashboard_apply_filter(filter);
+            }
+            DashboardMode::NewSession(title) => {
+                let mut title = title.clone();
+                title.push(c);
+                self.dashboard.mode = DashboardMode::NewSession(title);
+            }
+            DashboardMode::Browsing => {}
+        }
+    }
+
+    /// Drop the last character of the current dashboard sub-mode's buffer
+    /// (see `dashboard_mode_char`).
+    fn dashboard_mode_backspace(&mut self) {
+        match &self.dashboard.mode {
+            DashboardMode::Filter => {
+                let mut filter = self.dashboard.filter.clone();
+                filter.pop();
+                self.dashboard_apply_filter(filter);
+            }
+            DashboardMode::NewSession(title) => {
+                let mut title = title.clone();
+                title.pop();
+                self.dashboard.mode = DashboardMode::NewSession(title);
+            }
+            DashboardMode::Browsing => {}
+        }
+    }
+
+    /// Confirm the current dashboard sub-mode. `Filter`'s filter text is
+    /// already applied live (every keystroke went through
+    /// `dashboard_apply_filter`), so Enter just commits by returning to
+    /// `Browsing` with the filter left in place. `NewSession` emits
+    /// `Msg::CreateDashboardSession` for a non-blank trimmed title — mode
+    /// reset back to `Browsing` happens once, in that message's `App::update`
+    /// arm (see its doc comment), not here, so a blank title (nothing to
+    /// submit) leaves `NewSession` untouched rather than silently discarding
+    /// what's typed.
+    fn dashboard_confirm_mode(&mut self) -> Option<Msg> {
+        match &self.dashboard.mode {
+            DashboardMode::Filter => {
+                self.dashboard.mode = DashboardMode::Browsing;
+                None
+            }
+            DashboardMode::NewSession(title) => {
+                let trimmed = title.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                Some(Msg::CreateDashboardSession(trimmed.to_string()))
+            }
+            DashboardMode::Browsing => None,
+        }
     }
 
     /// Produce a permission-reply intent `Msg` and close the overlay.
@@ -1452,5 +1574,239 @@ mod tests {
         // dash_single_question has 2 options (indices 0-1); '9' -> index 8.
         let out = app.on_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
         assert!(out.is_none());
+    }
+
+    fn dash_session_titled(id: &str, title: &str) -> crate::client::SessionInfo {
+        crate::client::SessionInfo {
+            id: id.into(),
+            title: Some(title.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dashboard_p_toggles_pin() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("s"),
+            status: DashboardStatus::Idle,
+            indent: false,
+        }];
+        let out = app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(matches!(out, Some(Msg::DashboardTogglePin)));
+        // Unchanged until the returned Msg is folded through `App::update`
+        // (that's the loop's job, not `on_key`'s).
+        assert!(app.dashboard.pinned.is_empty());
+    }
+
+    #[test]
+    fn dashboard_slash_opens_filter_mode() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        let out = app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(out.is_none());
+        assert_eq!(app.dashboard.mode, DashboardMode::Filter);
+    }
+
+    #[test]
+    fn dashboard_filter_typing_applies_live_and_backspace_reverts() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session_titled("a", "fix login bug"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session_titled("b", "unrelated"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+        ];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
+        app.dashboard.mode = DashboardMode::Filter;
+        for c in "bug".chars() {
+            let out = app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            assert!(out.is_none());
+        }
+        assert_eq!(app.dashboard.filter, "bug");
+        assert_eq!(
+            app.dashboard.rows.len(),
+            1,
+            "filter re-derives every keystroke"
+        );
+        assert_eq!(app.dashboard.rows[0].session.id, "a");
+        assert!(matches!(app.dashboard.mode, DashboardMode::Filter));
+
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.dashboard.filter, "bu");
+        assert_eq!(
+            app.dashboard.rows.len(),
+            1,
+            "backspace re-applies the shortened filter live too"
+        );
+    }
+
+    #[test]
+    fn dashboard_filter_esc_clears_filter_and_exits_to_browsing() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session_titled("a", "fix login bug"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session_titled("b", "unrelated"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+        ];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
+        app.dashboard.mode = DashboardMode::Filter;
+        for c in "bug".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(app.dashboard.rows.len(), 1);
+        let out = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(out.is_none());
+        assert_eq!(app.dashboard.mode, DashboardMode::Browsing);
+        assert!(app.dashboard.filter.is_empty(), "Esc clears the filter");
+        assert_eq!(
+            app.dashboard.rows.len(),
+            2,
+            "clearing the filter restores both rows"
+        );
+    }
+
+    #[test]
+    fn dashboard_filter_enter_commits_filter_and_exits_to_browsing() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session_titled("a", "fix login bug"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session_titled("b", "unrelated"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+        ];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
+        app.dashboard.mode = DashboardMode::Filter;
+        for c in "bug".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let out = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(out.is_none());
+        assert_eq!(app.dashboard.mode, DashboardMode::Browsing);
+        assert_eq!(
+            app.dashboard.filter, "bug",
+            "Enter commits the filter rather than clearing it"
+        );
+        assert_eq!(app.dashboard.rows.len(), 1);
+    }
+
+    #[test]
+    fn dashboard_c_opens_new_session_mode() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        let out = app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(out.is_none());
+        assert_eq!(app.dashboard.mode, DashboardMode::NewSession(String::new()));
+    }
+
+    #[test]
+    fn dashboard_new_session_typing_and_backspace_edit_the_title() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.mode = DashboardMode::NewSession(String::new());
+        for c in "abc".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.dashboard.mode,
+            DashboardMode::NewSession("abc".to_string())
+        );
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(
+            app.dashboard.mode,
+            DashboardMode::NewSession("ab".to_string())
+        );
+    }
+
+    #[test]
+    fn dashboard_new_session_enter_emits_create_msg_without_resetting_mode() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.mode = DashboardMode::NewSession("my title".to_string());
+        let out = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            out,
+            Some(Msg::CreateDashboardSession(t)) if t == "my title"
+        ));
+        // Mode reset is `Msg::CreateDashboardSession`'s job in `App::update`
+        // (see its doc comment) — `on_key`/`dashboard_confirm_mode` must not
+        // also reset it, or a mid-flight submit would clobber the buffer
+        // twice for no reason.
+        assert_eq!(
+            app.dashboard.mode,
+            DashboardMode::NewSession("my title".to_string())
+        );
+    }
+
+    #[test]
+    fn dashboard_new_session_enter_blank_title_is_noop() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.mode = DashboardMode::NewSession("   ".to_string());
+        let out = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(out.is_none());
+        assert_eq!(
+            app.dashboard.mode,
+            DashboardMode::NewSession("   ".to_string()),
+            "blank title is not submitted, buffer left untouched"
+        );
+    }
+
+    #[test]
+    fn dashboard_new_session_esc_discards_and_exits_to_browsing() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.mode = DashboardMode::NewSession("abc".to_string());
+        let out = app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(out.is_none());
+        assert_eq!(app.dashboard.mode, DashboardMode::Browsing);
+    }
+
+    #[test]
+    fn dashboard_browsing_bindings_still_work_unchanged() {
+        // Guards against a Filter/NewSession regression accidentally
+        // swallowing Browsing-mode's arrows/Enter/y/digit bindings.
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session("a"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session("b"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+        ];
+        assert!(matches!(app.dashboard.mode, DashboardMode::Browsing));
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.dashboard.selected, 1);
+        let out = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(out, Some(Msg::SwitchSession(id)) if id == "b"));
     }
 }

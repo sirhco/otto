@@ -279,18 +279,13 @@ pub(crate) enum DashboardPeek {
 }
 
 /// Which input mode the dashboard overlay is currently in (Task 6 routes
-/// keys through this; this task only defines the shape). `NewSession`
-/// carries its own in-progress typed buffer inline rather than a separate
-/// field on `DashboardState` that would be meaningless in the other two
-/// modes. `Filter`'s live-typed text lives directly in
-/// `DashboardState.filter` instead (so filtering updates live as you type,
-/// no separate buffer to keep in sync — `Msg::DashboardFilterChanged` sets
-/// `filter` directly).
-// `Filter`/`NewSession` are only constructed by this task's own tests today —
-// Task 6's key handling gets the first real caller (`/` and `c` respectively),
-// same pattern as `latest_message_text`'s now-removed `#[allow(dead_code)]`.
+/// keys through this). `NewSession` carries its own in-progress typed
+/// buffer inline rather than a separate field on `DashboardState` that
+/// would be meaningless in the other two modes. `Filter`'s live-typed text
+/// lives directly in `DashboardState.filter` instead (so filtering updates
+/// live as you type, no separate buffer to keep in sync —
+/// `Msg::DashboardFilterChanged` sets `filter` directly).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub(crate) enum DashboardMode {
     #[default]
     Browsing,
@@ -307,6 +302,14 @@ pub(crate) enum DashboardMode {
 /// `picker_move`/`picker_confirm`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DashboardState {
+    /// The full, unfiltered row list as last built by `build_dashboard_rows`
+    /// (kept in sync by any in-place push/status mutation too) — `rows` is
+    /// always re-derived from this via `apply_pin_and_filter`, never
+    /// filtered in place itself. This is what lets narrowing or clearing
+    /// `filter` (or toggling `pinned`) instantly recover rows a stricter
+    /// filter had hidden, without waiting for the next poll to rebuild
+    /// from scratch.
+    pub(crate) all_rows: Vec<DashboardRow>,
     pub(crate) rows: Vec<DashboardRow>,
     pub(crate) selected: usize,
     pub(crate) peek: DashboardPeek,
@@ -1160,7 +1163,18 @@ impl App {
         ) {
             return;
         }
-        self.dashboard.rows[idx].status = status;
+        self.dashboard.rows[idx].status = status.clone();
+        // Keep `all_rows` (the source `rows` is re-derived from on every
+        // filter/pin change) from reverting this push-driven flip later.
+        let sid = self.dashboard.rows[idx].session.id.clone();
+        if let Some(r) = self
+            .dashboard
+            .all_rows
+            .iter_mut()
+            .find(|r| r.session.id == sid)
+        {
+            r.status = status;
+        }
         if idx == self.dashboard.selected {
             self.dashboard.peek = self.dashboard.derive_peek();
         }
@@ -1841,13 +1855,14 @@ impl App {
                     .rows
                     .get(self.dashboard.selected)
                     .map(|r| (r.session.id.clone(), std::mem::discriminant(&r.status)));
+                self.dashboard.all_rows = build_dashboard_rows(
+                    &sessions,
+                    &permissions,
+                    &questions,
+                    self.session_id.as_deref(),
+                );
                 self.dashboard.rows = apply_pin_and_filter(
-                    build_dashboard_rows(
-                        &sessions,
-                        &permissions,
-                        &questions,
-                        self.session_id.as_deref(),
-                    ),
+                    self.dashboard.all_rows.clone(),
                     &self.dashboard.pinned,
                     &self.dashboard.filter,
                 );
@@ -1920,6 +1935,18 @@ impl App {
                     |r| matches!(&r.status, DashboardStatus::AwaitingPermission(p) if p.id == id),
                 ) {
                     self.dashboard.rows[idx].status = DashboardStatus::Idle;
+                    // Keep `all_rows` (the source `rows` is re-derived from on
+                    // every filter/pin change) from reverting this optimistic
+                    // flip back to stale `AwaitingPermission` later.
+                    let sid = self.dashboard.rows[idx].session.id.clone();
+                    if let Some(r) = self
+                        .dashboard
+                        .all_rows
+                        .iter_mut()
+                        .find(|r| r.session.id == sid)
+                    {
+                        r.status = DashboardStatus::Idle;
+                    }
                     // The peek panel was showing `DashboardPeek::Permission` for
                     // this row (if it's the selected one) — that variant is now
                     // stale (the row is `Idle`), so re-derive it. `derive_peek`
@@ -1936,6 +1963,16 @@ impl App {
                     |r| matches!(&r.status, DashboardStatus::AwaitingQuestion(q) if q.id == id),
                 ) {
                     self.dashboard.rows[idx].status = DashboardStatus::Idle;
+                    // See the matching `all_rows` comment in `PermissionReply` above.
+                    let sid = self.dashboard.rows[idx].session.id.clone();
+                    if let Some(r) = self
+                        .dashboard
+                        .all_rows
+                        .iter_mut()
+                        .find(|r| r.session.id == sid)
+                    {
+                        r.status = DashboardStatus::Idle;
+                    }
                     // See the matching comment in `PermissionReply` above.
                     if idx == self.dashboard.selected {
                         self.dashboard.peek = self.dashboard.derive_peek();
@@ -2044,13 +2081,13 @@ impl App {
             }
             Msg::DashboardSessionCreated(session) => {
                 let sid = session.id.clone();
-                self.dashboard.rows.push(DashboardRow {
+                self.dashboard.all_rows.push(DashboardRow {
                     session,
                     status: DashboardStatus::Idle,
                     indent: false,
                 });
                 self.dashboard.rows = apply_pin_and_filter(
-                    std::mem::take(&mut self.dashboard.rows),
+                    self.dashboard.all_rows.clone(),
                     &self.dashboard.pinned,
                     &self.dashboard.filter,
                 );
@@ -2073,7 +2110,7 @@ impl App {
                         self.dashboard.pinned.insert(id.clone());
                     }
                     self.dashboard.rows = apply_pin_and_filter(
-                        std::mem::take(&mut self.dashboard.rows),
+                        self.dashboard.all_rows.clone(),
                         &self.dashboard.pinned,
                         &self.dashboard.filter,
                     );
@@ -2096,7 +2133,7 @@ impl App {
                     .get(self.dashboard.selected)
                     .map(|r| r.session.id.clone());
                 self.dashboard.rows = apply_pin_and_filter(
-                    std::mem::take(&mut self.dashboard.rows),
+                    self.dashboard.all_rows.clone(),
                     &self.dashboard.pinned,
                     &self.dashboard.filter,
                 );
@@ -6219,6 +6256,7 @@ mod tests {
                 indent: false,
             },
         ];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
         app.dashboard.selected = 1; // "b"
         app.update(Msg::DashboardTogglePin);
         assert!(app.dashboard.pinned.contains("b"));
@@ -6254,6 +6292,7 @@ mod tests {
                 indent: false,
             },
         ];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
         app.dashboard.selected = 0; // "alpha"
         app.dashboard.peek = DashboardPeek::Message("alpha's message".into());
         app.update(Msg::DashboardFilterChanged("bug".into()));
@@ -6279,6 +6318,7 @@ mod tests {
             status: DashboardStatus::Idle,
             indent: false,
         }];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
         let new_session = dash_session("new", 20, false, None);
         app.update(Msg::DashboardSessionCreated(new_session));
         assert_eq!(app.dashboard.rows.len(), 2);
