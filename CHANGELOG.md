@@ -4,6 +4,25 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.12.0] - 2026-07-19
+
+### Added
+
+- **`otto tui`'s prompt editor gains cursor navigation and undo/redo.**
+  Left/Right/Up/Down/Home/End now move the cursor (Up/Down are
+  wrap-aware, crossing soft-wrapped and logical lines with a sticky
+  preferred column) — previously arrow keys did nothing once the input
+  had text. `ctrl+_`/`ctrl+shift+_` undo/redo edits, batching runs of
+  typing into a single step.
+
+### Fixed
+
+- **Anthropic OAuth credentials (`otto auth login anthropic`) now
+  authenticate correctly.** The Claude Pro/Max access token was being
+  sent through the same `x-api-key` header as a plain API key, 401ing
+  every inference call; it now sends `Authorization: Bearer <token>`
+  plus the `anthropic-beta: oauth-2025-04-20` header the grant requires.
+
 ## [0.11.0] - 2026-07-18
 
 ### Added
