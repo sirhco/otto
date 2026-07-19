@@ -463,6 +463,21 @@ impl App {
             self.toggle_workflow_status();
             return None;
         }
+        // Global: undo/redo the main prompt buffer. Gated to no-overlay
+        // (like ctrl+k/ctrl+f) — palette/file-picker/mention overlays have
+        // their own text that Editor's undo stack doesn't track. Ctrl+Z and
+        // Ctrl+Y are already taken (suspend, copy-last-message), so this
+        // uses the Emacs/readline Ctrl+_ convention instead.
+        if key.code == KeyCode::Char('_') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if matches!(self.overlay, Overlay::None) {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.input.redo();
+                } else {
+                    self.input.undo();
+                }
+            }
+            return None;
+        }
         // Overlay-scoped keys.
         if !matches!(self.overlay, Overlay::None) {
             if matches!(self.overlay, Overlay::Files(_)) {
@@ -2304,5 +2319,47 @@ mod tests {
             e.undo();
         }
         assert!(!e.is_empty(), "undo stack cap must have evicted the oldest entries");
+    }
+
+    // ----- Task 6: wire Ctrl+_/Ctrl+Shift+_ into on_key ---------------------
+
+    fn ctrl_underscore() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL)
+    }
+
+    fn ctrl_shift_underscore() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn ctrl_underscore_undoes_last_edit() {
+        let mut app = App::new();
+        app.input.insert('a');
+        let out = app.on_key(ctrl_underscore());
+        assert!(out.is_none());
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn ctrl_shift_underscore_redoes() {
+        let mut app = App::new();
+        app.input.insert('a');
+        app.on_key(ctrl_underscore());
+        assert!(app.input.is_empty());
+        let out = app.on_key(ctrl_shift_underscore());
+        assert!(out.is_none());
+        assert_eq!(app.input.text(), "a");
+    }
+
+    #[test]
+    fn ctrl_underscore_is_ignored_while_an_overlay_is_open() {
+        let mut app = App::new();
+        app.input.insert('a');
+        app.open_palette();
+        app.on_key(ctrl_underscore());
+        // The palette overlay swallowed the key (Overlay::Palette is not
+        // Overlay::None); the main Editor's "a" is untouched either way since
+        // undo was gated off.
+        assert_eq!(app.input.text(), "a");
     }
 }
