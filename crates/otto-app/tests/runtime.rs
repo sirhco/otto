@@ -555,12 +555,11 @@ async fn turn_timeout_aborts_a_hung_run() {
     let joined = tokio::time::timeout(std::time::Duration::from_secs(10), handle.join)
         .await
         .expect("run must end well before 10s — the 1s turn timeout fires");
-    let info = joined.expect("join").expect("graceful interrupt, not an error");
+    let info = joined
+        .expect("join")
+        .expect("graceful interrupt, not an error");
     let a = info.as_assistant().expect("assistant");
-    assert!(
-        a.time.completed.is_some(),
-        "aborted assistant is finalized"
-    );
+    assert!(a.time.completed.is_some(), "aborted assistant is finalized");
 }
 
 // -- hook wiring end-to-end ---------------------------------------------------

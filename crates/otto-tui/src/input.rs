@@ -818,11 +818,13 @@ impl App {
                 None
             }
             KeyCode::Up => {
-                self.input.move_up(crate::view::input_inner_width(self.width));
+                self.input
+                    .move_up(crate::view::input_inner_width(self.width));
                 None
             }
             KeyCode::Down => {
-                self.input.move_down(crate::view::input_inner_width(self.width));
+                self.input
+                    .move_down(crate::view::input_inner_width(self.width));
                 None
             }
             KeyCode::Home => {
@@ -1626,8 +1628,8 @@ mod tests {
         let mut e = Editor::new();
         for c in "abcdefgh".chars() {
             e.insert(c); // wraps to 2 visual rows at width 4; cursor naturally
-                         // ends at (1,4) — the exact end-of-row edge case that
-                         // triggered the bug (target_col == fragment width).
+            // ends at (1,4) — the exact end-of-row edge case that
+            // triggered the bug (target_col == fragment width).
         }
         assert_eq!(e.cursor_visual(4), (1, 4));
         e.move_up(4);
@@ -2209,7 +2211,10 @@ mod tests {
         assert!(app.input.is_empty());
         let out = app.on_key(key(KeyCode::Up));
         assert!(out.is_none());
-        assert!(app.tool_cursor.is_some(), "Up on empty input must still select a tool");
+        assert!(
+            app.tool_cursor.is_some(),
+            "Up on empty input must still select a tool"
+        );
     }
 
     #[test]
@@ -2224,8 +2229,8 @@ mod tests {
     fn up_down_wrap_aware_using_app_width() {
         let mut app = App::new();
         app.width = 6; // input_inner_width(6) leaves very little room; use a
-                       // deliberately narrow value paired with a long line below
-                       // so it soft-wraps across at least two visual rows.
+        // deliberately narrow value paired with a long line below
+        // so it soft-wraps across at least two visual rows.
         for c in "abcdefghij".chars() {
             app.input.insert(c);
         }
@@ -2233,7 +2238,10 @@ mod tests {
         app.on_key(key(KeyCode::Down));
         let (row, col) = app.input.cursor();
         assert_eq!(row, 0); // still one logical line
-        assert!(col > 0, "Down must have advanced the cursor into the wrapped tail");
+        assert!(
+            col > 0,
+            "Down must have advanced the cursor into the wrapped tail"
+        );
     }
 
     #[test]
@@ -2318,7 +2326,10 @@ mod tests {
         for _ in 0..150 {
             e.undo();
         }
-        assert!(!e.is_empty(), "undo stack cap must have evicted the oldest entries");
+        assert!(
+            !e.is_empty(),
+            "undo stack cap must have evicted the oldest entries"
+        );
     }
 
     // ----- Task 6: wire Ctrl+_/Ctrl+Shift+_ into on_key ---------------------
@@ -2328,7 +2339,10 @@ mod tests {
     }
 
     fn ctrl_shift_underscore() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        KeyEvent::new(
+            KeyCode::Char('_'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )
     }
 
     #[test]

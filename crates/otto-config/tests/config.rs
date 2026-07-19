@@ -113,8 +113,16 @@ fn parses_and_merges_hooks_config() {
     .unwrap();
     let merged = merge(base, over);
     let merged_hooks = merged.hooks.expect("hooks present after merge");
-    assert_eq!(merged_hooks.pre_tool_use.len(), 1, "base's pre_tool_use survives the merge");
-    assert_eq!(merged_hooks.post_tool_use.len(), 1, "override's post_tool_use is present");
+    assert_eq!(
+        merged_hooks.pre_tool_use.len(),
+        1,
+        "base's pre_tool_use survives the merge"
+    );
+    assert_eq!(
+        merged_hooks.post_tool_use.len(),
+        1,
+        "override's post_tool_use is present"
+    );
 }
 
 #[test]

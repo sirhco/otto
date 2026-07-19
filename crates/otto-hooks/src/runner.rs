@@ -129,7 +129,10 @@ impl HookRunner {
         }
     }
 
-    async fn spawn_and_read(cmd: &HookCommand, event: &HookEvent) -> Result<HookVerdict, HookError> {
+    async fn spawn_and_read(
+        cmd: &HookCommand,
+        event: &HookEvent,
+    ) -> Result<HookVerdict, HookError> {
         let payload = serde_json::to_vec(&event.to_stdin_json())?;
         let mut child = tokio::process::Command::new("sh")
             .arg("-c")
@@ -288,8 +291,8 @@ mod tests {
     #[tokio::test]
     async fn timeout_kills_process_quickly() {
         // Create a unique marker file path to prove process termination.
-        let marker = std::env::temp_dir()
-            .join(format!("otto-hooks-test-marker-{}", std::process::id()));
+        let marker =
+            std::env::temp_dir().join(format!("otto-hooks-test-marker-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker); // clean slate
 
         let cfg = cfg_with_pre_tool_use(vec![HookCommand {
@@ -322,7 +325,8 @@ mod tests {
     #[tokio::test]
     async fn nonzero_exit_with_valid_json_stdout_is_honored() {
         let cfg = cfg_with_pre_tool_use(vec![HookCommand {
-            command: "echo '{\"decision\":\"deny\",\"reason\":\"hook failed\"}'; exit 1".to_string(),
+            command: "echo '{\"decision\":\"deny\",\"reason\":\"hook failed\"}'; exit 1"
+                .to_string(),
             timeout_ms: None,
         }]);
         let verdict = HookRunner::new(cfg).fire(pre_tool_use_event()).await;
@@ -338,7 +342,8 @@ mod tests {
         // would deadlock on large payloads (when payload > pipe buffer size).
         // The hook outputs immediately, then consumes stdin.
         // Wrapped in a timeout to ensure it doesn't hang.
-        let large_args = serde_json::json!({"command": "echo hi; large_payload_here ".repeat(1000)});
+        let large_args =
+            serde_json::json!({"command": "echo hi; large_payload_here ".repeat(1000)});
         let event = HookEvent::PreToolUse {
             session_id: SessionId::from("ses_test"),
             tool_id: "bash".to_string(),
@@ -350,7 +355,8 @@ mod tests {
             // Without concurrent read, the large stdin payload would fill the
             // pipe buffer, blocking the parent's write, while the parent is blocked
             // waiting for this command to finish (which is blocked reading stdin).
-            command: "sh -c 'echo \"{\\\"decision\\\":\\\"allow\\\"}\" >&1; cat > /dev/null'".to_string(),
+            command: "sh -c 'echo \"{\\\"decision\\\":\\\"allow\\\"}\" >&1; cat > /dev/null'"
+                .to_string(),
             timeout_ms: Some(5000), // generous timeout
         }]);
         let start = std::time::Instant::now();

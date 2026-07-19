@@ -562,7 +562,10 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, R
             .get_session(session_id)
             .await?
             .and_then(|s| s.metadata)
-            .and_then(|m| m.get("hookContext").and_then(|v| v.as_str().map(str::to_string)));
+            .and_then(|m| {
+                m.get("hookContext")
+                    .and_then(|v| v.as_str().map(str::to_string))
+            });
 
         let msgs = filter_compacted(cfg.store.messages_with_parts(session_id).await?);
         let last_user = latest(&msgs)
@@ -594,16 +597,13 @@ pub async fn run_loop(cfg: &RunConfig, session_id: &SessionId) -> Result<Info, R
         match verdict.decision {
             Decision::Allow => {}
             Decision::Deny => {
-                return Err(RunError::HookDenied(verdict.reason.clone().unwrap_or_else(|| {
-                    "blocked by user_prompt_submit hook".to_string()
-                })));
+                return Err(RunError::HookDenied(verdict.reason.clone().unwrap_or_else(
+                    || "blocked by user_prompt_submit hook".to_string(),
+                )));
             }
             Decision::Ask => {
-                let req = otto_tools::build_hook_permission_request(
-                    "user_prompt_submit",
-                    &verdict,
-                    None,
-                );
+                let req =
+                    otto_tools::build_hook_permission_request("user_prompt_submit", &verdict, None);
                 let result = cfg.permission.ask(req).await;
                 let outcome = otto_tools::interpret_hook_ask_result(result, &verdict);
                 if !outcome.approved {

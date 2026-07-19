@@ -329,8 +329,7 @@ async fn stop_deny_injects_synthetic_continuation_and_reruns() {
     // A stateful shell hook: denies the first time it's called (creating a
     // marker file), allows every time after — proving exactly one
     // deny-then-continue cycle.
-    let marker =
-        std::env::temp_dir().join(format!("otto-stop-test-marker-{}", std::process::id()));
+    let marker = std::env::temp_dir().join(format!("otto-stop-test-marker-{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
     let hooks_cfg = otto_hooks::HooksConfig {
         stop: vec![otto_hooks::HookMatcherGroup {
@@ -346,7 +345,12 @@ async fn stop_deny_injects_synthetic_continuation_and_reruns() {
         ..Default::default()
     };
 
-    let mut cfg = config(store.clone(), route, ToolRegistry::new(), CancellationToken::new());
+    let mut cfg = config(
+        store.clone(),
+        route,
+        ToolRegistry::new(),
+        CancellationToken::new(),
+    );
     cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(hooks_cfg)));
 
     let info = run_loop(&cfg, &sid(SES)).await.expect("run completes");
@@ -395,17 +399,25 @@ async fn stop_ask_approved_ends_the_turn_normally() {
     turn.push(finish(FinishReason::Stop));
     let (route, calls) = ScriptedRoute::build(vec![turn]);
 
-    let mut cfg = config(store.clone(), route, ToolRegistry::new(), CancellationToken::new());
-    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
-        stop: vec![otto_hooks::HookMatcherGroup {
-            matcher: None,
-            hooks: vec![otto_hooks::HookCommand {
-                command: "echo '{\"decision\":\"ask\",\"reason\":\"confirm stop\"}'".to_string(),
-                timeout_ms: None,
+    let mut cfg = config(
+        store.clone(),
+        route,
+        ToolRegistry::new(),
+        CancellationToken::new(),
+    );
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(
+        otto_hooks::HooksConfig {
+            stop: vec![otto_hooks::HookMatcherGroup {
+                matcher: None,
+                hooks: vec![otto_hooks::HookCommand {
+                    command: "echo '{\"decision\":\"ask\",\"reason\":\"confirm stop\"}'"
+                        .to_string(),
+                    timeout_ms: None,
+                }],
             }],
-        }],
-        ..Default::default()
-    })));
+            ..Default::default()
+        },
+    )));
 
     let permission = Arc::new(Permission::new(Ruleset::new()));
     cfg.permission = Arc::new(SessionGate::new(permission.clone(), sid(SES)));
@@ -414,19 +426,35 @@ async fn stop_ask_approved_ends_the_turn_normally() {
     let cfg_for_run = cfg.clone();
     let handle = tokio::spawn(async move { run_loop(&cfg_for_run, &sid(SES)).await });
 
-    let asked = asks.recv().await.expect("Stop ask surfaces a Permission ask");
+    let asked = asks
+        .recv()
+        .await
+        .expect("Stop ask surfaces a Permission ask");
     assert_eq!(asked.permission, "hook");
     assert_eq!(asked.patterns, vec!["stop".to_string()]);
     permission.reply(&asked.request_id, Reply::Once);
 
     handle.await.unwrap().expect("run completes");
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "approval ends the turn after one provider call");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "approval ends the turn after one provider call"
+    );
 
     let msgs = store.messages_with_parts(&sid(SES)).await.expect("history");
     let has_synthetic = msgs.iter().flat_map(|m| &m.parts).any(|p| {
-        matches!(&p.kind, PartKind::Text { synthetic: Some(true), .. })
+        matches!(
+            &p.kind,
+            PartKind::Text {
+                synthetic: Some(true),
+                ..
+            }
+        )
     });
-    assert!(!has_synthetic, "approval must not synthesize a continuation");
+    assert!(
+        !has_synthetic,
+        "approval must not synthesize a continuation"
+    );
 }
 
 #[tokio::test]
@@ -445,17 +473,25 @@ async fn stop_ask_rejected_injects_the_human_message_and_reruns() {
 
     let (route, calls) = ScriptedRoute::build(vec![turn1, turn2]);
 
-    let mut cfg = config(store.clone(), route, ToolRegistry::new(), CancellationToken::new());
-    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
-        stop: vec![otto_hooks::HookMatcherGroup {
-            matcher: None,
-            hooks: vec![otto_hooks::HookCommand {
-                command: "echo '{\"decision\":\"ask\",\"reason\":\"confirm stop\"}'".to_string(),
-                timeout_ms: None,
+    let mut cfg = config(
+        store.clone(),
+        route,
+        ToolRegistry::new(),
+        CancellationToken::new(),
+    );
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(
+        otto_hooks::HooksConfig {
+            stop: vec![otto_hooks::HookMatcherGroup {
+                matcher: None,
+                hooks: vec![otto_hooks::HookCommand {
+                    command: "echo '{\"decision\":\"ask\",\"reason\":\"confirm stop\"}'"
+                        .to_string(),
+                    timeout_ms: None,
+                }],
             }],
-        }],
-        ..Default::default()
-    })));
+            ..Default::default()
+        },
+    )));
 
     let permission = Arc::new(Permission::new(Ruleset::new()));
     cfg.permission = Arc::new(SessionGate::new(permission.clone(), sid(SES)));
@@ -471,11 +507,18 @@ async fn stop_ask_rejected_injects_the_human_message_and_reruns() {
             message: Some("finish the second part".to_string()),
         },
     );
-    let second = asks.recv().await.expect("second Stop ask, after the synthetic continuation");
+    let second = asks
+        .recv()
+        .await
+        .expect("second Stop ask, after the synthetic continuation");
     permission.reply(&second.request_id, Reply::Once);
 
     let info = handle.await.unwrap().expect("run completes");
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "rejected once, so two provider turns ran");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "rejected once, so two provider turns ran"
+    );
 
     let parts = parts_of(&store, info.id()).await;
     let final_text: String = parts
@@ -492,7 +535,11 @@ async fn stop_ask_rejected_injects_the_human_message_and_reruns() {
         .iter()
         .flat_map(|m| &m.parts)
         .filter_map(|p| match &p.kind {
-            PartKind::Text { text, synthetic: Some(true), .. } => Some(text.clone()),
+            PartKind::Text {
+                text,
+                synthetic: Some(true),
+                ..
+            } => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -513,16 +560,19 @@ async fn user_prompt_submit_deny_blocks_before_any_provider_call() {
     let (route, calls) = ScriptedRoute::build(vec![turn]);
 
     let mut cfg = config(store, route, ToolRegistry::new(), CancellationToken::new());
-    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
-        user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
-            matcher: None,
-            hooks: vec![otto_hooks::HookCommand {
-                command: "echo '{\"decision\":\"deny\",\"reason\":\"blocked prompt\"}'".to_string(),
-                timeout_ms: None,
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(
+        otto_hooks::HooksConfig {
+            user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
+                matcher: None,
+                hooks: vec![otto_hooks::HookCommand {
+                    command: "echo '{\"decision\":\"deny\",\"reason\":\"blocked prompt\"}'"
+                        .to_string(),
+                    timeout_ms: None,
+                }],
             }],
-        }],
-        ..Default::default()
-    })));
+            ..Default::default()
+        },
+    )));
 
     let err = run_loop(&cfg, &sid(SES)).await.expect_err("denied");
     assert_eq!(err.to_string(), "blocked prompt");
@@ -539,17 +589,25 @@ async fn user_prompt_submit_ask_approved_continues_the_turn() {
     turn.push(finish(FinishReason::Stop));
     let (route, calls) = ScriptedRoute::build(vec![turn]);
 
-    let mut cfg = config(store.clone(), route, ToolRegistry::new(), CancellationToken::new());
-    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
-        user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
-            matcher: None,
-            hooks: vec![otto_hooks::HookCommand {
-                command: "echo '{\"decision\":\"ask\",\"reason\":\"needs review\"}'".to_string(),
-                timeout_ms: None,
+    let mut cfg = config(
+        store.clone(),
+        route,
+        ToolRegistry::new(),
+        CancellationToken::new(),
+    );
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(
+        otto_hooks::HooksConfig {
+            user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
+                matcher: None,
+                hooks: vec![otto_hooks::HookCommand {
+                    command: "echo '{\"decision\":\"ask\",\"reason\":\"needs review\"}'"
+                        .to_string(),
+                    timeout_ms: None,
+                }],
             }],
-        }],
-        ..Default::default()
-    })));
+            ..Default::default()
+        },
+    )));
 
     let permission = Arc::new(Permission::new(Ruleset::new())); // default mode: ApproveEach
     cfg.permission = Arc::new(SessionGate::new(permission.clone(), sid(SES)));
@@ -567,7 +625,11 @@ async fn user_prompt_submit_ask_approved_continues_the_turn() {
     permission.reply(&asked.request_id, Reply::Once);
 
     let info = handle.await.unwrap().expect("run completes");
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "provider call made after approval");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "provider call made after approval"
+    );
 
     let parts = parts_of(&store, info.id()).await;
     let final_text: String = parts
@@ -591,16 +653,19 @@ async fn user_prompt_submit_ask_rejected_blocks_with_the_human_message() {
     let (route, calls) = ScriptedRoute::build(vec![turn]);
 
     let mut cfg = config(store, route, ToolRegistry::new(), CancellationToken::new());
-    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(otto_hooks::HooksConfig {
-        user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
-            matcher: None,
-            hooks: vec![otto_hooks::HookCommand {
-                command: "echo '{\"decision\":\"ask\",\"reason\":\"needs review\"}'".to_string(),
-                timeout_ms: None,
+    cfg.hooks = Some(Arc::new(otto_hooks::HookRunner::new(
+        otto_hooks::HooksConfig {
+            user_prompt_submit: vec![otto_hooks::HookMatcherGroup {
+                matcher: None,
+                hooks: vec![otto_hooks::HookCommand {
+                    command: "echo '{\"decision\":\"ask\",\"reason\":\"needs review\"}'"
+                        .to_string(),
+                    timeout_ms: None,
+                }],
             }],
-        }],
-        ..Default::default()
-    })));
+            ..Default::default()
+        },
+    )));
 
     let permission = Arc::new(Permission::new(Ruleset::new()));
     cfg.permission = Arc::new(SessionGate::new(permission.clone(), sid(SES)));
@@ -1153,7 +1218,11 @@ async fn retry_salvages_completed_tool_work_instead_of_replaying() {
         fn parameters_schema(&self) -> Value {
             json!({ "type": "object", "properties": { "text": { "type": "string" } } })
         }
-        async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ExecuteResult, ToolError> {
+        async fn execute(
+            &self,
+            args: Value,
+            _ctx: &ToolContext,
+        ) -> Result<ExecuteResult, ToolError> {
             self.runs.fetch_add(1, Ordering::SeqCst);
             let text = args
                 .get("text")

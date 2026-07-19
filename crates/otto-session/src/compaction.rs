@@ -27,9 +27,8 @@ use otto_llm::model::{ModelId, ProviderId};
 use otto_llm::{LLMClient, LLMError, LLMRequest, LLMResponse};
 use otto_storage::StorageError;
 use otto_storage::model::{
-    Assistant, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part, PartKind,
-    SessionId, StartEndTime, TokenCache, Tokens, ToolState, User, UserModel, UserTime,
-    new_message_id,
+    Assistant, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part, PartKind, SessionId,
+    StartEndTime, TokenCache, Tokens, ToolState, User, UserModel, UserTime, new_message_id,
     new_part_id,
 };
 
@@ -549,7 +548,10 @@ pub async fn prune(cfg: &RunConfig, session_id: &SessionId) -> Result<(), Compac
                 tool,
                 state:
                     ToolState::Completed {
-                        input, output, time, ..
+                        input,
+                        output,
+                        time,
+                        ..
                     },
                 ..
             } = &part.kind

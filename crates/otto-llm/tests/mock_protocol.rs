@@ -241,8 +241,5 @@ async fn all_garbage_stream_fails_retryably() {
         "not json either".to_string(),
     ];
     let err = client(frames).generate(request()).await.unwrap_err();
-    assert!(
-        matches!(err, LLMError::ProviderRetryable(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, LLMError::ProviderRetryable(_)), "got {err:?}");
 }

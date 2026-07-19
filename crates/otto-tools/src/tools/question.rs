@@ -72,9 +72,9 @@ impl Tool for QuestionTool {
         }
 
         match ctx.question.ask(questions.clone()).await {
-            QuestionOutcome::Cancelled => {
-                Err(ToolError::Execution("question cancelled by user".to_string()))
-            }
+            QuestionOutcome::Cancelled => Err(ToolError::Execution(
+                "question cancelled by user".to_string(),
+            )),
             QuestionOutcome::Answered(answers) => {
                 if answers.len() != questions.len() {
                     return Err(ToolError::Execution(format!(

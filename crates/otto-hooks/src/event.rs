@@ -145,20 +145,35 @@ impl HookEvent {
                 "session_id": session_id.as_str(),
                 "source": source.as_str(),
             }),
-            HookEvent::UserPromptSubmit { session_id, prompt, cwd } => json!({
+            HookEvent::UserPromptSubmit {
+                session_id,
+                prompt,
+                cwd,
+            } => json!({
                 "event": "UserPromptSubmit",
                 "session_id": session_id.as_str(),
                 "prompt": prompt,
                 "cwd": cwd.display().to_string(),
             }),
-            HookEvent::PreToolUse { session_id, tool_id, args, cwd } => json!({
+            HookEvent::PreToolUse {
+                session_id,
+                tool_id,
+                args,
+                cwd,
+            } => json!({
                 "event": "PreToolUse",
                 "session_id": session_id.as_str(),
                 "tool_id": tool_id,
                 "args": args,
                 "cwd": cwd.display().to_string(),
             }),
-            HookEvent::PostToolUse { session_id, tool_id, args, success, cwd } => json!({
+            HookEvent::PostToolUse {
+                session_id,
+                tool_id,
+                args,
+                success,
+                cwd,
+            } => json!({
                 "event": "PostToolUse",
                 "session_id": session_id.as_str(),
                 "tool_id": tool_id,
@@ -166,7 +181,10 @@ impl HookEvent {
                 "success": success,
                 "cwd": cwd.display().to_string(),
             }),
-            HookEvent::PreCompact { session_id, trigger } => json!({
+            HookEvent::PreCompact {
+                session_id,
+                trigger,
+            } => json!({
                 "event": "PreCompact",
                 "session_id": session_id.as_str(),
                 "trigger": trigger.as_str(),
@@ -175,12 +193,18 @@ impl HookEvent {
                 "event": "Stop",
                 "session_id": session_id.as_str(),
             }),
-            HookEvent::SubagentStop { session_id, parent_session_id } => json!({
+            HookEvent::SubagentStop {
+                session_id,
+                parent_session_id,
+            } => json!({
                 "event": "SubagentStop",
                 "session_id": session_id.as_str(),
                 "parent_session_id": parent_session_id.as_str(),
             }),
-            HookEvent::Notification { session_id, message } => json!({
+            HookEvent::Notification {
+                session_id,
+                message,
+            } => json!({
                 "event": "Notification",
                 "session_id": session_id.as_str(),
                 "message": message,
@@ -265,7 +289,8 @@ mod tests {
 
     #[test]
     fn verdict_parses_deny_with_reason() {
-        let v: HookVerdict = serde_json::from_str(r#"{"decision":"deny","reason":"nope"}"#).unwrap();
+        let v: HookVerdict =
+            serde_json::from_str(r#"{"decision":"deny","reason":"nope"}"#).unwrap();
         assert_eq!(v.decision, Decision::Deny);
         assert_eq!(v.reason.as_deref(), Some("nope"));
     }

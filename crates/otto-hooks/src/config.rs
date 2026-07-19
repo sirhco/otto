@@ -128,7 +128,10 @@ mod tests {
             matcher: Some("^edit$".to_string()),
             hooks: vec![],
         };
-        assert!(group.matches(None), "non-tool events ignore the matcher entirely");
+        assert!(
+            group.matches(None),
+            "non-tool events ignore the matcher entirely"
+        );
     }
 
     #[test]
@@ -174,6 +177,9 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.groups_for(crate::event::HookKind::Stop).len(), 1);
-        assert!(cfg.groups_for(crate::event::HookKind::SessionStart).is_empty());
+        assert!(
+            cfg.groups_for(crate::event::HookKind::SessionStart)
+                .is_empty()
+        );
     }
 }

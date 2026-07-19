@@ -406,7 +406,7 @@ mod tests {
                     attempt: 2,
                     max: 5,
                     delay_ms: 8000,
-            salvaged: false,
+                    salvaged: false,
                     ..
                 }
             ),

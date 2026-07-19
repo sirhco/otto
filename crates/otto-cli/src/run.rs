@@ -15,8 +15,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use otto_agent::{AgentInfo, ModelRef};
 use otto_app::{RunHandle, Runtime};
-use otto_storage::model::SessionId;
 use otto_permission::{Asked, Reply};
+use otto_storage::model::SessionId;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 

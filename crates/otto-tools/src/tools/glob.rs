@@ -87,19 +87,20 @@ impl Tool for GlobTool {
             .compile_matcher();
 
         let root = search.clone();
-        let mut found: Vec<(PathBuf, SystemTime)> = parallel_collect(root.clone(), None, move |entry| {
-            let path = entry.path();
-            if !matches(&matcher, &root, path) {
-                return Vec::new();
-            }
-            let mtime = entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            vec![(path.to_path_buf(), mtime)]
-        })
-        .await;
+        let mut found: Vec<(PathBuf, SystemTime)> =
+            parallel_collect(root.clone(), None, move |entry| {
+                let path = entry.path();
+                if !matches(&matcher, &root, path) {
+                    return Vec::new();
+                }
+                let mtime = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                vec![(path.to_path_buf(), mtime)]
+            })
+            .await;
 
         // newest-first by mtime (glob.ts sorts by mtime).
         found.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));

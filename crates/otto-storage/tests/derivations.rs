@@ -2,8 +2,8 @@
 //! (`message-v2.ts:585-601`, `521-572`).
 
 use otto_storage::model::{
-    Assistant, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part, PartKind,
-    TokenCache, Tokens, User, UserModel, UserTime, WithParts,
+    Assistant, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part, PartKind, TokenCache,
+    Tokens, User, UserModel, UserTime, WithParts,
 };
 use otto_storage::{filter_compacted, latest};
 
