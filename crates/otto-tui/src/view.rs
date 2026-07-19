@@ -42,7 +42,7 @@ pub fn view(app: &App, frame: &mut Frame) {
     let has_chip = !app.attachments.is_empty();
     let todos_h = todos_row_height(app, area.height);
     let busy = app.is_busy();
-    let input_inner_w = area.width.saturating_sub(2 + PROMPT_W);
+    let input_inner_w = input_inner_width(area.width);
     let input_h = input_height(app, input_inner_w);
     let rows = Layout::vertical([
         Constraint::Length(1),                            // header
@@ -663,6 +663,13 @@ const INPUT_CAP: u16 = 10;
 /// matching blank indent on continuation rows).
 const PROMPT_W: u16 = 2;
 
+/// Input box inner display width for a given terminal column width —
+/// shared between layout (`input_height`/`input`) and `App::on_key`'s
+/// wrap-aware cursor math, so the two never disagree about wrapping.
+pub(crate) fn input_inner_width(area_width: u16) -> u16 {
+    area_width.saturating_sub(2 + PROMPT_W)
+}
+
 /// Input-box height: wrapped visual rows plus top/bottom border, floored at 3
 /// (one content row) and capped at `INPUT_CAP`.
 fn input_height(app: &App, inner_width: u16) -> u16 {
@@ -691,7 +698,7 @@ fn input(app: &App, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let inner_w = area.width.saturating_sub(2 + PROMPT_W);
+    let inner_w = input_inner_width(area.width);
     let rows = crate::input::wrap_rows(app.input.lines(), inner_w);
     let visible = area.height.saturating_sub(2); // content rows inside the box
     let (cur_vr, cur_col) = app.input.cursor_visual(inner_w);

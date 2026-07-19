@@ -644,7 +644,7 @@ pub enum QuestionReplyKind {
 #[allow(clippy::large_enum_variant)]
 pub enum Msg {
     Key(KeyEvent),
-    Resize,
+    Resize(u16),
     SessionsLoaded(Vec<SessionInfo>),
     /// `GET /session` + `GET /permission` + `GET /question` all resolved —
     /// the dashboard's periodic poll result.
@@ -787,6 +787,10 @@ pub struct App {
     /// `None` = no selection (normal follow/scroll). See `select_*_tool`.
     pub(crate) tool_cursor: Option<usize>,
     pub input: Editor,
+    /// Current terminal column width, kept fresh by `Msg::Resize` (and an
+    /// initial grab at startup in `run`) so `on_key`'s wrap-aware cursor
+    /// movement always matches what's actually rendered.
+    pub(crate) width: u16,
     /// A terminal/stdout side effect for the event loop to perform, if any.
     /// Set by `on_key`, drained by `event_loop` (like `should_quit`).
     pub pending_action: Option<LoopAction>,
@@ -1003,6 +1007,7 @@ impl App {
             scroll: 0,
             tool_cursor: None,
             input: Editor::new(),
+            width: 80,
             pending_action: None,
             focused: true,
             title_active: false,
@@ -1925,8 +1930,9 @@ impl App {
                 }
             }
             Msg::Quit => self.should_quit = true,
-            // Key/Resize are handled in input.rs (Task 6); ignore here.
-            Msg::Key(_) | Msg::Resize => {}
+            // Key is handled in input.rs (Task 6); ignore here.
+            Msg::Key(_) => {}
+            Msg::Resize(width) => self.width = width,
             // The loop performs the HTTP call; here we optimistically mark
             // the matching dashboard row Idle (if the dashboard is tracking
             // it) — the next poll confirms it either way.

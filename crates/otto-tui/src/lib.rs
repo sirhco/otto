@@ -148,8 +148,8 @@ pub async fn run(opts: TuiOptions) -> Result<()> {
                     Event::Key(k) if k.kind == KeyEventKind::Press => {
                         let _ = tx.send(Msg::Key(k));
                     }
-                    Event::Resize(_, _) => {
-                        let _ = tx.send(Msg::Resize);
+                    Event::Resize(cols, _rows) => {
+                        let _ = tx.send(Msg::Resize(cols));
                     }
                     Event::FocusGained => {
                         let _ = tx.send(Msg::FocusChanged(true));
@@ -232,6 +232,9 @@ pub async fn run(opts: TuiOptions) -> Result<()> {
     }
 
     let mut terminal = enter_terminal()?;
+    if let Ok(size) = terminal.size() {
+        app.width = size.width;
+    }
     if let Some(hex) = app.theme.accent_hex() {
         let _ = set_cursor_color(&hex);
     }
