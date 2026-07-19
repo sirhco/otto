@@ -70,6 +70,8 @@ The struct field is `continue_`; the flag on the command line is `--continue`.
 | `login <PROVIDER>` | `provider: String` | yes | "Log in to a provider (API key or, for anthropic, OAuth)." Arg: "The provider id (e.g. `anthropic`, `openai`)." |
 | `logout <PROVIDER>` | `provider: String` | yes | "Remove a provider's stored credentials." Arg: "The provider id." |
 
+`login` also takes `--enterprise <DOMAIN>` — "GitHub Enterprise domain for `github-copilot` (e.g. `acme.ghe.com`). Routes API calls to `https://copilot-api.<domain>` instead of the public host. Ignored by other providers." See [../guide/providers.md](../guide/providers.md#enterprise).
+
 ## `otto auth`
 
 "Manage authentication credentials (alias of `providers`)." Requires a subcommand.
@@ -78,7 +80,7 @@ The struct field is `continue_`; the flag on the command line is `--continue`.
 | Subcommand | Positional | Required | Help |
 | --- | --- | --- | --- |
 | `list` | — | — | "List stored credentials (redacted)." |
-| `login <PROVIDER>` | `provider: String` | yes | "Log in to a provider." Arg: "The provider id." |
+| `login <PROVIDER>` | `provider: String` | yes | "Log in to a provider." Arg: "The provider id." Also takes `--enterprise <DOMAIN>`. |
 | `logout <PROVIDER>` | `provider: String` | yes | "Remove a provider's stored credentials." Arg: "The provider id." |
 
 `AuthCommand` is a distinct enum from `ProvidersCommand` with its own help strings — `auth list` documents itself as listing stored credentials, `providers list` as listing configured providers.

@@ -228,6 +228,12 @@ impl RouteFactory for AuthRouteFactory {
                 {
                     p = p.with_enterprise(domain);
                 }
+                // Config wins over the credential-derived enterprise host: it
+                // is the only escape hatch when that host is wrong or
+                // unreachable (corporate network, proxy-fronted Copilot).
+                if let Some(base) = override_base {
+                    p = p.with_base_url(base);
+                }
                 (Arc::from(p.route(model_id)), p.model(model_id))
             }
             other => {
@@ -270,6 +276,45 @@ impl RouteFactory for AuthRouteFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `provider.github-copilot.options.baseURL` must reach the NAMED
+    /// github-copilot arm. Regression: that arm ignored `override_base`
+    /// entirely — unlike the anthropic/openai arms — so a user whose network
+    /// cannot reach the public Copilot host had no way to redirect it and
+    /// every request died at connect, retrying forever as a transport error.
+    ///
+    /// Mirrors [`config_base_url_reaches_named_anthropic_provider`]: the
+    /// factory proves the arm accepts the override, the provider-level
+    /// assertion proves the URL join.
+    #[test]
+    fn config_base_url_reaches_named_github_copilot_provider() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "github-copilot".to_string(),
+            ProviderOverride {
+                base_url: "https://copilot.internal.acme".to_string(),
+                api_key: None,
+                model_limits: HashMap::new(),
+                project: None,
+                location: None,
+            },
+        );
+        let factory = AuthRouteFactory::new(copilot_auth(), test_transport(), providers);
+
+        let (route, _model) = factory
+            .route_for(&ModelRef::parse("github-copilot/gpt-4o"))
+            .expect("route builds with a config baseURL");
+        assert_eq!(route.id(), "openai-chat");
+
+        // The endpoint join itself, and that config beats the enterprise host.
+        let p = otto_llm::providers::Copilot::new(None, test_transport())
+            .with_enterprise("acme.ghe.com")
+            .with_base_url("https://copilot.internal.acme");
+        assert_eq!(
+            p.endpoint("gpt-4o").url(),
+            "https://copilot.internal.acme/chat/completions"
+        );
+    }
 
     /// A shared HTTP transport for tests that build a factory/provider
     /// end-to-end without touching the network.

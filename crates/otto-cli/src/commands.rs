@@ -153,7 +153,10 @@ pub async fn cmd_providers(cwd: &std::path::Path, command: ProvidersCommand) -> 
             render_providers(&runtime, &mut stdout)?;
             Ok(())
         }
-        ProvidersCommand::Login { provider } => login(&runtime, &provider).await,
+        ProvidersCommand::Login {
+            provider,
+            enterprise,
+        } => login(&runtime, &provider, enterprise.as_deref()).await,
         ProvidersCommand::Logout { provider } => logout(&runtime, &provider),
     }
 }
@@ -170,7 +173,10 @@ pub async fn cmd_auth(cwd: &std::path::Path, command: AuthCommand) -> Result<()>
             render_providers(&runtime, &mut stdout)?;
             Ok(())
         }
-        AuthCommand::Login { provider } => login(&runtime, &provider).await,
+        AuthCommand::Login {
+            provider,
+            enterprise,
+        } => login(&runtime, &provider, enterprise.as_deref()).await,
         AuthCommand::Logout { provider } => logout(&runtime, &provider),
     }
 }
@@ -211,7 +217,7 @@ pub fn render_providers(runtime: &Runtime, out: &mut dyn Write) -> io::Result<()
 /// is driven end to end: the verification URL + user code are printed, and
 /// the access-token endpoint is polled until authorised. Every other provider
 /// stores a plain API key. Requires an interactive terminal.
-async fn login(runtime: &Runtime, provider: &str) -> Result<()> {
+async fn login(runtime: &Runtime, provider: &str, enterprise: Option<&str>) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!("login requires an interactive terminal");
     }
@@ -239,7 +245,22 @@ async fn login(runtime: &Runtime, provider: &str) -> Result<()> {
     }
 
     if provider == "github-copilot" {
-        let flow = copilot::CopilotOAuth::new();
+        // Without a domain the credential's `enterprise_url` stays None and
+        // every request goes to the public Copilot host — which an enterprise
+        // network typically cannot reach, surfacing as a connect failure that
+        // the retry layer treats as transient and retries silently.
+        let mut flow = copilot::CopilotOAuth::new();
+        if let Some(domain) = enterprise {
+            let domain = domain
+                .trim()
+                .trim_start_matches("https://")
+                .trim_end_matches('/');
+            if domain.is_empty() {
+                bail!("--enterprise needs a domain, e.g. --enterprise acme.ghe.com");
+            }
+            flow = flow.with_enterprise_domain(domain);
+            println!("using GitHub Enterprise domain: {domain}");
+        }
         let start = flow
             .start_device()
             .await

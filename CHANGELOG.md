@@ -4,6 +4,38 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [Unreleased]
+
+### Added
+
+- **`otto auth login github-copilot --enterprise <domain>`.** The enterprise
+  code path existed but was unreachable: `with_enterprise_domain` had no
+  callers, so the stored credential's `enterprise_url` was always `None`, the
+  `with_enterprise` branch in the route factory never fired, and every request
+  from an enterprise account went to the public `api.githubcopilot.com`. On a
+  network that cannot reach that host this surfaced as a connect failure —
+  which is classified retryable, so it retried instead of reporting a bad
+  endpoint.
+
+### Fixed
+
+- **`provider.github-copilot.options.baseURL` is now honored.** The
+  github-copilot arm ignored the config override entirely, unlike the
+  anthropic/openai arms, so there was no way to point Copilot at a proxied or
+  non-standard endpoint. Config takes precedence over the credential-derived
+  enterprise host.
+- **Transport errors now carry their source chain.** `reqwest` renders a send
+  failure as `error sending request for url (…)` and hides whether the cause
+  was DNS, TLS, or a refused connection. Since transport failures are always
+  retryable, that detail was the difference between a diagnosable error and a
+  silent retry loop.
+
+### Changed
+
+- `Copilot::endpoint(model_id)` is now public and is the single source of truth
+  for Copilot endpoint selection — `route()` calls it, so an inspected URL is
+  always the URL the route will target.
+
 ## [0.13.1] - 2026-07-19
 
 ### Fixed

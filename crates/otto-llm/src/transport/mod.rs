@@ -92,6 +92,29 @@ fn idle_timeout_secs() -> u64 {
     parse_idle_secs(std::env::var(IDLE_TIMEOUT_ENV).ok())
 }
 
+/// Render an error together with its full source chain.
+///
+/// `reqwest`'s own `Display` for a send failure is just
+/// `error sending request for url (https://…)`, which hides whether the
+/// request died on DNS, TLS, or a refused connection — the one detail that
+/// says *why* an endpoint is unreachable. Since transport failures are always
+/// retryable, dropping that detail means a misconfigured or blocked host
+/// retries silently with nothing actionable in the logs.
+fn describe_with_sources(err: &dyn std::error::Error) -> String {
+    use std::fmt::Write as _;
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(e) = source {
+        let text = e.to_string();
+        // Skip links that add nothing over what is already rendered.
+        if !msg.contains(&text) {
+            let _ = write!(msg, ": {text}");
+        }
+        source = e.source();
+    }
+    msg
+}
+
 /// Build a [`reqwest::Client`] with a per-read idle timeout (see
 /// [`idle_timeout_secs`]) and a fixed connect timeout, falling back to an
 /// unconfigured client if building the configured one fails.
@@ -131,7 +154,7 @@ impl Transport for HttpTransport {
             let resp = builder
                 .send()
                 .await
-                .map_err(|e| LLMError::Transport(e.to_string()))?;
+                .map_err(|e| LLMError::Transport(describe_with_sources(&e)))?;
 
             let status = resp.status();
             if !status.is_success() {
@@ -145,7 +168,7 @@ impl Transport for HttpTransport {
             } else {
                 let byte_stream = resp
                     .bytes_stream()
-                    .map_err(|e| LLMError::Transport(e.to_string()));
+                    .map_err(|e| LLMError::Transport(describe_with_sources(&e)));
                 let frames = sse::decode_sse(byte_stream);
                 futures::pin_mut!(frames);
                 while let Some(frame) = frames.next().await {
@@ -218,6 +241,72 @@ mod tests {
     #[test]
     fn parse_idle_secs_unset_defaults_to_120() {
         assert_eq!(parse_idle_secs(None), DEFAULT_IDLE_TIMEOUT_SECS);
+    }
+
+    /// A transport failure must carry its source chain. `reqwest` renders a
+    /// send failure as `error sending request for url (…)` and hides the
+    /// cause; since transport errors are always retryable, losing the cause
+    /// means an unreachable host retries with nothing actionable logged.
+    #[test]
+    fn describe_with_sources_appends_the_cause_chain() {
+        #[derive(Debug)]
+        struct Err2;
+        impl std::fmt::Display for Err2 {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "dns error: failed to lookup address information")
+            }
+        }
+        impl std::error::Error for Err2 {}
+
+        #[derive(Debug)]
+        struct Err1;
+        impl std::fmt::Display for Err1 {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    f,
+                    "error sending request for url (https://api.example.com/x)"
+                )
+            }
+        }
+        impl std::error::Error for Err1 {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&Err2)
+            }
+        }
+
+        assert_eq!(
+            describe_with_sources(&Err1),
+            "error sending request for url (https://api.example.com/x): \
+             dns error: failed to lookup address information"
+        );
+    }
+
+    /// A cause that merely repeats the outer text adds no information.
+    #[test]
+    fn describe_with_sources_skips_redundant_links() {
+        #[derive(Debug)]
+        struct Inner;
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "connection refused")
+            }
+        }
+        impl std::error::Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer;
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "connection refused")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&Inner)
+            }
+        }
+
+        assert_eq!(describe_with_sources(&Outer), "connection refused");
     }
 
     #[test]

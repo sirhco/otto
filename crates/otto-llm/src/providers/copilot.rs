@@ -64,6 +64,19 @@ where
         }
     }
 
+    /// Point the provider at an explicit base URL, from
+    /// `config.provider.github-copilot.options.baseURL`.
+    ///
+    /// Overrides both the public default and any enterprise host derived from
+    /// the credential — an explicit config value is the user speaking, and it
+    /// is the only escape hatch when the derived host is wrong or unreachable
+    /// from their network. Apply it *after* [`Self::with_enterprise`].
+    #[must_use]
+    pub fn with_base_url(mut self, base: impl AsRef<str>) -> Self {
+        self.base = base.as_ref().trim().trim_end_matches('/').to_string();
+        self
+    }
+
     /// Switch the base URL to a GitHub Enterprise Copilot API host
     /// (`https://copilot-api.<domain>`).
     #[must_use]
@@ -100,6 +113,20 @@ where
             "/messages"
         } else {
             "/chat/completions"
+        }
+    }
+
+    /// The fully-resolved [`Endpoint`] for `model_id`.
+    ///
+    /// The single source of truth for endpoint selection — [`Self::route`]
+    /// calls this, so the URL a caller can inspect is always the URL the
+    /// route will actually target.
+    #[must_use]
+    pub fn endpoint(&self, model_id: &str) -> Endpoint {
+        if !Self::is_claude(model_id) && should_use_responses(model_id) {
+            Endpoint::new(self.base_for(model_id), "/responses")
+        } else {
+            Endpoint::new(self.base_for(model_id), self.path_for(model_id))
         }
     }
 
@@ -149,8 +176,8 @@ where
 
     fn route(&self, model_id: &str) -> Box<dyn Route> {
         let headers = self.headers(model_id);
+        let endpoint = self.endpoint(model_id);
         if Self::is_claude(model_id) {
-            let endpoint = Endpoint::new(self.base_for(model_id), self.path_for(model_id));
             let protocol = CopilotCache::new(AnthropicMessages, BodyShape::Anthropic, model_id);
             return Box::new(
                 GenericRoute::new(
@@ -163,7 +190,6 @@ where
             );
         }
         if should_use_responses(model_id) {
-            let endpoint = Endpoint::new(self.base_for(model_id), "/responses");
             let protocol = CopilotCache::new(OpenAIResponses, BodyShape::OpenAi, model_id);
             return Box::new(
                 GenericRoute::new(
@@ -175,7 +201,6 @@ where
                 .with_headers(headers),
             );
         }
-        let endpoint = Endpoint::new(self.base_for(model_id), self.path_for(model_id));
         let protocol = CopilotCache::new(OpenAIChat, BodyShape::OpenAi, model_id);
         Box::new(
             GenericRoute::new(
@@ -254,6 +279,28 @@ mod tests {
             p.base_for("claude-sonnet-4.5"),
             "https://copilot-api.acme.ghe.com/v1"
         );
+    }
+
+    /// `config.provider.github-copilot.options.baseURL` overrides both the
+    /// public default and any credential-derived enterprise host. Config is
+    /// the user speaking explicitly, and it is the only escape hatch when the
+    /// derived enterprise host is wrong or unreachable from their network.
+    #[test]
+    fn config_base_url_overrides_default_and_enterprise() {
+        let p = Copilot::new(Some(Secret::literal("gho_x")), test_transport())
+            .with_base_url("https://copilot.internal.acme/api/");
+        // trailing slash trimmed so path joins don't double up
+        assert_eq!(p.base_for("gpt-4o"), "https://copilot.internal.acme/api");
+        assert_eq!(
+            p.base_for("claude-sonnet-4.5"),
+            "https://copilot.internal.acme/api/v1"
+        );
+
+        // applied after with_enterprise, config still wins
+        let p = Copilot::new(Some(Secret::literal("gho_x")), test_transport())
+            .with_enterprise("acme.ghe.com")
+            .with_base_url("https://copilot.internal.acme");
+        assert_eq!(p.base_for("gpt-4o"), "https://copilot.internal.acme");
     }
 
     #[test]

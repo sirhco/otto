@@ -1,7 +1,7 @@
 //! Unit tests for the `clap` command tree.
 
 use clap::Parser;
-use otto_cli::cli::{Cli, Commands, ProvidersCommand};
+use otto_cli::cli::{AuthCommand, Cli, Commands, ProvidersCommand};
 
 #[test]
 fn parses_run_with_agent_and_model() {
@@ -83,10 +83,45 @@ fn parses_providers_login() {
     let cli = Cli::try_parse_from(["otto", "providers", "login", "anthropic"]).expect("parses");
     match cli.command {
         Commands::Providers(args) => match args.command {
-            ProvidersCommand::Login { provider } => assert_eq!(provider, "anthropic"),
+            ProvidersCommand::Login {
+                provider,
+                enterprise,
+            } => {
+                assert_eq!(provider, "anthropic");
+                assert_eq!(enterprise, None, "flag is opt-in");
+            }
             other => panic!("expected login, got {other:?}"),
         },
         other => panic!("expected providers, got {other:?}"),
+    }
+}
+
+/// `--enterprise` is what populates the credential's `enterprise_url`, which
+/// is the only thing that switches Copilot off the public API host. Without
+/// this flag there was no way to reach an enterprise Copilot endpoint at all.
+#[test]
+fn parses_copilot_login_with_enterprise_domain() {
+    let cli = Cli::try_parse_from([
+        "otto",
+        "auth",
+        "login",
+        "github-copilot",
+        "--enterprise",
+        "acme.ghe.com",
+    ])
+    .expect("parses");
+    match cli.command {
+        Commands::Auth(args) => match args.command {
+            AuthCommand::Login {
+                provider,
+                enterprise,
+            } => {
+                assert_eq!(provider, "github-copilot");
+                assert_eq!(enterprise.as_deref(), Some("acme.ghe.com"));
+            }
+            other => panic!("expected login, got {other:?}"),
+        },
+        other => panic!("expected auth, got {other:?}"),
     }
 }
 

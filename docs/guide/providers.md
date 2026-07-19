@@ -177,13 +177,32 @@ static headers (`X-GitHub-Api-Version`); claude models additionally get an
 
 ### Enterprise
 
-If the stored OAuth credential carries an `enterprise_url`, the base URL
-switches from `https://api.githubcopilot.com` to
-`https://copilot-api.<your-domain>` automatically. This comes from the
-credential, not from config — `provider.github-copilot.options.baseURL` is
-**ignored** (see [Gateways](#b-native-anthropic-protocol-pointed-at-the-gateway)
-for which arms honor `baseURL`).
-<!-- src: crates/otto-llm/src/providers/copilot.rs, with_enterprise(); crates/otto-app/src/route_factory.rs, the "github-copilot" arm reads Credential::Oauth{enterprise_url} -->
+Pass your GitHub Enterprise domain at login. This is what populates the
+credential's `enterprise_url`, which switches the base URL from
+`https://api.githubcopilot.com` to `https://copilot-api.<your-domain>`:
+
+```bash
+otto auth login github-copilot --enterprise acme.ghe.com
+```
+
+Without the flag the credential records no domain and **every request goes to
+the public host** — which an enterprise network typically cannot reach. The
+failure surfaces as a connect error that the retry layer treats as transient,
+so it retries rather than telling you the endpoint is wrong.
+<!-- src: crates/otto-cli/src/cli.rs, the --enterprise arg on Login; crates/otto-auth/src/providers/copilot.rs, with_enterprise_domain(); crates/otto-llm/src/providers/copilot.rs, with_enterprise() -->
+
+If the derived host is still wrong — a proxy-fronted Copilot, or a domain that
+does not follow the `copilot-api.<domain>` convention — override it explicitly.
+Config wins over the credential-derived host:
+
+```json
+{
+  "provider": {
+    "github-copilot": { "options": { "baseURL": "https://copilot.internal.acme" } }
+  }
+}
+```
+<!-- src: crates/otto-app/src/route_factory.rs, the "github-copilot" arm applies override_base after with_enterprise -->
 
 > [!NOTE]
 > Copilot OAuth has **no refresh flow**. Unlike Anthropic OAuth, the token is
@@ -280,10 +299,10 @@ OpenAI Chat shape flattens or drops — extended thinking blocks, the native too
 result shape, and Anthropic-style cache control. Prefer (a) when the gateway is
 fronting a mix of vendors behind one OpenAI-shaped API and you want one code path.
 
-**`options.baseURL` is honored only by the `anthropic` and `openai` arms.** The
-`google`/`gemini`, `vertex`, and `github-copilot` arms ignore it — to route those
-through a gateway, use shape (a) with a custom provider id.
-<!-- src: crates/otto-app/src/route_factory.rs — the "google" | "gemini", "vertex", and "github-copilot" arms never read override_base -->
+**`options.baseURL` is honored by the `anthropic`, `openai`, and
+`github-copilot` arms.** The `google`/`gemini` and `vertex` arms still ignore
+it — to route those through a gateway, use shape (a) with a custom provider id.
+<!-- src: crates/otto-app/src/route_factory.rs — the "google" | "gemini" and "vertex" arms never read override_base -->
 
 ## Bedrock and Azure
 

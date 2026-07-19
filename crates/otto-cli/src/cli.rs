@@ -135,6 +135,11 @@ pub enum ProvidersCommand {
     Login {
         /// The provider id (e.g. `anthropic`, `openai`).
         provider: String,
+        /// GitHub Enterprise domain for `github-copilot` (e.g. `acme.ghe.com`).
+        /// Routes API calls to `https://copilot-api.<domain>` instead of the
+        /// public host. Ignored by other providers.
+        #[arg(long, value_name = "DOMAIN")]
+        enterprise: Option<String>,
     },
     /// Remove a provider's stored credentials.
     Logout {
@@ -160,6 +165,11 @@ pub enum AuthCommand {
     Login {
         /// The provider id.
         provider: String,
+        /// GitHub Enterprise domain for `github-copilot` (e.g. `acme.ghe.com`).
+        /// Routes API calls to `https://copilot-api.<domain>` instead of the
+        /// public host. Ignored by other providers.
+        #[arg(long, value_name = "DOMAIN")]
+        enterprise: Option<String>,
     },
     /// Remove a provider's stored credentials.
     Logout {
