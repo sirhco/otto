@@ -10,12 +10,16 @@
 
 Source of behavioral truth: the upstream `opencode/packages/` (primarily `opencode/src` and `llm/src`). otto is a faithful port, not a fork.
 
-> **Status:** `v0.11.0` · **pre-release / unstable** · 20-crate workspace · `clippy -D warnings` + `fmt` clean.
+> **Status:** `v0.13.0` · **pre-release / unstable** · 20-crate workspace · `clippy -D warnings` + `fmt` clean.
+
+## Documentation
+
+Full docs live in [`docs/`](docs/README.md) — [getting started](docs/getting-started.md), [CLI](docs/guide/cli.md), [TUI](docs/guide/tui.md), [workflows](docs/guide/workflows.md), [permissions](docs/guide/permissions.md), [providers](docs/guide/providers.md), and references for [config](docs/reference/config.md), [environment variables](docs/reference/env.md), [tools](docs/reference/tools.md), [agents](docs/reference/agents.md), and the [HTTP API](docs/reference/http-api.md).
 
 ## Features
 
-- **Six wire protocols, SDK-free** — `anthropic-messages`, `openai-chat`, `openai-compatible-chat`, **`openai-responses`** (gpt-5 class), `gemini`, `bedrock-converse` — plus two transports (`HttpTransport`, and a SigV4-signing `BedrockTransport` with AWS binary event-stream decode).
-- **Broad provider reach** — Anthropic, OpenAI (incl. **gpt-5 via the Responses API**), OpenAI-compatible (DeepSeek / Groq / Together / OpenRouter / xAI / **Ollama** / any custom base URL), Azure OpenAI, Google Gemini, Amazon Bedrock, and **GitHub Copilot** (Claude + OpenAI models, incl. gpt-5 over `/responses`).
+- **Five wire protocols, SDK-free** — `anthropic-messages`, `openai-chat`, `openai-compatible-chat`, **`openai-responses`** (gpt-5 class), and `gemini`, over a single streaming `HttpTransport`.
+- **Broad provider reach** — Anthropic, OpenAI (incl. **gpt-5 via the Responses API**), OpenAI-compatible (DeepSeek / Groq / Together / OpenRouter / xAI / **Ollama** / litellm / any custom base URL), Google Gemini (AI Studio **and** Vertex AI), and **GitHub Copilot** (Claude + OpenAI models, incl. gpt-5 over `/responses`).
 - **Model registry** — the full [models.dev](https://models.dev) catalog (149 providers / 5000+ models) embedded, with fetch-or-embed refresh and capability gating.
 - **Native terminal UI (`otto tui`)** — a `ratatui`/`crossterm` client of `otto serve`: live transcript with markdown + syntax highlighting + colorized diffs, command palette (`ctrl+k`), fuzzy file attachments (`ctrl+f`), live todo panel (`ctrl+o`), transcript search (`/` + `n`/`N`), interactive permission prompts, **cyclable permission modes** (`shift+tab`: approve-each / accept-edits / full-auto, with a color-coded header indicator), **`Esc` to interrupt a running turn** without ending the session, session/model/agent pickers, token/cost/context usage, `NO_COLOR` monochrome theme, native drag-select copy + OSC-52 yank (`ctrl+y`), `ctrl+z` suspend, a **multi-agent dashboard** (peek/reply to other backgrounded sessions — including nested workflow subagents — with live push-driven status, pin, and filter), and a read-only **workflow status overlay** (`ctrl+w`) for in-flight `otto workflow` runs.
 - **Workflow engine (`otto workflow`)** — three working driver engines above the run loop: `tdd` (red/green/refactor cycle with test-runner integration and regression checks), `sdd` (plan-task parsing + subagent orchestration), and `plan` (ordered task execution with a verification gate) — each supports `--dry-run` and `--auto`/`-y`.
@@ -44,10 +48,14 @@ cargo build -p otto-cli        # produces target/debug/otto
 ### Authenticate
 
 ```bash
-otto auth login anthropic              # API key or OAuth
+otto auth login anthropic              # API key or OAuth (Claude Pro/Max)
 otto auth login github-copilot         # GitHub device flow
-# OpenAI / Gemini / Bedrock read standard env vars (OPENAI_API_KEY, GEMINI_API_KEY, AWS_*)
+otto auth login openai                 # API key paste
+# Or use env vars: ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY
 ```
+
+`otto auth login` requires an interactive terminal. See [providers](docs/guide/providers.md) for
+non-interactive setup and gateway/local-model configuration.
 
 ### Use
 
@@ -86,7 +94,7 @@ A 20-crate workspace under `crates/`, separated by responsibility.
 | :--- | :--- |
 | `otto-id` | Sortable / monotonic IDs. |
 | `otto-events` | The provider-neutral `LLMEvent` union, `Usage`, event bus. |
-| `otto-llm` | SDK-free LLM client: six wire protocols, two transports, models.dev registry. |
+| `otto-llm` | SDK-free LLM client: five wire protocols, streaming HTTP transport, models.dev registry. |
 | `otto-tools` | `Tool` trait + 14 built-ins + truncation + registry. |
 | `otto-hooks` | Lifecycle hooks — user-configured external commands fired at pipeline points (pre/post-tool-use, compaction, etc.). |
 | `otto-storage` | Session/message/part model over SQLite (`sqlx`). |
@@ -108,7 +116,7 @@ A 20-crate workspace under `crates/`, separated by responsibility.
 ## Testing
 
 ```bash
-cargo test --workspace                          # 1400+ tests
+cargo test --workspace                          # 1369 tests, headless, no network
 cargo test -p otto-llm -- --ignored            # live Anthropic (needs ANTHROPIC_API_KEY)
 cargo test -p otto-lsp -- --ignored            # live rust-analyzer (skips if not on PATH)
 ```
@@ -121,7 +129,7 @@ Actively developed toward parity with upstream opencode. Known limitations:
 - **share / sync / GitHub-app** features are deliberately not ported (they depend on opencode's hosted cloud backend).
 - **Workflow engine (`otto-workflow`)** ships three working driver engines (`otto workflow tdd|sdd|plan`) above the run loop; ongoing hardening as usage grows.
 - **Anthropic OAuth** (Claude Pro/Max login) is verified end to end against a live login: exchange, Bearer auth, and inference all confirmed working. Whether a given account's plan covers third-party OAuth usage is an Anthropic-side setting (`claude.ai/settings/usage`), not an otto limitation.
-- **Bedrock** reads AWS credentials from environment only (no profile/SSO chain); **Gemini** is AI-Studio only (no Vertex).
+- **Amazon Bedrock** and **Azure OpenAI** native providers were removed in v0.12–v0.13. Both remain reachable through an OpenAI-compatible gateway (see [providers](docs/guide/providers.md)).
 - The server mirrors opencode API *shapes* but has not been byte-diffed against an external OpenAPI spec.
 
 ## License

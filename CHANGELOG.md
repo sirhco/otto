@@ -19,6 +19,19 @@ All notable changes to otto are documented here. Format follows
   `plan_denies_edits_except_plan_files` test carried a comment asserting that
   `write` mapped to `edit` at gate time, which was never true.
 
+### Added
+
+- User and developer documentation under `docs/` — getting started, guides for
+  the CLI, TUI, workflows, permissions, and providers, plus references for
+  config, environment variables, tools, agents, and the HTTP API.
+
+### Changed
+
+- README corrected: status `v0.13.0`, five wire protocols over one transport
+  (the Bedrock protocol and SigV4 transport are gone), Bedrock/Azure dropped
+  from the provider list, Vertex added, `GEMINI_API_KEY` corrected to
+  `GOOGLE_GENERATIVE_AI_API_KEY`, and the test count corrected to 1369.
+
 ## [0.13.0] - 2026-07-19
 
 ### Removed
