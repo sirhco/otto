@@ -5,7 +5,7 @@ use crate::input::Editor;
 use crate::sse::{PermissionAsked, ServerEvent, WfPhase};
 use crossterm::event::KeyEvent;
 use otto_events::LLMEvent;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Live view of an in-flight workflow run, folded from the `workflow.*`
 /// events (the same events that fold transcript lines). Powers the progress
@@ -235,6 +235,10 @@ pub enum Overlay {
 pub(crate) struct DashboardRow {
     pub(crate) session: SessionInfo,
     pub(crate) status: DashboardStatus,
+    /// Whether this row is a `workflow_task` child spliced in immediately
+    /// after its `workflow_root` parent (rendered nested one level in, see
+    /// Task 8). `false` for every primary row.
+    pub(crate) indent: bool,
 }
 
 /// A dashboard row's derived status. Sorted `Awaiting* -> Busy -> Idle`
@@ -274,6 +278,21 @@ pub(crate) enum DashboardPeek {
     NeedsFullSession,
 }
 
+/// Which input mode the dashboard overlay is currently in (Task 6 routes
+/// keys through this). `NewSession` carries its own in-progress typed
+/// buffer inline rather than a separate field on `DashboardState` that
+/// would be meaningless in the other two modes. `Filter`'s live-typed text
+/// lives directly in `DashboardState.filter` instead (so filtering updates
+/// live as you type, no separate buffer to keep in sync —
+/// `Msg::DashboardFilterChanged` sets `filter` directly).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum DashboardMode {
+    #[default]
+    Browsing,
+    Filter,
+    NewSession(String),
+}
+
 /// State for the multi-agent dashboard overlay (`Overlay::Dashboard`):
 /// top-level sessions other than the attached one, each with a derived
 /// status, a selection cursor, and the selected row's peek/reply state.
@@ -283,9 +302,37 @@ pub(crate) enum DashboardPeek {
 /// `picker_move`/`picker_confirm`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DashboardState {
+    /// The full, unfiltered row list as last built by `build_dashboard_rows`
+    /// (kept in sync by any in-place push/status mutation too) — `rows` is
+    /// always re-derived from this via `apply_pin_and_filter`, never
+    /// filtered in place itself. This is what lets narrowing or clearing
+    /// `filter` (or toggling `pinned`) instantly recover rows a stricter
+    /// filter had hidden, without waiting for the next poll to rebuild
+    /// from scratch.
+    pub(crate) all_rows: Vec<DashboardRow>,
     pub(crate) rows: Vec<DashboardRow>,
     pub(crate) selected: usize,
     pub(crate) peek: DashboardPeek,
+    /// Session ids pinned to the top of the primary-row list (see
+    /// `apply_pin_and_filter`). Survives dashboard reopen (`open_dashboard`
+    /// preserves it), unlike `filter`/`mode`.
+    pub(crate) pinned: HashSet<String>,
+    /// Current input mode (Task 6 routes keys based on this).
+    pub(crate) mode: DashboardMode,
+    /// Currently-applied filter text (case-insensitive substring match
+    /// against row titles, see `apply_pin_and_filter`); empty = no filter.
+    /// Reset to empty on every dashboard reopen.
+    pub(crate) filter: String,
+    /// Set when a push event arrives (`session.created`, or a workflow
+    /// `Started` phase) while the dashboard overlay is open — signals that
+    /// the row list is stale and a full re-fetch is warranted sooner than
+    /// the normal ~2s poll cadence, mirroring how `DashboardPeek::Loading`
+    /// is a pure state marker `lib.rs`'s `maybe_fetch_dashboard_peek`
+    /// polls for and acts on. Task 7's poll-cadence tick handler (`lib.rs`)
+    /// should check this flag each tick alongside `dashboard_poll_due` and,
+    /// if set, fetch immediately; it self-clears when the resulting
+    /// `DashboardLoaded` message is folded (see that arm in `App::update`).
+    pub(crate) needs_refetch: bool,
 }
 
 impl DashboardState {
@@ -308,12 +355,56 @@ impl DashboardState {
     }
 }
 
-/// Build sorted dashboard rows from a poll's three responses. Excludes
-/// subagent/workflow child sessions (`parent_id.is_some()`) and the
-/// currently-attached session (nothing to peek/reply to in your own
-/// transcript). Sorted `AwaitingAsk -> Busy -> Idle`, tie-broken within a
-/// status by `time_updated` descending (most-recently-active first, same
-/// recency bias `most_recent_session` already uses for session reopening).
+/// Derive a row's status from a poll's permission/question responses: an
+/// outstanding ask always wins over the session's own `busy` flag.
+fn derive_dashboard_status(
+    s: &SessionInfo,
+    permissions: &[crate::sse::PermissionAsked],
+    questions: &[crate::sse::QuestionAsked],
+) -> DashboardStatus {
+    permissions
+        .iter()
+        .find(|p| p.session_id == s.id)
+        .map(|p| DashboardStatus::AwaitingPermission(p.clone()))
+        .or_else(|| {
+            questions
+                .iter()
+                .find(|q| q.session_id == s.id)
+                .map(|q| DashboardStatus::AwaitingQuestion(q.clone()))
+        })
+        .unwrap_or(if s.busy {
+            DashboardStatus::Busy
+        } else {
+            DashboardStatus::Idle
+        })
+}
+
+/// Build sorted dashboard rows from a poll's three responses.
+///
+/// Primary rows are top-level sessions (`parent_id.is_none()`) plus workflow
+/// roots (`kind == "workflow_root"`, which do carry a `parent_id` — the
+/// session that launched the workflow — but still surface as their own
+/// dashboard row), excluding the currently-attached session. These are
+/// sorted `AwaitingAsk -> Busy -> Idle`, tie-broken within a status by
+/// `time_updated` descending (most-recently-active first, same recency bias
+/// `most_recent_session` already uses for session reopening) — unchanged
+/// from before this task.
+///
+/// A second pass then splices `workflow_task` children in immediately after
+/// their `workflow_root` parent's row (`indent: true`), grouped by
+/// `parent_id` and ordered oldest-`time_updated`-first within a group (task
+/// order roughly matches creation recency). A `workflow_task` whose parent
+/// isn't a primary row in this list (e.g. the parent itself got excluded)
+/// is dropped rather than surfaced as an orphan, and (like the primary-row
+/// pass) a `workflow_task` matching `attached` is excluded too -- the
+/// dashboard never shows the currently-attached session, indented or not.
+/// Ad-hoc `subagent`/kindless sessions with a `parent_id` are excluded from
+/// both passes, unchanged.
+///
+/// Does not apply pin ordering or the title filter — see
+/// `apply_pin_and_filter`, which the caller runs over this function's
+/// result. Keeping the two separate means this function's own direct unit
+/// tests continue to exercise grouping in isolation.
 pub(crate) fn build_dashboard_rows(
     sessions: &[SessionInfo],
     permissions: &[crate::sse::PermissionAsked],
@@ -322,27 +413,14 @@ pub(crate) fn build_dashboard_rows(
 ) -> Vec<DashboardRow> {
     let mut rows: Vec<DashboardRow> = sessions
         .iter()
-        .filter(|s| s.parent_id.is_none() && Some(s.id.as_str()) != attached)
-        .map(|s| {
-            let status = permissions
-                .iter()
-                .find(|p| p.session_id == s.id)
-                .map(|p| DashboardStatus::AwaitingPermission(p.clone()))
-                .or_else(|| {
-                    questions
-                        .iter()
-                        .find(|q| q.session_id == s.id)
-                        .map(|q| DashboardStatus::AwaitingQuestion(q.clone()))
-                })
-                .unwrap_or(if s.busy {
-                    DashboardStatus::Busy
-                } else {
-                    DashboardStatus::Idle
-                });
-            DashboardRow {
-                session: s.clone(),
-                status,
-            }
+        .filter(|s| {
+            (s.parent_id.is_none() || s.kind.as_deref() == Some("workflow_root"))
+                && Some(s.id.as_str()) != attached
+        })
+        .map(|s| DashboardRow {
+            status: derive_dashboard_status(s, permissions, questions),
+            session: s.clone(),
+            indent: false,
         })
         .collect();
     rows.sort_by_key(|r| {
@@ -353,7 +431,102 @@ pub(crate) fn build_dashboard_rows(
         };
         (rank, std::cmp::Reverse(r.session.time_updated))
     });
-    rows
+
+    let mut children_by_parent: std::collections::HashMap<&str, Vec<&SessionInfo>> =
+        std::collections::HashMap::new();
+    for s in sessions {
+        if s.kind.as_deref() == Some("workflow_task")
+            && Some(s.id.as_str()) != attached
+            && let Some(parent) = s.parent_id.as_deref()
+        {
+            children_by_parent.entry(parent).or_default().push(s);
+        }
+    }
+    for group in children_by_parent.values_mut() {
+        group.sort_by_key(|s| s.time_updated);
+    }
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        let parent_id = row.session.id.clone();
+        out.push(row);
+        if let Some(children) = children_by_parent.get(parent_id.as_str()) {
+            for child in children {
+                out.push(DashboardRow {
+                    status: derive_dashboard_status(child, permissions, questions),
+                    session: (*child).clone(),
+                    indent: true,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Reorder `rows` so pinned primary rows float to the top and drop rows
+/// that don't survive `filter` — the pin/filter pass `build_dashboard_rows`
+/// deliberately leaves out (see its doc comment).
+///
+/// Pin-priority: primary rows (`!indent`) are stably partitioned into
+/// pinned-first / unpinned, each half keeping its incoming relative order
+/// (no re-sort by rank/recency) — each primary row's indented children (if
+/// any) travel with it, unaffected by which half the parent lands in.
+///
+/// Filter (skipped entirely when `filter` is empty): a case-insensitive
+/// substring match against `session.title` (`None` title treated as empty,
+/// matching the title-rendering convention elsewhere in this file). A
+/// primary row is kept if its own title matches OR any indented child's
+/// title matches, so a parent with a matching child stays visible even
+/// when the parent's own title doesn't — but a kept parent's children are
+/// still individually filtered (a non-matching child of a kept parent is
+/// hidden). A filtered-out primary row takes its children with it
+/// regardless of their own titles.
+pub(crate) fn apply_pin_and_filter(
+    rows: Vec<DashboardRow>,
+    pinned: &HashSet<String>,
+    filter: &str,
+) -> Vec<DashboardRow> {
+    // Re-group into (parent, children) blocks so the pin partition and the
+    // filter both move a parent and its children together.
+    let mut groups: Vec<(DashboardRow, Vec<DashboardRow>)> = Vec::new();
+    for row in rows {
+        if row.indent {
+            if let Some((_, children)) = groups.last_mut() {
+                children.push(row);
+            }
+            // An indented row with no preceding parent group shouldn't
+            // occur (`build_dashboard_rows` always emits parent-then-
+            // children) — silently drop rather than panic if it ever did.
+        } else {
+            groups.push((row, Vec::new()));
+        }
+    }
+
+    let (pinned_groups, unpinned_groups): (Vec<_>, Vec<_>) = groups
+        .into_iter()
+        .partition(|(row, _)| pinned.contains(&row.session.id));
+
+    let filter_lower = filter.to_lowercase();
+    let title_matches = |row: &DashboardRow| -> bool {
+        filter.is_empty()
+            || row
+                .session
+                .title
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains(filter_lower.as_str())
+    };
+
+    let mut out = Vec::new();
+    for (parent, children) in pinned_groups.into_iter().chain(unpinned_groups) {
+        if !filter.is_empty() && !title_matches(&parent) && !children.iter().any(title_matches) {
+            continue;
+        }
+        out.push(parent);
+        out.extend(children.into_iter().filter(title_matches));
+    }
+    out
 }
 
 /// Extract a lightweight preview of the last assistant text part across
@@ -555,6 +728,21 @@ pub enum Msg {
     /// round (unsupported platform/desktop environment, or a transient
     /// command failure) — leaves the active theme untouched.
     OsThemeChanged(Option<crate::appearance::ThemeMode>),
+    /// The dashboard's "new session" inline input (`DashboardMode::NewSession`)
+    /// was submitted with this typed title. `dispatch` (lib.rs, Task 7) turns
+    /// this into a `client.create_session(&title)` call and, on success,
+    /// routes a `DashboardSessionCreated`.
+    CreateDashboardSession(String),
+    /// A `CreateDashboardSession` call succeeded — insert the new session as
+    /// a fresh primary row and select it.
+    DashboardSessionCreated(SessionInfo),
+    /// Toggle the currently-selected dashboard row's session id in/out of
+    /// `App.dashboard.pinned`, then re-apply pin/filter ordering immediately.
+    DashboardTogglePin,
+    /// The dashboard filter's typed text changed (live, as-you-type — Task 6
+    /// dispatches this on every keystroke in `DashboardMode::Filter`). Sets
+    /// `App.dashboard.filter` and re-applies pin/filter ordering immediately.
+    DashboardFilterChanged(String),
 }
 
 /// A side effect the event loop must perform because it needs the terminal or
@@ -935,12 +1123,61 @@ impl App {
         self.overlay = overlay;
     }
 
-    /// Open the dashboard, clearing any stale rows/peek from a previous
-    /// time it was open (the caller — `route_message`, Task 8 — spawns the
-    /// fresh fetch right after this returns).
+    /// Open the dashboard, clearing any stale rows/peek/filter/mode from a
+    /// previous time it was open (the caller — `route_message`, Task 8 —
+    /// spawns the fresh fetch right after this returns). `pinned` survives
+    /// the reset — it's a deliberate favorites list worth persisting across
+    /// reopens, unlike a stale invisible filter, which would be a footgun.
     pub fn open_dashboard(&mut self) {
-        self.dashboard = DashboardState::default();
+        let pinned = std::mem::take(&mut self.dashboard.pinned);
+        self.dashboard = DashboardState {
+            pinned,
+            ..DashboardState::default()
+        };
         self.overlay = Overlay::Dashboard;
+    }
+
+    /// Flip a dashboard row's status in place from a push event
+    /// (`session.busy`/`session.idle`), without waiting for the next poll.
+    /// No-op if `session_id` isn't currently a dashboard row (dashboard
+    /// closed, row filtered out, or a `workflow_task` child — pushes only
+    /// name a `session_id`, not a row identity, so a stale/unrelated id is
+    /// simply not found). Never clobbers a pending ask
+    /// (`AwaitingPermission`/`AwaitingQuestion`) — an ask the poll already
+    /// surfaced always takes precedence over a bare busy/idle signal, which
+    /// could otherwise race a slightly-stale poll. Only re-derives peek (and
+    /// only touches `selected`'s downstream state, never `selected` itself)
+    /// when the flipped row is the currently-selected one.
+    fn flip_dashboard_row_status(&mut self, session_id: &str, status: DashboardStatus) {
+        let Some(idx) = self
+            .dashboard
+            .rows
+            .iter()
+            .position(|r| r.session.id == session_id)
+        else {
+            return;
+        };
+        if matches!(
+            self.dashboard.rows[idx].status,
+            DashboardStatus::AwaitingPermission(_) | DashboardStatus::AwaitingQuestion(_)
+        ) {
+            return;
+        }
+        self.dashboard.rows[idx].status = status.clone();
+        // Keep `all_rows` (the source `rows` is re-derived from on every
+        // filter/pin change) from reverting this push-driven flip later.
+        let sid = self.dashboard.rows[idx].session.id.clone();
+        if let Some(r) = self
+            .dashboard
+            .all_rows
+            .iter_mut()
+            .find(|r| r.session.id == sid)
+        {
+            r.status = status;
+        }
+        if idx == self.dashboard.selected {
+            self.dashboard.peek = self.dashboard.derive_peek();
+        }
     }
 
     #[must_use]
@@ -1502,6 +1739,16 @@ impl App {
                             tasks: BTreeMap::new(),
                             done: None,
                         });
+                        // A new workflow run means a new `workflow_root`
+                        // session (and its first `workflow_task` children)
+                        // exist server-side that the dashboard's current
+                        // `rows` doesn't know about yet — flag a refetch
+                        // (see `DashboardState::needs_refetch`) rather than
+                        // waiting out the ~2s poll cadence, but only if the
+                        // dashboard is actually open to see it.
+                        if matches!(self.overlay, Overlay::Dashboard) {
+                            self.dashboard.needs_refetch = true;
+                        }
                     }
                     WfPhase::Progress => {
                         if let Some(v) = &mut self.workflow
@@ -1570,6 +1817,26 @@ impl App {
                     self.bump_render();
                 }
             }
+            // Push payoff: flip the matching dashboard row's status in place
+            // rather than waiting for the next ~2s poll. `flip_dashboard_row_status`
+            // no-ops if the session isn't a dashboard row (not open, or a
+            // filtered-out/child row), and never clobbers a pending ask.
+            Msg::Event(ServerEvent::SessionBusy { session_id }) => {
+                self.flip_dashboard_row_status(&session_id, DashboardStatus::Busy);
+            }
+            Msg::Event(ServerEvent::SessionIdle { session_id }) => {
+                self.flip_dashboard_row_status(&session_id, DashboardStatus::Idle);
+            }
+            Msg::Event(ServerEvent::SessionCreated { .. }) => {
+                // A brand-new session (subagent, workflow child, or a plain
+                // top-level one from elsewhere) exists that the dashboard's
+                // current `rows` doesn't know about — flag a refetch (see
+                // `DashboardState::needs_refetch`) only if the dashboard is
+                // open to see it.
+                if matches!(self.overlay, Overlay::Dashboard) {
+                    self.dashboard.needs_refetch = true;
+                }
+            }
             Msg::Event(_) => {}
             Msg::SessionsLoaded(s) => self.sessions = s,
             Msg::AgentsLoaded(a) => self.agents = a,
@@ -1588,12 +1855,21 @@ impl App {
                     .rows
                     .get(self.dashboard.selected)
                     .map(|r| (r.session.id.clone(), std::mem::discriminant(&r.status)));
-                self.dashboard.rows = build_dashboard_rows(
+                self.dashboard.all_rows = build_dashboard_rows(
                     &sessions,
                     &permissions,
                     &questions,
                     self.session_id.as_deref(),
                 );
+                self.dashboard.rows = apply_pin_and_filter(
+                    self.dashboard.all_rows.clone(),
+                    &self.dashboard.pinned,
+                    &self.dashboard.filter,
+                );
+                // A fresh poll landing satisfies any pending push-triggered
+                // refetch request (`session.created`/workflow-started while
+                // the dashboard was open — see the `Msg::Event` arms below).
+                self.dashboard.needs_refetch = false;
                 let same_id = prev.as_ref().and_then(|(id, _)| {
                     self.dashboard.rows.iter().position(|r| &r.session.id == id)
                 });
@@ -1659,6 +1935,18 @@ impl App {
                     |r| matches!(&r.status, DashboardStatus::AwaitingPermission(p) if p.id == id),
                 ) {
                     self.dashboard.rows[idx].status = DashboardStatus::Idle;
+                    // Keep `all_rows` (the source `rows` is re-derived from on
+                    // every filter/pin change) from reverting this optimistic
+                    // flip back to stale `AwaitingPermission` later.
+                    let sid = self.dashboard.rows[idx].session.id.clone();
+                    if let Some(r) = self
+                        .dashboard
+                        .all_rows
+                        .iter_mut()
+                        .find(|r| r.session.id == sid)
+                    {
+                        r.status = DashboardStatus::Idle;
+                    }
                     // The peek panel was showing `DashboardPeek::Permission` for
                     // this row (if it's the selected one) — that variant is now
                     // stale (the row is `Idle`), so re-derive it. `derive_peek`
@@ -1675,6 +1963,16 @@ impl App {
                     |r| matches!(&r.status, DashboardStatus::AwaitingQuestion(q) if q.id == id),
                 ) {
                     self.dashboard.rows[idx].status = DashboardStatus::Idle;
+                    // See the matching `all_rows` comment in `PermissionReply` above.
+                    let sid = self.dashboard.rows[idx].session.id.clone();
+                    if let Some(r) = self
+                        .dashboard
+                        .all_rows
+                        .iter_mut()
+                        .find(|r| r.session.id == sid)
+                    {
+                        r.status = DashboardStatus::Idle;
+                    }
                     // See the matching comment in `PermissionReply` above.
                     if idx == self.dashboard.selected {
                         self.dashboard.peek = self.dashboard.derive_peek();
@@ -1771,6 +2069,91 @@ impl App {
                     };
                     self.bump_render();
                     self.pending_action = Some(LoopAction::CursorColor);
+                }
+            }
+            // The HTTP `client.create_session` call is performed by
+            // `dispatch` (lib.rs, Task 7), which then routes a
+            // `DashboardSessionCreated` on success. Here we only end the
+            // "new session" text-entry mode the submit came from — Task 6's
+            // key handling is the one place that put us in `NewSession(_)`.
+            Msg::CreateDashboardSession(_) => {
+                self.dashboard.mode = DashboardMode::Browsing;
+            }
+            Msg::DashboardSessionCreated(session) => {
+                let sid = session.id.clone();
+                self.dashboard.all_rows.push(DashboardRow {
+                    session,
+                    status: DashboardStatus::Idle,
+                    indent: false,
+                });
+                self.dashboard.rows = apply_pin_and_filter(
+                    self.dashboard.all_rows.clone(),
+                    &self.dashboard.pinned,
+                    &self.dashboard.filter,
+                );
+                self.dashboard.selected = self
+                    .dashboard
+                    .rows
+                    .iter()
+                    .position(|r| r.session.id == sid)
+                    .unwrap_or_else(|| {
+                        self.dashboard
+                            .selected
+                            .min(self.dashboard.rows.len().saturating_sub(1))
+                    });
+                self.dashboard.peek = self.dashboard.derive_peek();
+            }
+            Msg::DashboardTogglePin => {
+                if let Some(row) = self.dashboard.rows.get(self.dashboard.selected)
+                    && !row.indent
+                {
+                    // `apply_pin_and_filter` only partitions primary rows —
+                    // pinning a child row would silently do nothing (no
+                    // reorder, no glyph, see view.rs), so skip it entirely
+                    // rather than let its id pollute `pinned` for no effect.
+                    let id = row.session.id.clone();
+                    if !self.dashboard.pinned.remove(&id) {
+                        self.dashboard.pinned.insert(id.clone());
+                    }
+                    self.dashboard.rows = apply_pin_and_filter(
+                        self.dashboard.all_rows.clone(),
+                        &self.dashboard.pinned,
+                        &self.dashboard.filter,
+                    );
+                    // Track the toggled row's session id, not its old index —
+                    // pinning just reordered `rows`, so re-find it rather than
+                    // leaving `selected` pointing at whatever now sits there.
+                    self.dashboard.selected = self
+                        .dashboard
+                        .rows
+                        .iter()
+                        .position(|r| r.session.id == id)
+                        .unwrap_or(0);
+                }
+            }
+            Msg::DashboardFilterChanged(filter) => {
+                self.dashboard.filter = filter;
+                let prev_id = self
+                    .dashboard
+                    .rows
+                    .get(self.dashboard.selected)
+                    .map(|r| r.session.id.clone());
+                self.dashboard.rows = apply_pin_and_filter(
+                    self.dashboard.all_rows.clone(),
+                    &self.dashboard.pinned,
+                    &self.dashboard.filter,
+                );
+                let same_id = prev_id
+                    .as_ref()
+                    .and_then(|id| self.dashboard.rows.iter().position(|r| &r.session.id == id));
+                self.dashboard.selected = same_id.unwrap_or(0);
+                // Same rationale as `DashboardLoaded`: only re-derive peek
+                // when the selected row's identity actually changed, so an
+                // already-loaded `Message` peek doesn't flicker back to
+                // `Loading` on every keystroke while the selected row stays
+                // visible throughout.
+                if same_id.is_none() {
+                    self.dashboard.peek = self.dashboard.derive_peek();
                 }
             }
         }
@@ -5098,6 +5481,29 @@ mod tests {
             time_created: updated,
             busy,
             parent_id: parent.map(str::to_string),
+            kind: None,
+        }
+    }
+
+    /// Like `dash_session`, but tagged with a `kind` (`"workflow_root"`/
+    /// `"workflow_task"`/`"subagent"`) for grouping tests.
+    fn dash_session_kind(id: &str, updated: i64, parent: Option<&str>, kind: &str) -> SessionInfo {
+        SessionInfo {
+            kind: Some(kind.into()),
+            ..dash_session(id, updated, false, parent)
+        }
+    }
+
+    /// Like `dash_session`, but with a `title` set, for filter tests.
+    fn dash_session_titled(
+        id: &str,
+        updated: i64,
+        parent: Option<&str>,
+        title: &str,
+    ) -> SessionInfo {
+        SessionInfo {
+            title: Some(title.into()),
+            ..dash_session(id, updated, false, parent)
         }
     }
 
@@ -5136,14 +5542,215 @@ mod tests {
     }
 
     #[test]
+    fn build_dashboard_rows_splices_workflow_tasks_after_their_root_indented() {
+        let sessions = vec![
+            dash_session_kind("root", 10, None, "workflow_root"),
+            dash_session_kind("task2", 20, Some("root"), "workflow_task"),
+            dash_session_kind("task1", 10, Some("root"), "workflow_task"),
+            dash_session("other", 5, false, None),
+        ];
+        let rows = build_dashboard_rows(&sessions, &[], &[], None);
+        let order: Vec<(&str, bool)> = rows
+            .iter()
+            .map(|r| (r.session.id.as_str(), r.indent))
+            .collect();
+        // "root" outranks "other" (both Idle -> tie-broken by recency: 10 >
+        // 5), children immediately follow it, oldest (task1) first.
+        assert_eq!(
+            order,
+            vec![
+                ("root", false),
+                ("task1", true),
+                ("task2", true),
+                ("other", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_dashboard_rows_drops_orphaned_workflow_task() {
+        // "orphan"'s parent_id ("missing") never appears as a primary row
+        // (no session with that id at all here) — it must not surface as an
+        // indented row with no visible parent.
+        let sessions = vec![
+            dash_session("other", 5, false, None),
+            dash_session_kind("orphan", 20, Some("missing"), "workflow_task"),
+        ];
+        let rows = build_dashboard_rows(&sessions, &[], &[], None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session.id, "other");
+    }
+
+    #[test]
+    fn build_dashboard_rows_still_excludes_subagent_and_kindless_children() {
+        let sessions = vec![
+            dash_session("root", 10, false, None),
+            dash_session_kind("sub", 20, Some("root"), "subagent"),
+            dash_session("adhoc_child", 30, false, Some("root")),
+        ];
+        let rows = build_dashboard_rows(&sessions, &[], &[], None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session.id, "root");
+    }
+
+    #[test]
+    fn build_dashboard_rows_excludes_attached_workflow_task_child() {
+        // The user attached directly into "task_attached" (a workflow_task
+        // child, reachable via Enter on an indented row) and reopened the
+        // dashboard. It must not reappear as an indented child under its
+        // workflow_root parent -- the dashboard never shows the attached
+        // session, primary or indented.
+        let sessions = vec![
+            dash_session_kind("root", 10, None, "workflow_root"),
+            dash_session_kind("task_attached", 20, Some("root"), "workflow_task"),
+            dash_session_kind("task_other", 5, Some("root"), "workflow_task"),
+        ];
+        let rows = build_dashboard_rows(&sessions, &[], &[], Some("task_attached"));
+        let order: Vec<(&str, bool)> = rows
+            .iter()
+            .map(|r| (r.session.id.as_str(), r.indent))
+            .collect();
+        assert_eq!(order, vec![("root", false), ("task_other", true)]);
+    }
+
+    #[test]
+    fn apply_pin_and_filter_floats_pinned_row_to_top_stably() {
+        let rows = vec![
+            DashboardRow {
+                session: dash_session("a", 30, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session("b", 20, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session("c", 10, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+        ];
+        let pinned: HashSet<String> = ["c".to_string()].into_iter().collect();
+        let out = apply_pin_and_filter(rows, &pinned, "");
+        let order: Vec<&str> = out.iter().map(|r| r.session.id.as_str()).collect();
+        // "c" floats to the top; "a"/"b" keep their original relative order
+        // behind it (not re-sorted by recency or anything else).
+        assert_eq!(order, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn apply_pin_and_filter_child_travels_with_its_pinned_or_unpinned_parent() {
+        let rows = vec![
+            DashboardRow {
+                session: dash_session("root_a", 30, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session("child_a", 25, false, Some("root_a")),
+                status: DashboardStatus::Idle,
+                indent: true,
+            },
+            DashboardRow {
+                session: dash_session("root_b", 20, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session("child_b", 15, false, Some("root_b")),
+                status: DashboardStatus::Idle,
+                indent: true,
+            },
+        ];
+        let pinned: HashSet<String> = ["root_b".to_string()].into_iter().collect();
+        let out = apply_pin_and_filter(rows, &pinned, "");
+        let order: Vec<&str> = out.iter().map(|r| r.session.id.as_str()).collect();
+        assert_eq!(order, vec!["root_b", "child_b", "root_a", "child_a"]);
+    }
+
+    #[test]
+    fn apply_pin_and_filter_keeps_parent_whose_child_title_matches() {
+        let rows = vec![
+            DashboardRow {
+                session: dash_session_titled("root", 20, None, "unrelated title"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session_titled("child", 10, Some("root"), "fix the bug"),
+                status: DashboardStatus::Idle,
+                indent: true,
+            },
+        ];
+        let out = apply_pin_and_filter(rows, &HashSet::new(), "bug");
+        let order: Vec<&str> = out.iter().map(|r| r.session.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["root", "child"],
+            "parent survives via matching child, even though its own title doesn't match"
+        );
+    }
+
+    #[test]
+    fn apply_pin_and_filter_hides_non_matching_child_of_a_kept_parent() {
+        let rows = vec![
+            DashboardRow {
+                session: dash_session_titled("root", 20, None, "fix the bug"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session_titled("child", 10, Some("root"), "unrelated title"),
+                status: DashboardStatus::Idle,
+                indent: true,
+            },
+        ];
+        let out = apply_pin_and_filter(rows, &HashSet::new(), "bug");
+        let order: Vec<&str> = out.iter().map(|r| r.session.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["root"],
+            "parent matches and is kept, but its non-matching child stays hidden"
+        );
+    }
+
+    #[test]
+    fn apply_pin_and_filter_drops_filtered_out_parent_and_its_children() {
+        let rows = vec![
+            DashboardRow {
+                session: dash_session_titled("root", 20, None, "nothing relevant"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session_titled("child", 10, Some("root"), "also nothing relevant"),
+                status: DashboardStatus::Idle,
+                indent: true,
+            },
+            DashboardRow {
+                session: dash_session_titled("other", 5, None, "bug fix here"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+        ];
+        let out = apply_pin_and_filter(rows, &HashSet::new(), "bug");
+        let order: Vec<&str> = out.iter().map(|r| r.session.id.as_str()).collect();
+        assert_eq!(order, vec!["other"]);
+    }
+
+    #[test]
     fn derive_peek_permission_row() {
         let dash = DashboardState {
             rows: vec![DashboardRow {
                 session: dash_session("s", 0, false, None),
                 status: DashboardStatus::AwaitingPermission(dash_perm("s")),
+                indent: false,
             }],
             selected: 0,
             peek: DashboardPeek::Loading,
+            ..DashboardState::default()
         };
         assert_eq!(dash.derive_peek(), DashboardPeek::Permission);
     }
@@ -5154,9 +5761,11 @@ mod tests {
             rows: vec![DashboardRow {
                 session: dash_session("s", 0, false, None),
                 status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+                indent: false,
             }],
             selected: 0,
             peek: DashboardPeek::Loading,
+            ..DashboardState::default()
         };
         assert_eq!(dash.derive_peek(), DashboardPeek::Question { highlight: 0 });
     }
@@ -5169,9 +5778,11 @@ mod tests {
             rows: vec![DashboardRow {
                 session: dash_session("s", 0, false, None),
                 status: DashboardStatus::AwaitingQuestion(q),
+                indent: false,
             }],
             selected: 0,
             peek: DashboardPeek::Loading,
+            ..DashboardState::default()
         };
         assert_eq!(dash.derive_peek(), DashboardPeek::NeedsFullSession);
     }
@@ -5182,6 +5793,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("s", 0, false, None),
             status: DashboardStatus::Idle,
+            indent: false,
         }];
         app.dashboard.selected = 0;
         app.dashboard.peek = DashboardPeek::Message("hi".into());
@@ -5203,6 +5815,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("s", 0, false, None),
             status: DashboardStatus::Idle,
+            indent: false,
         }];
         app.dashboard.selected = 0;
         app.dashboard.peek = DashboardPeek::Message("hi".into());
@@ -5224,9 +5837,11 @@ mod tests {
             rows: vec![DashboardRow {
                 session: dash_session("s", 0, false, None),
                 status: DashboardStatus::Idle,
+                indent: false,
             }],
             selected: 0,
             peek: DashboardPeek::Loading,
+            ..DashboardState::default()
         };
         assert_eq!(idle.derive_peek(), DashboardPeek::Loading);
 
@@ -5234,9 +5849,11 @@ mod tests {
             rows: vec![DashboardRow {
                 session: dash_session("s", 0, true, None),
                 status: DashboardStatus::Busy,
+                indent: false,
             }],
             selected: 0,
             peek: DashboardPeek::Loading,
+            ..DashboardState::default()
         };
         assert_eq!(busy.derive_peek(), DashboardPeek::Loading);
     }
@@ -5268,10 +5885,12 @@ mod tests {
             DashboardRow {
                 session: dash_session("a", 0, false, None),
                 status: DashboardStatus::Idle,
+                indent: false,
             },
             DashboardRow {
                 session: dash_session("b", 0, false, None),
                 status: DashboardStatus::Idle,
+                indent: false,
             },
         ];
         app.dashboard.selected = 1;
@@ -5288,6 +5907,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("s", 0, false, None),
             status: DashboardStatus::AwaitingPermission(dash_perm("s")),
+            indent: false,
         }];
         app.update(Msg::PermissionReply {
             id: "perm_s".into(),
@@ -5305,6 +5925,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("s", 0, false, None),
             status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+            indent: false,
         }];
         app.update(Msg::QuestionReply {
             id: "que_s".into(),
@@ -5322,6 +5943,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("s", 0, false, None),
             status: DashboardStatus::AwaitingPermission(dash_perm("s")),
+            indent: false,
         }];
         app.dashboard.selected = 0;
         app.dashboard.peek = DashboardPeek::Permission;
@@ -5348,10 +5970,12 @@ mod tests {
             DashboardRow {
                 session: dash_session("a", 0, false, None),
                 status: DashboardStatus::AwaitingPermission(dash_perm("a")),
+                indent: false,
             },
             DashboardRow {
                 session: dash_session("b", 0, false, None),
                 status: DashboardStatus::AwaitingPermission(dash_perm("b")),
+                indent: false,
             },
         ];
         // Selected row is "b"; the reply is for "a".
@@ -5382,6 +6006,7 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("s", 0, false, None),
             status: DashboardStatus::AwaitingQuestion(dash_single_question("s")),
+            indent: false,
         }];
         app.dashboard.selected = 0;
         app.dashboard.peek = DashboardPeek::Question { highlight: 0 };
@@ -5407,10 +6032,12 @@ mod tests {
             DashboardRow {
                 session: dash_session("a", 0, false, None),
                 status: DashboardStatus::AwaitingQuestion(dash_single_question("a")),
+                indent: false,
             },
             DashboardRow {
                 session: dash_session("b", 0, false, None),
                 status: DashboardStatus::AwaitingQuestion(dash_single_question("b")),
+                indent: false,
             },
         ];
         app.dashboard.selected = 1;
@@ -5440,10 +6067,311 @@ mod tests {
         app.dashboard.rows = vec![DashboardRow {
             session: dash_session("stale", 0, false, None),
             status: DashboardStatus::Idle,
+            indent: false,
         }];
         app.open_dashboard();
         assert!(matches!(app.overlay, Overlay::Dashboard));
         assert!(app.dashboard.rows.is_empty(), "stale rows cleared on open");
+    }
+
+    #[test]
+    fn open_dashboard_preserves_pinned_but_resets_filter_and_mode() {
+        let mut app = App::new();
+        app.dashboard.pinned.insert("fav".to_string());
+        app.dashboard.filter = "stale filter".to_string();
+        app.dashboard.mode = DashboardMode::Filter;
+        app.open_dashboard();
+        assert!(app.dashboard.pinned.contains("fav"), "pins survive reopen");
+        assert_eq!(app.dashboard.filter, "", "filter resets on reopen");
+        assert_eq!(
+            app.dashboard.mode,
+            DashboardMode::Browsing,
+            "mode resets on reopen"
+        );
+    }
+
+    #[test]
+    fn session_busy_event_flips_matching_row_in_place() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session("a", 0, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session("b", 0, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+        ];
+        app.dashboard.selected = 1;
+        app.dashboard.peek = DashboardPeek::Message("b's message".into());
+        app.update(Msg::Event(ServerEvent::SessionBusy {
+            session_id: "a".into(),
+        }));
+        assert!(matches!(
+            app.dashboard.rows[0].status,
+            DashboardStatus::Busy
+        ));
+        assert_eq!(
+            app.dashboard.selected, 1,
+            "flipping a non-selected row must not move selection"
+        );
+        assert_eq!(
+            app.dashboard.peek,
+            DashboardPeek::Message("b's message".into()),
+            "flipping a non-selected row must not touch the selected row's peek"
+        );
+    }
+
+    #[test]
+    fn session_idle_event_for_selected_row_rederives_peek() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("a", 0, true, None),
+            status: DashboardStatus::Busy,
+            indent: false,
+        }];
+        app.dashboard.selected = 0;
+        app.dashboard.peek = DashboardPeek::Message("stale busy-row peek".into());
+        app.update(Msg::Event(ServerEvent::SessionIdle {
+            session_id: "a".into(),
+        }));
+        assert!(matches!(
+            app.dashboard.rows[0].status,
+            DashboardStatus::Idle
+        ));
+        assert_eq!(
+            app.dashboard.peek,
+            DashboardPeek::Loading,
+            "flipping the selected row re-derives peek (Idle -> Loading, \
+             which triggers the async re-fetch)"
+        );
+    }
+
+    #[test]
+    fn session_busy_event_does_not_clobber_pending_ask() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("a", 0, false, None),
+            status: DashboardStatus::AwaitingPermission(dash_perm("a")),
+            indent: false,
+        }];
+        app.dashboard.selected = 0;
+        app.dashboard.peek = DashboardPeek::Permission;
+        app.update(Msg::Event(ServerEvent::SessionBusy {
+            session_id: "a".into(),
+        }));
+        assert!(
+            matches!(
+                app.dashboard.rows[0].status,
+                DashboardStatus::AwaitingPermission(_)
+            ),
+            "a pending ask must take precedence over a bare busy push event"
+        );
+        assert_eq!(app.dashboard.peek, DashboardPeek::Permission);
+    }
+
+    #[test]
+    fn session_busy_event_for_unknown_session_is_a_no_op() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("a", 0, false, None),
+            status: DashboardStatus::Idle,
+            indent: false,
+        }];
+        app.update(Msg::Event(ServerEvent::SessionBusy {
+            session_id: "unrelated".into(),
+        }));
+        assert!(matches!(
+            app.dashboard.rows[0].status,
+            DashboardStatus::Idle
+        ));
+    }
+
+    #[test]
+    fn session_created_event_flags_refetch_only_when_dashboard_open() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.update(Msg::Event(ServerEvent::SessionCreated {
+            session_id: "new".into(),
+            title: None,
+            parent_id: None,
+        }));
+        assert!(app.dashboard.needs_refetch);
+
+        let mut app2 = App::new();
+        // Dashboard not open.
+        app2.update(Msg::Event(ServerEvent::SessionCreated {
+            session_id: "new".into(),
+            title: None,
+            parent_id: None,
+        }));
+        assert!(!app2.dashboard.needs_refetch);
+    }
+
+    #[test]
+    fn workflow_started_event_flags_refetch_only_when_dashboard_open() {
+        let w = crate::sse::WorkflowMsg {
+            phase: WfPhase::Started,
+            session: "ses".into(),
+            kind: "sdd".into(),
+            arg: None,
+            task_index: None,
+            status: None,
+            notes: String::new(),
+            ok: None,
+            summary: None,
+            error: None,
+        };
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.update(Msg::Event(ServerEvent::Workflow(w.clone())));
+        assert!(app.dashboard.needs_refetch);
+
+        let mut app2 = App::new();
+        app2.update(Msg::Event(ServerEvent::Workflow(w)));
+        assert!(!app2.dashboard.needs_refetch);
+    }
+
+    #[test]
+    fn dashboard_loaded_clears_needs_refetch() {
+        let mut app = App::new();
+        app.dashboard.needs_refetch = true;
+        app.update(Msg::DashboardLoaded {
+            sessions: vec![],
+            permissions: vec![],
+            questions: vec![],
+        });
+        assert!(!app.dashboard.needs_refetch);
+    }
+
+    #[test]
+    fn dashboard_toggle_pin_moves_row_to_top_and_keeps_selection() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session("a", 30, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session("b", 20, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+        ];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
+        app.dashboard.selected = 1; // "b"
+        app.update(Msg::DashboardTogglePin);
+        assert!(app.dashboard.pinned.contains("b"));
+        let order: Vec<&str> = app
+            .dashboard
+            .rows
+            .iter()
+            .map(|r| r.session.id.as_str())
+            .collect();
+        assert_eq!(order, vec!["b", "a"], "pinned row floats to top");
+        assert_eq!(
+            app.dashboard.rows[app.dashboard.selected].session.id, "b",
+            "selection follows the toggled row, not its old index"
+        );
+
+        // Toggling again unpins it.
+        app.update(Msg::DashboardTogglePin);
+        assert!(!app.dashboard.pinned.contains("b"));
+    }
+
+    #[test]
+    fn dashboard_toggle_pin_on_child_row_is_a_no_op() {
+        // `apply_pin_and_filter` only partitions primary rows, so pinning an
+        // indented child would silently do nothing (no reorder, no glyph) —
+        // the toggle must skip it rather than let its id sit uselessly in
+        // `pinned`.
+        let mut app = App::new();
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session("parent", 30, false, None),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session("child", 20, false, None),
+                status: DashboardStatus::Idle,
+                indent: true,
+            },
+        ];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
+        app.dashboard.selected = 1; // "child"
+        app.update(Msg::DashboardTogglePin);
+        assert!(
+            app.dashboard.pinned.is_empty(),
+            "toggling pin on a child row must not insert its id"
+        );
+        assert_eq!(
+            app.dashboard.selected, 1,
+            "selection is unchanged since nothing was toggled"
+        );
+    }
+
+    #[test]
+    fn dashboard_filter_changed_applies_live_and_preserves_selection() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: dash_session_titled("alpha", 20, None, "fix login bug"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: dash_session_titled("beta", 10, None, "unrelated"),
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+        ];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
+        app.dashboard.selected = 0; // "alpha"
+        app.dashboard.peek = DashboardPeek::Message("alpha's message".into());
+        app.update(Msg::DashboardFilterChanged("bug".into()));
+        assert_eq!(app.dashboard.filter, "bug");
+        assert_eq!(app.dashboard.rows.len(), 1);
+        assert_eq!(app.dashboard.rows[0].session.id, "alpha");
+        assert_eq!(
+            app.dashboard.selected, 0,
+            "the still-visible previously-selected row stays selected"
+        );
+        assert_eq!(
+            app.dashboard.peek,
+            DashboardPeek::Message("alpha's message".into()),
+            "same row still selected -> peek must not flicker back to Loading"
+        );
+    }
+
+    #[test]
+    fn dashboard_session_created_inserts_row_and_selects_it() {
+        let mut app = App::new();
+        app.dashboard.rows = vec![DashboardRow {
+            session: dash_session("existing", 10, false, None),
+            status: DashboardStatus::Idle,
+            indent: false,
+        }];
+        app.dashboard.all_rows = app.dashboard.rows.clone();
+        let new_session = dash_session("new", 20, false, None);
+        app.update(Msg::DashboardSessionCreated(new_session));
+        assert_eq!(app.dashboard.rows.len(), 2);
+        assert_eq!(
+            app.dashboard.rows[app.dashboard.selected].session.id, "new",
+            "the newly created session is selected"
+        );
+    }
+
+    #[test]
+    fn create_dashboard_session_resets_mode_to_browsing() {
+        let mut app = App::new();
+        app.dashboard.mode = DashboardMode::NewSession("my title".into());
+        app.update(Msg::CreateDashboardSession("my title".into()));
+        assert_eq!(app.dashboard.mode, DashboardMode::Browsing);
     }
 
     #[test]

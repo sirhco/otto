@@ -36,7 +36,7 @@ pub use hook_escalation::{
 pub use hooks::RtkHook;
 pub use lsp::LspHandle;
 pub use registry::ToolRegistry;
-pub use subagent::{SubagentRequest, SubagentSpawner};
+pub use subagent::{SubagentOrigin, SubagentRequest, SubagentSpawner};
 pub use tool::{
     AllowAll, Attachment, DenyAllQuestions, ExecuteResult, MetadataSink, NoopSink,
     PermissionDenied, PermissionGate, PermissionRequest, QuestionGate, QuestionOption,

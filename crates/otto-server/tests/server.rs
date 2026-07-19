@@ -246,6 +246,43 @@ async fn session_crud() {
 }
 
 #[tokio::test]
+async fn session_create_emits_sse_frame() {
+    let base = spawn(plain_runtime().await, no_auth()).await;
+    let http = reqwest::Client::new();
+
+    // Open the /event stream, then create a session and confirm a
+    // `session.created` frame with the sessionID/title/parentID arrives.
+    let event_resp = http.get(format!("{base}/event")).send().await.unwrap();
+    let mut body = event_resp.bytes_stream();
+    // Drain the initial `server.connected` frame.
+    let _ = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("initial frame within 2s");
+
+    let created: Value = http
+        .post(format!("{base}/session"))
+        .json(&json!({ "title": "Hello" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let frame = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("a session.created frame within 2s")
+        .expect("a chunk")
+        .expect("chunk ok");
+    let text = String::from_utf8_lossy(&frame);
+    assert!(text.contains("session.created"), "frame: {text}");
+    assert!(text.contains(&id), "frame: {text}");
+    assert!(text.contains("\"title\":\"Hello\""), "frame: {text}");
+    assert!(text.contains("\"parentID\":null"), "frame: {text}");
+}
+
+#[tokio::test]
 async fn prompt_streams_sse_and_persists() {
     let (factory, calls) = ScriptedRouteFactory::new(vec![text_turn("t1", "done")]);
     let runtime = Arc::new(
@@ -298,6 +335,81 @@ async fn prompt_streams_sse_and_persists() {
         .unwrap();
     let dump = msgs.to_string();
     assert!(dump.contains("done"), "messages: {dump}");
+}
+
+#[tokio::test]
+async fn prompt_emits_busy_and_idle_sse_frames() {
+    let (factory, _calls) = ScriptedRouteFactory::new(vec![text_turn("t1", "done")]);
+    let runtime = Arc::new(
+        Runtime::in_memory(Config::default())
+            .await
+            .unwrap()
+            .with_route_factory(factory),
+    );
+    let base = spawn(runtime, no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let created: Value = http
+        .post(format!("{base}/session"))
+        .json(&json!({ "title": "BusyIdle" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Open the /event stream, then run a turn and confirm `session.busy`
+    // fires before the turn's events and `session.idle` fires once the
+    // stream settles at the `runs.remove` chokepoint (success, provider
+    // error, and cancellation all funnel through it alike).
+    let event_resp = http.get(format!("{base}/event")).send().await.unwrap();
+    let mut body = event_resp.bytes_stream();
+    // Drain the initial `server.connected` frame.
+    let _ = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("initial frame within 2s");
+
+    // Fully drain the prompt's own SSE body so the turn (and the
+    // `session.idle` emission at its chokepoint) runs to completion.
+    let resp = http
+        .post(format!("{base}/session/{id}/message"))
+        .json(&json!({ "parts": [{ "type": "text", "text": "hi" }] }))
+        .send()
+        .await
+        .unwrap();
+    let _ = resp.text().await.unwrap();
+
+    // Collect /event frames until `session.idle` shows up (or give up).
+    let mut seen = String::new();
+    let mut busy_at = None;
+    let mut idle_at = None;
+    for _ in 0..20 {
+        let Ok(Some(Ok(frame))) = tokio::time::timeout(Duration::from_secs(2), body.next()).await
+        else {
+            break;
+        };
+        let text = String::from_utf8_lossy(&frame).into_owned();
+        if busy_at.is_none() && text.contains("session.busy") {
+            busy_at = Some(seen.len());
+        }
+        if idle_at.is_none() && text.contains("session.idle") {
+            idle_at = Some(seen.len());
+        }
+        seen.push_str(&text);
+        if idle_at.is_some() {
+            break;
+        }
+    }
+
+    assert!(busy_at.is_some(), "no session.busy frame seen: {seen}");
+    assert!(idle_at.is_some(), "no session.idle frame seen: {seen}");
+    assert!(
+        seen.contains(&format!("\"sessionID\":\"{id}\"")),
+        "frames: {seen}"
+    );
+    assert!(busy_at < idle_at, "busy should precede idle: {seen}");
 }
 
 #[tokio::test]
@@ -1015,6 +1127,55 @@ async fn file_list_route_returns_workspace_files() {
     let dir_names: Vec<&str> = dirs.iter().filter_map(|v| v.as_str()).collect();
     assert!(dir_names.contains(&"nested"), "dirs: {body}");
     assert_eq!(body["truncated"], false, "truncated: {body}");
+}
+
+// -- workflow ------------------------------------------------------------
+
+/// `POST /workflow/{kind}` must stamp the workflow's root session with
+/// `metadata.kind == "workflow_root"` and `metadata.workflowKind == <kind>`
+/// (otto extension, no opencode analog — feeds the multi-agent dashboard)
+/// synchronously, before the workflow itself runs. The `arg` here points at a
+/// nonexistent plan file, so the engine fails once it runs on its detached
+/// background task; that's fine — the assertion only needs the session to
+/// exist with the stamped metadata, not the workflow to complete.
+#[tokio::test]
+async fn workflow_run_stamps_root_session_metadata() {
+    // `workflow_run` discovers a git root (for its worktree context) before
+    // returning, so the runtime's directory must sit inside a real repo —
+    // unlike `plain_runtime()`, which points at a bare temp dir. Point it at
+    // this crate's own directory, which lives inside the otto repo/worktree.
+    let (factory, _) = ScriptedRouteFactory::new(vec![]);
+    let runtime = Arc::new(
+        Runtime::in_memory(Config::default())
+            .await
+            .unwrap()
+            .with_route_factory(factory)
+            .with_directory(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+    );
+    let base = spawn(runtime, no_auth()).await;
+    let http = reqwest::Client::new();
+
+    let resp = http
+        .post(format!("{base}/workflow/plan"))
+        .json(&json!({ "arg": "/nonexistent/plan.md" }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let created: Value = resp.json().await.unwrap();
+    assert!(status.is_success(), "status {status}: {created}");
+    let id = created["session"].as_str().unwrap().to_string();
+
+    let got: Value = http
+        .get(format!("{base}/session/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["metadata"]["kind"], "workflow_root", "session: {got}");
+    assert_eq!(got["metadata"]["workflowKind"], "plan", "session: {got}");
 }
 
 // -- run-failure surfacing ---------------------------------------------------

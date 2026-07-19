@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use otto_storage::model::MessageId;
-use otto_tools::{SubagentRequest, SubagentSpawner};
+use otto_tools::{SubagentOrigin, SubagentRequest, SubagentSpawner};
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 
@@ -13,20 +13,24 @@ use crate::error::WfError;
 /// Run a judgment node: send `prompt` to `agent` (a fresh child session via the
 /// spawner), then parse the returned text as JSON `T`. On a parse failure it
 /// reprompts ONCE with an explicit "return only JSON" instruction before
-/// giving up with `WfError::Parse`.
+/// giving up with `WfError::Parse`. `kind` is the calling workflow engine's
+/// kind string (e.g. `"tdd"`), tagged onto the spawned child's
+/// `SubagentRequest::origin` — this module is shared across engines, so it
+/// cannot assume one.
 pub async fn judge<T: DeserializeOwned>(
     spawner: &Arc<dyn SubagentSpawner>,
     agent: &str,
     parent_session_id: &str,
     prompt: String,
     abort: CancellationToken,
+    kind: &str,
 ) -> Result<T, WfError> {
-    let text = spawn_text(spawner, agent, parent_session_id, &prompt, &abort).await?;
+    let text = spawn_text(spawner, agent, parent_session_id, &prompt, &abort, kind).await?;
     if let Ok(v) = serde_json::from_str::<T>(text.trim()) {
         return Ok(v);
     }
     let reprompt = format!("{prompt}\n\nReturn ONLY valid JSON, no prose, no code fences.");
-    let text2 = spawn_text(spawner, agent, parent_session_id, &reprompt, &abort).await?;
+    let text2 = spawn_text(spawner, agent, parent_session_id, &reprompt, &abort, kind).await?;
     serde_json::from_str::<T>(text2.trim()).map_err(|e| WfError::Parse(e.to_string()))
 }
 
@@ -36,6 +40,7 @@ async fn spawn_text(
     parent_session_id: &str,
     prompt: &str,
     abort: &CancellationToken,
+    kind: &str,
 ) -> Result<String, WfError> {
     let req = SubagentRequest {
         subagent_type: agent.to_string(),
@@ -51,6 +56,9 @@ async fn spawn_text(
         // to the TUI. Leave `event_tx: None` so no tap is attached.
         event_tx: None,
         directory: None,
+        origin: SubagentOrigin::Workflow {
+            kind: kind.to_string(),
+        },
     };
     spawner.spawn(req).await.map_err(WfError::from)
 }
@@ -113,6 +121,7 @@ mod tests {
             "ses_x",
             "assess".to_string(),
             CancellationToken::new(),
+            "tdd",
         )
         .await
         .unwrap();
@@ -130,6 +139,7 @@ mod tests {
             "ses_x",
             "assess".to_string(),
             CancellationToken::new(),
+            "tdd",
         )
         .await
         .unwrap();
@@ -145,6 +155,7 @@ mod tests {
             "ses_x",
             "assess".to_string(),
             CancellationToken::new(),
+            "tdd",
         )
         .await;
         assert!(matches!(r, Err(WfError::Parse(_))));

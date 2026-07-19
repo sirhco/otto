@@ -274,6 +274,39 @@ impl Store {
         Ok(())
     }
 
+    /// Shallow-merges `patch` over a session's existing `metadata` (fetch,
+    /// merge, single `UPDATE`), preserving unrelated existing keys — patch
+    /// keys overwrite same-named existing keys. A session with no metadata
+    /// (or non-object metadata) starts from an empty object. Otto extension —
+    /// no opencode analog — added to tag session provenance (e.g.
+    /// `{"kind": "workflow_root", "workflowKind": "sdd"}`) for the
+    /// multi-agent dashboard without a schema migration.
+    ///
+    /// # Errors
+    /// Returns a [`StorageError`] on SQLite or JSON failure.
+    pub async fn update_session_metadata(
+        &self,
+        id: &SessionId,
+        patch: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let existing = self.get_session(id).await?.and_then(|s| s.metadata);
+        let mut merged = existing
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let (Some(merged_obj), Some(patch_obj)) = (merged.as_object_mut(), patch.as_object()) {
+            for (k, v) in patch_obj {
+                merged_obj.insert(k.clone(), v.clone());
+            }
+        }
+        let metadata = serde_json::to_string(&merged)?;
+        sqlx::query("UPDATE session SET metadata = ? WHERE id = ?")
+            .bind(metadata)
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Fetches a session by id.
     ///
     /// # Errors

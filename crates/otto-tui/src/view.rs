@@ -582,7 +582,10 @@ fn render_scrolled(
         .saturating_sub(1);
     let residual = offset.saturating_sub(line_wrap_starts.get(idx).copied().unwrap_or(0));
     let para = Paragraph::new(lines[idx.min(lines.len())..].to_vec()).wrap(Wrap { trim: false });
-    frame.render_widget(para.scroll((residual.min(u32::from(u16::MAX)) as u16, 0)), area);
+    frame.render_widget(
+        para.scroll((residual.min(u32::from(u16::MAX)) as u16, 0)),
+        area,
+    );
 }
 
 /// Restyle the matched substrings of an active search in place. For each line,
@@ -997,13 +1000,20 @@ fn question_overlay(
 /// glyph) on top, the selected row's peek/reply panel below. Mirrors
 /// `question_overlay`'s direct `Line`-styling (a plain-string body would
 /// lose the status-color coding) and `list_overlay`'s dynamic-height sizing.
+///
+/// Task 8 additions, all still inside this one overlay (no separate render
+/// path): a pin glyph (`★`) prefix for rows in `dash.pinned`, an indent plus
+/// a dim "workflow task" label for `row.indent` (workflow-task child) rows,
+/// and — when `dash.mode` is `Filter`/`NewSession` — an inline input line
+/// appended at the bottom of the same block, mirroring `text_input_overlay`'s
+/// `"> {query}▌"` cursor styling.
 fn dashboard_overlay(
     frame: &mut Frame,
     area: Rect,
     dash: &crate::state::DashboardState,
     theme: &crate::theme::Theme,
 ) {
-    use crate::state::{DashboardPeek, DashboardStatus};
+    use crate::state::{DashboardMode, DashboardPeek, DashboardStatus};
 
     let mut lines: Vec<Line> = Vec::new();
     if dash.rows.is_empty() {
@@ -1025,13 +1035,33 @@ fn dashboard_overlay(
             .title
             .clone()
             .unwrap_or_else(|| row.session.id.clone());
-        let text = format!("{glyph} {title}");
-        let line = if i == dash.selected {
-            Line::from(Span::styled(text, theme.selection))
+        // A plain leading-space indent would be silently eaten by this
+        // block's `Wrap { trim: true }` (trims leading whitespace per
+        // line), so the child marker has to be a non-whitespace glyph.
+        let indent = if row.indent { "↳ " } else { "" };
+        // Pinning only affects primary-row ordering (`apply_pin_and_filter`
+        // partitions by parent, a pinned child id is a silent no-op) — never
+        // show the glyph on a child row, it would claim an effect that isn't
+        // there.
+        let pin = if !row.indent && dash.pinned.contains(&row.session.id) {
+            "★ "
         } else {
-            Line::from(Span::styled(text, style))
+            ""
         };
-        lines.push(line);
+        let text = format!("{indent}{pin}{glyph} {title}");
+        let base_style = if i == dash.selected {
+            theme.selection
+        } else {
+            style
+        };
+        let mut spans = vec![Span::styled(text, base_style)];
+        // Workflow-task child rows carry no live status of their own yet
+        // (see this plan's "Known deferred" note) — the dim label makes
+        // clear the glyph above is inherited/static, not a live signal.
+        if row.indent {
+            spans.push(Span::styled(" workflow task", theme.text_muted));
+        }
+        lines.push(Line::from(spans));
     }
     lines.push(Line::from(""));
     match &dash.peek {
@@ -1080,6 +1110,26 @@ fn dashboard_overlay(
                 theme.text_muted,
             )));
         }
+    }
+    // Task 6's `Filter`/`NewSession` sub-modes stay inside this same overlay
+    // rather than switching to `Overlay::TextInput` — render their live
+    // typed buffer as one more line at the bottom of the block.
+    match &dash.mode {
+        DashboardMode::Filter => {
+            lines.push(Line::from(vec![
+                Span::styled("/", theme.accent),
+                Span::raw(dash.filter.clone()),
+                Span::styled("▌", theme.text_muted),
+            ]));
+        }
+        DashboardMode::NewSession(title) => {
+            lines.push(Line::from(vec![
+                Span::styled("new session: ", theme.accent),
+                Span::raw(title.clone()),
+                Span::styled("▌", theme.text_muted),
+            ]));
+        }
+        DashboardMode::Browsing => {}
     }
     let h = (lines.len() as u16 + 2).clamp(3, area.height);
     let r = centered(area, 70, h);
@@ -1455,8 +1505,8 @@ mod tests {
     use crate::client::SessionInfo;
     use crate::sse::PermissionAsked;
     use crate::state::{
-        App, DashboardPeek, DashboardRow, DashboardStatus, Overlay, TodoItem, TodoStatus,
-        ToolStatus, TranscriptItem,
+        App, DashboardMode, DashboardPeek, DashboardRow, DashboardStatus, Overlay, TodoItem,
+        TodoStatus, ToolStatus, TranscriptItem,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -1625,10 +1675,7 @@ mod tests {
             c.lines.len(),
             "one start per assembled line"
         );
-        assert!(
-            c.wrap_total >= target_row,
-            "total covers every line's rows"
-        );
+        assert!(c.wrap_total >= target_row, "total covers every line's rows");
     }
 
     /// A render must publish the scroll bound so `App::scroll_up` clamps
@@ -3151,6 +3198,7 @@ mod tests {
                     ..Default::default()
                 },
                 status: DashboardStatus::Busy,
+                indent: false,
             },
             DashboardRow {
                 session: SessionInfo {
@@ -3159,6 +3207,7 @@ mod tests {
                     ..Default::default()
                 },
                 status: DashboardStatus::Idle,
+                indent: false,
             },
         ];
         let text = render(&app);
@@ -3182,6 +3231,7 @@ mod tests {
                 permission: "edit".into(),
                 patterns: vec!["*.rs".into()],
             }),
+            indent: false,
         }];
         app.dashboard.peek = DashboardPeek::Permission;
         let text = render(&app);
@@ -3195,5 +3245,144 @@ mod tests {
         app.overlay = Overlay::Dashboard;
         let text = render(&app);
         assert!(text.contains("no other sessions"));
+    }
+
+    #[test]
+    fn dashboard_overlay_shows_pin_glyph_for_pinned_row_only() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: SessionInfo {
+                    id: "pinned".into(),
+                    title: Some("pinned one".into()),
+                    ..Default::default()
+                },
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: SessionInfo {
+                    id: "plain".into(),
+                    title: Some("plain one".into()),
+                    ..Default::default()
+                },
+                status: DashboardStatus::Idle,
+                indent: false,
+            },
+            DashboardRow {
+                session: SessionInfo {
+                    id: "pinned-child".into(),
+                    title: Some("pinned child".into()),
+                    ..Default::default()
+                },
+                status: DashboardStatus::Idle,
+                indent: true,
+            },
+        ];
+        app.dashboard.pinned.insert("pinned".to_string());
+        // Pinning a child row is a no-op in `apply_pin_and_filter` (it only
+        // partitions primary rows) — its id can still land in `pinned`
+        // (e.g. selection landed there before the row became a child), but
+        // the glyph must not claim an effect the pin doesn't actually have.
+        app.dashboard.pinned.insert("pinned-child".to_string());
+        let text = render(&app);
+        assert!(
+            text.contains("★ ○ pinned one"),
+            "pinned row's line carries the ★ glyph before its status glyph and title: {text}"
+        );
+        assert!(
+            text.contains("○ plain one") && !text.contains("★ ○ plain one"),
+            "unpinned row has no ★: {text}"
+        );
+        assert!(
+            text.contains("○ pinned child") && !text.contains("★ ○ pinned child"),
+            "a pinned id on a child row does not render the glyph, pinning has no effect there: {text}"
+        );
+        assert_eq!(
+            text.matches('★').count(),
+            1,
+            "only the pinned primary row gets ★"
+        );
+    }
+
+    #[test]
+    fn dashboard_overlay_indents_workflow_task_child_with_dim_label() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.rows = vec![
+            DashboardRow {
+                session: SessionInfo {
+                    id: "root".into(),
+                    title: Some("root run".into()),
+                    ..Default::default()
+                },
+                status: DashboardStatus::Busy,
+                indent: false,
+            },
+            DashboardRow {
+                session: SessionInfo {
+                    id: "child".into(),
+                    title: Some("nested subtask".into()),
+                    ..Default::default()
+                },
+                status: DashboardStatus::Busy,
+                indent: true,
+            },
+        ];
+        let text = render(&app);
+        assert!(
+            text.contains("↳ ⋅ nested subtask workflow task"),
+            "indented row is prefixed with the ↳ indent marker and suffixed \
+             with the dim workflow-task label: {text}"
+        );
+        // The dim label lives on a cell styled with the muted theme token
+        // (DIM modifier), distinguishing it from the row's own status glyph
+        // style — verify by scanning the raw buffer, not the flattened string.
+        let backend = ratatui::backend::TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| view(&app, f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let has_dim_cell = buf.content().iter().any(|c| {
+            c.symbol() == "w"
+                && c.style()
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::DIM)
+        });
+        assert!(
+            has_dim_cell,
+            "the leading 'w' of 'workflow task' is styled dim"
+        );
+    }
+
+    #[test]
+    fn dashboard_overlay_filter_mode_renders_input_line_with_cursor() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.mode = DashboardMode::Filter;
+        app.dashboard.filter = "bug".to_string();
+        let text = render(&app);
+        assert!(
+            text.contains("/bug"),
+            "filter mode shows the live filter buffer prefixed by /: {text}"
+        );
+        assert!(text.contains('▌'), "filter input line shows a cursor");
+    }
+
+    #[test]
+    fn dashboard_overlay_new_session_mode_renders_input_line_with_cursor() {
+        let mut app = App::new();
+        app.overlay = Overlay::Dashboard;
+        app.dashboard.mode = DashboardMode::NewSession("my title".to_string());
+        let text = render(&app);
+        assert!(
+            text.contains("new session:"),
+            "new-session mode labels the input line: {text}"
+        );
+        assert!(
+            text.contains("my title"),
+            "new-session mode shows the live typed title: {text}"
+        );
+        assert!(text.contains('▌'), "new-session input line shows a cursor");
     }
 }

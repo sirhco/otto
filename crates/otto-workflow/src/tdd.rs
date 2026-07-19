@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use otto_storage::model::MessageId;
-use otto_tools::{SubagentRequest, SubagentSpawner};
+use otto_tools::{SubagentOrigin, SubagentRequest, SubagentSpawner};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
@@ -112,6 +112,7 @@ impl TddWorkflow {
                     self.feature
                 ),
                 abort.clone(),
+                "tdd",
             )
             .await?;
             if !m.meaningful {
@@ -210,6 +211,9 @@ impl TddWorkflow {
             // activity is tagged under task index 0.
             event_tx: crate::tap_subagent(0, subagent),
             directory: None,
+            origin: SubagentOrigin::Workflow {
+                kind: "tdd".to_string(),
+            },
         };
         spawner.spawn(req).await.map_err(WfError::from)
     }

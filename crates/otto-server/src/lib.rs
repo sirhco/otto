@@ -422,9 +422,20 @@ async fn session_list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let out: Vec<Value> = sessions
         .into_iter()
         .map(|session| {
-            let busy = state.runs.contains(session.id.as_str());
+            // A workflow-root session's run lives in `state.workflows`, not
+            // `state.runs` (only prompt turns register there) — otherwise a
+            // running workflow root always reports idle. Otto extension, no
+            // opencode analog.
+            let busy = state.runs.contains(session.id.as_str())
+                || state.workflows.contains(session.id.as_str());
+            let kind = session
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("kind"))
+                .cloned();
             let mut v = json!(session);
             v["busy"] = json!(busy);
+            v["kind"] = kind.unwrap_or(Value::Null);
             v
         })
         .collect();
@@ -449,6 +460,24 @@ async fn session_create(
         .get_session(&id)
         .await?
         .ok_or_else(|| ApiError::internal("created session vanished"))?;
+
+    // Fan a `session.created` frame out over `/event` so a dashboard-style
+    // client picks up new top-level sessions without polling `GET /session`.
+    // Workflow-root creation already emits its own `workflow.started` event as
+    // an equivalent reconcile signal, so this handler alone is sufficient.
+    // Otto extension, no opencode analog.
+    let _ = state.events.send(
+        json!({
+            "type": "session.created",
+            "properties": {
+                "sessionID": session.id,
+                "title": session.title,
+                "parentID": session.parent_id,
+            }
+        })
+        .to_string(),
+    );
+
     Ok(Json(session))
 }
 
@@ -644,6 +673,13 @@ async fn session_prompt(
     let abort = CancellationToken::new();
     let run_generation = state.runs.insert(&id, abort.clone());
 
+    // Fan `session.busy` out over `/event` so a dashboard-style client picks
+    // up a turn starting without polling `GET /session`. Otto extension, no
+    // opencode analog.
+    let _ = state
+        .events
+        .send(json!({ "type": "session.busy", "properties": { "sessionID": id } }).to_string());
+
     let RunHandle { mut events, join } =
         state
             .runtime
@@ -685,6 +721,14 @@ async fn session_prompt(
         // finished turn returns `false`. Generation-checked: if a newer turn
         // already replaced this one, its token stays registered.
         runs.remove(&run_session, run_generation);
+        // Fan `session.idle` out over `/event`. This chokepoint runs on every
+        // exit path (success, provider error, cancellation), so it stays in
+        // sync with the `session.busy` frame sent above. Otto extension, no
+        // opencode analog.
+        let _ = bus.send(
+            json!({ "type": "session.idle", "properties": { "sessionID": run_session } })
+                .to_string(),
+        );
     };
     // Keep-alive comments so a legitimately slow turn (tools running, or the
     // provider mid-generation) keeps bytes flowing to the client during quiet
@@ -1118,6 +1162,15 @@ async fn workflow_run(
             body.parent.clone().map(SessionId::from),
         )
         .await?;
+    // Tag the workflow's own root session for the multi-agent dashboard
+    // (otto extension — no opencode analog): distinguishes it from an
+    // ordinary chat session and its per-task workflow children.
+    rt.store()
+        .update_session_metadata(
+            &session_id,
+            json!({ "kind": "workflow_root", "workflowKind": kind }),
+        )
+        .await?;
     let spawner = rt
         .subagent_spawner(&agent, &model)
         .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -1526,5 +1579,86 @@ mod tests {
             "newer turn must still be cancellable after a stale remove"
         );
         assert!(second.is_cancelled());
+    }
+
+    /// `GET /session` must stamp each session's `kind` from
+    /// `metadata.kind` (string, or `null` for a plain/no-metadata session —
+    /// same always-present convention as `busy`), and `busy` must be `true`
+    /// for a session registered only in `state.workflows` (a running
+    /// workflow root, which never touches `state.runs`).
+    #[tokio::test]
+    async fn session_list_stamps_kind_and_workflow_busy() {
+        use otto_storage::{Session, SessionCacheTokens, SessionTokens};
+
+        let runtime = Arc::new(
+            Runtime::in_memory(otto_config::Config::default())
+                .await
+                .unwrap(),
+        );
+
+        async fn insert(runtime: &Runtime, id: &str, metadata: Option<Value>) {
+            let session = Session {
+                id: id.into(),
+                project_id: "prj_1".into(),
+                parent_id: None,
+                directory: "/work".into(),
+                title: "Test".into(),
+                version: "0.0.0".into(),
+                cost: 0.0,
+                tokens: SessionTokens {
+                    input: 0,
+                    output: 0,
+                    reasoning: 0,
+                    cache: SessionCacheTokens { read: 0, write: 0 },
+                },
+                metadata,
+                time_created: 0,
+                time_updated: 0,
+            };
+            runtime.store().create_session(&session).await.unwrap();
+        }
+
+        insert(&runtime, "ses_sub", Some(json!({"kind": "subagent"}))).await;
+        insert(&runtime, "ses_task", Some(json!({"kind": "workflow_task"}))).await;
+        insert(&runtime, "ses_plain", None).await;
+        insert(
+            &runtime,
+            "ses_wfroot",
+            Some(json!({"kind": "workflow_root"})),
+        )
+        .await;
+
+        let (events, _) = broadcast::channel::<String>(16);
+        let state = AppState {
+            runtime: runtime.clone(),
+            password: None,
+            events,
+            workflows: TokenRegistry::default(),
+            runs: TokenRegistry::default(),
+        };
+        // Register the workflow-root session only in `workflows`, never in
+        // `runs` — mirrors what `workflow_run` actually does.
+        state
+            .workflows
+            .insert("ses_wfroot", CancellationToken::new());
+
+        let Json(list) = session_list(State(state))
+            .await
+            .unwrap_or_else(|_| panic!("session_list failed"));
+        let by_id = |id: &str| -> Value {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == id)
+                .unwrap_or_else(|| panic!("missing session {id}"))
+                .clone()
+        };
+
+        assert_eq!(by_id("ses_sub")["kind"], "subagent");
+        assert_eq!(by_id("ses_task")["kind"], "workflow_task");
+        assert!(by_id("ses_plain")["kind"].is_null());
+
+        assert_eq!(by_id("ses_wfroot")["busy"], true, "workflow-only busy");
+        assert_eq!(by_id("ses_sub")["busy"], false, "no run/workflow token");
     }
 }

@@ -1,8 +1,8 @@
 //! Integration tests for the SQLite [`Store`].
 
 use otto_storage::model::{
-    Assistant, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part, PartKind,
-    SessionId, TokenCache, Tokens, User, UserModel, UserTime,
+    Assistant, AssistantPath, AssistantTime, Info, InfoBody, MessageId, Part, PartKind, SessionId,
+    TokenCache, Tokens, User, UserModel, UserTime,
 };
 use otto_storage::{Session, SessionCacheTokens, SessionTokens, Store};
 use serde_json::json;
@@ -113,7 +113,13 @@ fn text_part(id: &str, msg: &str, text: &str) -> Part {
 #[tokio::test]
 async fn session_crud() {
     let store = Store::open_in_memory().await.expect("open");
-    assert!(store.get_session(&sid("ses_1")).await.expect("get").is_none());
+    assert!(
+        store
+            .get_session(&sid("ses_1"))
+            .await
+            .expect("get")
+            .is_none()
+    );
 
     let s = session("ses_1");
     store.create_session(&s).await.expect("create");
@@ -153,6 +159,56 @@ async fn update_session_title_changes_only_title() {
             ..s
         },
         got
+    );
+}
+
+#[tokio::test]
+async fn update_session_metadata_merges_over_existing_metadata() {
+    let store = Store::open_in_memory().await.expect("open");
+    let s = session("ses_1"); // metadata: {"k": "v"}
+    store.create_session(&s).await.expect("create");
+
+    // Patch adds a new key and OVERWRITES an existing one — both must survive
+    // the merge, plus the untouched pre-existing key.
+    store
+        .update_session_metadata(
+            &sid("ses_1"),
+            json!({"kind": "workflow_root", "workflowKind": "sdd"}),
+        )
+        .await
+        .expect("update metadata");
+
+    let got = store
+        .get_session(&sid("ses_1"))
+        .await
+        .expect("get")
+        .expect("some");
+    assert_eq!(
+        got.metadata,
+        Some(json!({"k": "v", "kind": "workflow_root", "workflowKind": "sdd"}))
+    );
+    // Everything else is untouched.
+    assert_eq!(
+        Session {
+            metadata: got.metadata.clone(),
+            ..s
+        },
+        got
+    );
+
+    // A second patch overwriting an existing key preserves unrelated keys.
+    store
+        .update_session_metadata(&sid("ses_1"), json!({"kind": "workflow_task"}))
+        .await
+        .expect("update metadata again");
+    let got2 = store
+        .get_session(&sid("ses_1"))
+        .await
+        .expect("get")
+        .expect("some");
+    assert_eq!(
+        got2.metadata,
+        Some(json!({"k": "v", "kind": "workflow_task", "workflowKind": "sdd"}))
     );
 }
 

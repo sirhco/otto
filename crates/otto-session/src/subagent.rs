@@ -25,7 +25,9 @@ use otto_storage::model::{
     new_part_id,
 };
 use otto_storage::{Session, SessionTokens, Store};
-use otto_tools::{PermissionGate, SubagentRequest, SubagentSpawner, ToolError, ToolRegistry};
+use otto_tools::{
+    PermissionGate, SubagentOrigin, SubagentRequest, SubagentSpawner, ToolError, ToolRegistry,
+};
 use serde_json::json;
 
 use crate::run::{RunConfig, run_loop};
@@ -209,6 +211,14 @@ impl SubagentSpawner for SessionSubagentSpawner {
             _ => {
                 let id = SessionId::new_ascending();
                 let now = now_ms();
+                // `kind` tags the child session's provenance for the
+                // multi-agent dashboard (otto extension — no opencode
+                // analog): "subagent" for an ad-hoc `task`-tool dispatch,
+                // "workflow_task" for a workflow engine's automated one.
+                let kind = match &req.origin {
+                    SubagentOrigin::AdHocTool => "subagent",
+                    SubagentOrigin::Workflow { .. } => "workflow_task",
+                };
                 self.store
                     .create_session(&Session {
                         id: id.clone(),
@@ -219,7 +229,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
                         version: self.version.clone(),
                         cost: 0.0,
                         tokens: SessionTokens::default(),
-                        metadata: Some(json!({ "permission": child_ruleset })),
+                        metadata: Some(json!({ "permission": child_ruleset, "kind": kind })),
                         time_created: now,
                         time_updated: now,
                     })
