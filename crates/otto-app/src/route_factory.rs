@@ -186,7 +186,15 @@ impl RouteFactory for AuthRouteFactory {
 
         let (route, model): (Arc<dyn Route>, Model) = match provider {
             "anthropic" => {
-                let mut p = Anthropic::new(key.or(override_key), self.transport.clone());
+                // A Claude Pro/Max OAuth credential needs Bearer auth, not
+                // x-api-key — see `Anthropic::new_oauth`'s doc comment.
+                let mut p = if let Some(Credential::Oauth { access, .. }) =
+                    self.credential_for("anthropic")
+                {
+                    Anthropic::new_oauth(Secret::literal(access.clone()), self.transport.clone())
+                } else {
+                    Anthropic::new(key.or(override_key), self.transport.clone())
+                };
                 if let Some(base) = override_base {
                     p = p.with_base_url(base);
                 }
@@ -600,5 +608,33 @@ mod tests {
             .route_for(&ModelRef::parse("github-copilot/gpt-4o"))
             .expect("route builds for github-copilot");
         assert_eq!(route.id(), "openai-chat");
+    }
+
+    /// A stored `anthropic` Claude Pro/Max OAuth credential routes through
+    /// `Anthropic::new_oauth`, not `Anthropic::new` — confirmed indirectly
+    /// (the route still builds and resolves to the anthropic route id); the
+    /// actual Bearer-vs-x-api-key/anthropic-beta header difference this
+    /// selection produces is unit-tested directly on `Anthropic` in
+    /// `otto-llm`, since `route_for` returns an opaque `Arc<dyn Route>`.
+    #[test]
+    fn anthropic_oauth_credential_still_builds_a_route() {
+        let mut auth = AuthMap::new();
+        auth.insert(
+            "anthropic".into(),
+            Credential::Oauth {
+                refresh: "r".into(),
+                access: "sk-ant-oat01-x".into(),
+                expires: i64::MAX,
+                account_id: None,
+                enterprise_url: None,
+            },
+        );
+        let factory = AuthRouteFactory::new(auth, test_transport(), HashMap::new());
+
+        let (route, model) = factory
+            .route_for(&ModelRef::parse("anthropic/claude-sonnet-4-5"))
+            .expect("route builds for an OAuth-authenticated anthropic credential");
+        assert_eq!(route.id(), "anthropic");
+        assert_eq!(model.route_id, "anthropic");
     }
 }
