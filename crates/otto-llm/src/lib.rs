@@ -41,9 +41,7 @@ pub use error::LLMError;
 pub use message::{ContentPart, Message, Role, SystemPart, ToolChoice, ToolDefinition};
 pub use model::{Model, ModelCapabilities, ModelCost, ModelId, ModelLimits, ProviderId};
 pub use protocol::Protocol;
-pub use providers::{
-    Anthropic, Azure, Copilot, Google, OpenAI, OpenAICompatible, Provider, Vertex,
-};
+pub use providers::{Anthropic, Copilot, Google, OpenAI, OpenAICompatible, Provider, Vertex};
 pub use registry::{lookup, model_or_default, parse_model};
 pub use request::{
     CacheHint, CacheKind, CachePolicy, CachePolicyObject, CachePreset, GenerationOptions,

@@ -17,7 +17,6 @@
 //! [`Protocol`]: crate::protocol::Protocol
 
 mod anthropic;
-mod azure;
 mod copilot;
 mod google;
 mod openai;
@@ -31,7 +30,6 @@ use crate::model::Model;
 use crate::route::Route;
 
 pub use anthropic::Anthropic;
-pub use azure::Azure;
 pub use copilot::Copilot;
 pub use google::Google;
 pub use openai::OpenAI;

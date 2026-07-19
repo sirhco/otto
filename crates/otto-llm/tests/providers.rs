@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use otto_llm::Secret;
 use otto_llm::auth::AuthDef;
-use otto_llm::providers::{Anthropic, Azure, Google, OpenAI, OpenAICompatible, Provider, Vertex};
+use otto_llm::providers::{Anthropic, Google, OpenAI, OpenAICompatible, Provider, Vertex};
 use otto_llm::transport::HttpTransport;
 
 fn transport() -> Arc<HttpTransport> {
@@ -166,19 +166,6 @@ fn xai_profile_uses_x_ai_base_url_and_bearer_auth() {
         headers.get("authorization").map(String::as_str),
         Some("Bearer xk")
     );
-}
-
-#[test]
-fn azure_endpoint_and_auth() {
-    let t = std::sync::Arc::new(HttpTransport::new());
-    let p = Azure::new("myres".into(), Some(Secret::literal("ak")), t);
-    let url = p.endpoint().url();
-    assert!(url.starts_with("https://myres.openai.azure.com/openai/v1/chat/completions"));
-    assert!(url.contains("api-version=v1"));
-    let mut headers = std::collections::BTreeMap::new();
-    p.auth().apply(&mut headers).unwrap();
-    assert_eq!(headers.get("api-key").map(String::as_str), Some("ak"));
-    assert!(!headers.contains_key("authorization"));
 }
 
 #[test]

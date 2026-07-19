@@ -86,7 +86,6 @@ pub fn route_id_for(provider_id: &str) -> &'static str {
     match provider_id {
         "anthropic" => "anthropic",
         "openai" => "openai-chat",
-        "azure" => "azure-openai-chat",
         "google" => "gemini",
         _ => "openai-compatible-chat",
     }

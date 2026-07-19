@@ -7,8 +7,8 @@ use std::sync::Arc;
 use otto_agent::ModelRef;
 use otto_auth::{AuthMap, Credential};
 use otto_llm::{
-    Anthropic, Azure, Copilot, Google, HttpTransport, Model, OpenAI, OpenAICompatible, Provider,
-    Route, Secret, Vertex,
+    Anthropic, Copilot, Google, HttpTransport, Model, OpenAI, OpenAICompatible, Provider, Route,
+    Secret, Vertex,
 };
 
 use crate::{Error, Result};
@@ -135,30 +135,10 @@ impl AuthRouteFactory {
 
     /// The stored [`Credential`] for `provider`, if any — lets a provider arm
     /// read metadata beyond the plain key material `secret_for` yields (e.g.
-    /// Azure's `resourceName`).
+    /// GitHub Copilot's `enterprise_url`).
     fn credential_for(&self, provider: &str) -> Option<&Credential> {
         self.auth.get(provider)
     }
-}
-
-/// Resolve the Azure resource name: the stored credential's `resourceName`
-/// metadata takes priority, falling back to `env` (the caller passes
-/// `AZURE_RESOURCE_NAME`, if set). A pure function so the missing-resource
-/// error path is unit-testable without mutating process env.
-fn resolve_azure_resource(cred: Option<&Credential>, env: Option<String>) -> Result<String> {
-    cred.and_then(|c| match c {
-        Credential::Api {
-            metadata: Some(m), ..
-        } => m.get("resourceName").cloned(),
-        _ => None,
-    })
-    .or(env)
-    .ok_or_else(|| {
-        Error::Route(
-            "azure: no resourceName (set auth metadata resourceName or AZURE_RESOURCE_NAME)"
-                .to_string(),
-        )
-    })
 }
 
 impl RouteFactory for AuthRouteFactory {
@@ -209,14 +189,6 @@ impl RouteFactory for AuthRouteFactory {
             }
             "xai" => {
                 let p = OpenAICompatible::xai(key, self.transport.clone());
-                (Arc::from(p.route(model_id)), p.model(model_id))
-            }
-            "azure" => {
-                let resource = resolve_azure_resource(
-                    self.credential_for("azure"),
-                    std::env::var("AZURE_RESOURCE_NAME").ok(),
-                )?;
-                let p = Azure::new(resource, key, self.transport.clone());
                 (Arc::from(p.route(model_id)), p.model(model_id))
             }
             "google" | "gemini" => {
@@ -302,48 +274,11 @@ impl RouteFactory for AuthRouteFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     /// A shared HTTP transport for tests that build a factory/provider
     /// end-to-end without touching the network.
     fn test_transport() -> Arc<HttpTransport> {
         Arc::new(HttpTransport::new())
-    }
-
-    /// A stored `resourceName` metadata entry wins even when the env fallback
-    /// is also present.
-    #[test]
-    fn resolve_azure_resource_prefers_credential_metadata() {
-        let mut metadata = BTreeMap::new();
-        metadata.insert("resourceName".to_string(), "myres".to_string());
-        let cred = Credential::Api {
-            key: "ak".into(),
-            metadata: Some(metadata),
-        };
-        let resource =
-            resolve_azure_resource(Some(&cred), Some("envres".to_string())).expect("resolved");
-        assert_eq!(resource, "myres");
-    }
-
-    /// No credential metadata → falls back to the env value.
-    #[test]
-    fn resolve_azure_resource_falls_back_to_env() {
-        let cred = Credential::Api {
-            key: "ak".into(),
-            metadata: None,
-        };
-        let resource =
-            resolve_azure_resource(Some(&cred), Some("envres".to_string())).expect("resolved");
-        assert_eq!(resource, "envres");
-    }
-
-    /// Neither credential metadata nor env → a clear error mentioning the
-    /// resource name.
-    #[test]
-    fn resolve_azure_resource_errors_when_neither_present() {
-        let err = resolve_azure_resource(None, None).expect_err("should error");
-        let msg = err.to_string();
-        assert!(msg.contains("resourceName"), "message was: {msg}");
     }
 
     /// Config-declared `limits` for a model land on the resolved [`Model`], so

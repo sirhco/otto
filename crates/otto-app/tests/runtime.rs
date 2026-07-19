@@ -446,62 +446,6 @@ async fn auth_route_factory_selects_provider() {
     assert_eq!(model.route_id, "openai-compatible-chat");
 }
 
-/// An Azure credential carrying `resourceName` metadata resolves to the
-/// azure-openai-chat route (reusing the openai-chat wire protocol).
-#[tokio::test]
-async fn auth_route_factory_resolves_azure_resource_name_from_metadata() {
-    let mut metadata = std::collections::BTreeMap::new();
-    metadata.insert("resourceName".to_string(), "myres".to_string());
-    let mut auth = AuthMap::new();
-    auth.insert(
-        "azure".into(),
-        Credential::Api {
-            key: "ak".into(),
-            metadata: Some(metadata),
-        },
-    );
-    let factory = AuthRouteFactory::new(auth, Arc::new(HttpTransport::new()), Default::default());
-
-    let (route, model) =
-        otto_app::RouteFactory::route_for(&factory, &ModelRef::parse("azure/gpt-4o"))
-            .expect("route");
-    assert_eq!(route.id(), "openai-chat");
-    assert_eq!(model.route_id, "azure-openai-chat");
-}
-
-/// An Azure credential with no `resourceName` metadata and no
-/// `AZURE_RESOURCE_NAME` env fallback errors clearly rather than building a
-/// bogus route.
-///
-/// Env manipulation is racy across parallel `#[tokio::test]`s, so this test
-/// only exercises the case where `AZURE_RESOURCE_NAME` genuinely happens to
-/// be unset in the test process; the resolution logic itself (including the
-/// missing-both-sources error path) is unit-tested directly in
-/// `otto_app::route_factory`'s `resolve_azure_resource` tests.
-#[tokio::test]
-async fn auth_route_factory_azure_without_metadata_falls_back_to_key_only() {
-    let mut auth = AuthMap::new();
-    auth.insert(
-        "azure".into(),
-        Credential::Api {
-            key: "ak".into(),
-            metadata: None,
-        },
-    );
-    let factory = AuthRouteFactory::new(auth, Arc::new(HttpTransport::new()), Default::default());
-
-    match otto_app::RouteFactory::route_for(&factory, &ModelRef::parse("azure/gpt-4o")) {
-        Ok((route, model)) => {
-            // AZURE_RESOURCE_NAME happened to be set in this environment.
-            assert_eq!(route.id(), "openai-chat");
-            assert_eq!(model.route_id, "azure-openai-chat");
-        }
-        Err(e) => {
-            assert!(e.to_string().contains("resourceName"));
-        }
-    }
-}
-
 /// `Runtime::subagent_spawner` wires the same private services
 /// (store/tools/permission/route_factory/project_id/version) `run_with_parts`
 /// builds inline — proving the extraction reaches everything it needs.
