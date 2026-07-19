@@ -67,6 +67,11 @@ pub struct Editor {
     lines: Vec<String>,
     row: usize,
     col: usize,
+    /// Sticky display-column target for consecutive `move_up`/`move_down`
+    /// calls, so moving through a short line and back to a longer one
+    /// restores the original column instead of snapping to end-of-line.
+    /// Cleared by every other cursor-affecting operation.
+    preferred_col: Option<u16>,
 }
 
 impl Editor {
@@ -76,6 +81,7 @@ impl Editor {
             lines: vec![String::new()],
             row: 0,
             col: 0,
+            preferred_col: None,
         }
     }
 
@@ -105,6 +111,50 @@ impl Editor {
             self.col = self.lines[self.row].len();
             self.lines[self.row].push_str(&cur);
         }
+    }
+
+    /// Move the cursor back one Unicode scalar, crossing to the end of the
+    /// previous line at column 0. No-op at the start of the buffer.
+    pub fn move_left(&mut self) {
+        self.preferred_col = None;
+        if self.col > 0 {
+            let prev = self.lines[self.row][..self.col]
+                .chars()
+                .next_back()
+                .expect("col > 0 implies a preceding char");
+            self.col -= prev.len_utf8();
+        } else if self.row > 0 {
+            self.row -= 1;
+            self.col = self.lines[self.row].len();
+        }
+    }
+
+    /// Move the cursor forward one Unicode scalar, crossing to the start of
+    /// the next line at end-of-line. No-op at the end of the buffer.
+    pub fn move_right(&mut self) {
+        self.preferred_col = None;
+        if self.col < self.lines[self.row].len() {
+            let next = self.lines[self.row][self.col..]
+                .chars()
+                .next()
+                .expect("col < len implies a following char");
+            self.col += next.len_utf8();
+        } else if self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.col = 0;
+        }
+    }
+
+    /// Move the cursor to the start of the current logical line.
+    pub fn move_home(&mut self) {
+        self.preferred_col = None;
+        self.col = 0;
+    }
+
+    /// Move the cursor to the end of the current logical line.
+    pub fn move_end(&mut self) {
+        self.preferred_col = None;
+        self.col = self.lines[self.row].len();
     }
 
     /// The character immediately before the cursor on the current row, if any.
@@ -855,6 +905,54 @@ mod tests {
         // cursor at start of line 2; backspace joins.
         e.backspace();
         assert_eq!(e.text(), "ab");
+    }
+
+    #[test]
+    fn move_left_right_step_by_char_not_byte() {
+        let mut e = Editor::new();
+        for c in "a世b".chars() {
+            e.insert(c);
+        }
+        assert_eq!(e.cursor(), (0, 5)); // 'a' (1B) + '世' (3B) + 'b' (1B)
+        e.move_left();
+        assert_eq!(e.cursor(), (0, 4)); // steps back over 'b' only
+        e.move_left();
+        assert_eq!(e.cursor(), (0, 1)); // steps back over '世' (3 bytes) at once
+        e.move_left();
+        assert_eq!(e.cursor(), (0, 0));
+        e.move_left(); // at buffer start: no-op
+        assert_eq!(e.cursor(), (0, 0));
+        e.move_right();
+        assert_eq!(e.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn move_left_at_line_start_joins_to_previous_line_end() {
+        let mut e = Editor::new();
+        e.insert('a');
+        e.newline();
+        e.insert('b');
+        assert_eq!(e.cursor(), (1, 1));
+        e.move_left(); // start of line 1 -> end of line 0
+        assert_eq!(e.cursor(), (1, 0));
+        e.move_left();
+        assert_eq!(e.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn move_right_at_line_end_advances_to_next_line_start() {
+        let mut e = Editor::new();
+        e.insert('a');
+        e.newline();
+        e.insert('b');
+        e.move_home();
+        e.move_left(); // (1,0) -> (0,1), end of line 0
+        e.move_right(); // end of line 0 -> start of line 1
+        assert_eq!(e.cursor(), (1, 0));
+        e.move_right(); // (1,0) -> (1,1), end of buffer
+        assert_eq!(e.cursor(), (1, 1));
+        e.move_right(); // at buffer end: no-op
+        assert_eq!(e.cursor(), (1, 1));
     }
 
     #[cfg(unix)]
