@@ -170,18 +170,38 @@ impl Editor {
         if target_vr < 0 || target_vr as usize >= rows.len() {
             return;
         }
-        let target = rows[target_vr as usize];
+        let target_vr = target_vr as usize;
+        let target = rows[target_vr];
+        let is_last_frag = rows
+            .get(target_vr + 1)
+            .is_none_or(|n| n.logical_row != target.logical_row);
         let row_text = &self.lines[target.logical_row][target.start..target.end];
+        let mut byte_off = None;
         let mut acc_w = 0u16;
-        let mut byte_off = row_text.len();
         for (idx, ch) in row_text.char_indices() {
             let cw = UnicodeWidthStr::width(&row_text[idx..idx + ch.len_utf8()]) as u16;
             if acc_w + cw > target_col {
-                byte_off = idx;
+                byte_off = Some(idx);
                 break;
             }
             acc_w += cw;
         }
+        let byte_off = byte_off.unwrap_or_else(|| {
+            if is_last_frag {
+                row_text.len()
+            } else {
+                // `target.end` belongs to the *next* row per `cursor_visual`'s
+                // convention (a cursor at the end of a non-final fragment maps
+                // to column 0 of the following row), so the furthest position
+                // that still resolves to *this* row is just before its last
+                // character.
+                row_text
+                    .char_indices()
+                    .last()
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0)
+            }
+        });
         self.row = target.logical_row;
         self.col = target.start + byte_off;
         self.preferred_col = Some(target_col);
@@ -1462,6 +1482,23 @@ mod tests {
         assert_eq!(e.cursor(), (0, 1));
         e.move_down(80);
         assert_eq!(e.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn move_up_from_natural_end_of_wrapped_line_lands_on_correct_visual_row() {
+        let mut e = Editor::new();
+        for c in "abcdefgh".chars() {
+            e.insert(c); // wraps to 2 visual rows at width 4; cursor naturally
+                         // ends at (1,4) — the exact end-of-row edge case that
+                         // triggered the bug (target_col == fragment width).
+        }
+        assert_eq!(e.cursor_visual(4), (1, 4));
+        e.move_up(4);
+        assert_eq!(
+            e.cursor_visual(4).0,
+            0,
+            "Up from the natural end of a wrapped line must land on visual row 0, not stay on row 1"
+        );
     }
 
     #[test]
