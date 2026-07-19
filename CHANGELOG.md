@@ -4,6 +4,23 @@ All notable changes to otto are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/) (pre-1.0: minor bumps may break).
 
+## [0.13.0] - 2026-07-19
+
+### Removed
+
+- **Bedrock, Azure, and nine unofficial OpenAI-compatible provider presets
+  (xai, deepseek, groq, togetherai, cerebras, fireworks, deepinfra, baseten,
+  openrouter) are no longer natively supported.** otto now natively supports
+  Anthropic, OpenAI, Gemini (Google + Vertex), and GitHub Copilot; every other
+  provider id — including the ones removed here — routes through the generic
+  `OpenAICompatible` catch-all, which is also how local/gateway tooling
+  (litellm, ollama, vllm) has always worked. Migration: replace a named
+  preset or the Azure config with `config.provider.<id>.options.baseURL` (and
+  `apiKey` if needed) pointing at the same endpoint the preset used — for
+  example, `provider.xai.options.baseURL = "https://api.x.ai/v1"`. Bedrock
+  has no generic equivalent (its AWS SigV4/event-stream wire format isn't
+  OpenAI-compatible) and is dropped without a replacement path.
+
 ## [0.12.0] - 2026-07-19
 
 ### Added
