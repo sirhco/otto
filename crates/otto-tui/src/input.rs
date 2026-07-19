@@ -86,11 +86,13 @@ impl Editor {
     }
 
     pub fn insert(&mut self, c: char) {
+        self.preferred_col = None;
         self.lines[self.row].insert(self.col, c);
         self.col += c.len_utf8();
     }
 
     pub fn newline(&mut self) {
+        self.preferred_col = None;
         let rest = self.lines[self.row].split_off(self.col);
         self.lines.insert(self.row + 1, rest);
         self.row += 1;
@@ -98,6 +100,7 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) {
+        self.preferred_col = None;
         if self.col > 0 {
             let prev = self.lines[self.row][..self.col]
                 .chars()
@@ -145,6 +148,45 @@ impl Editor {
         }
     }
 
+    /// Move the cursor up one visual (wrapped) row at display `width`,
+    /// crossing logical-line boundaries as needed. No-op at the first
+    /// visual row. Sets/reuses `preferred_col` for sticky-column behavior.
+    pub fn move_up(&mut self, width: u16) {
+        self.move_vertical(width, -1);
+    }
+
+    /// Move the cursor down one visual (wrapped) row at display `width`.
+    /// No-op at the last visual row. Sets/reuses `preferred_col`.
+    pub fn move_down(&mut self, width: u16) {
+        self.move_vertical(width, 1);
+    }
+
+    fn move_vertical(&mut self, width: u16, delta: i32) {
+        use unicode_width::UnicodeWidthStr;
+        let rows = wrap_rows(&self.lines, width);
+        let (cur_vr, cur_col) = self.cursor_visual(width);
+        let target_col = self.preferred_col.unwrap_or(cur_col);
+        let target_vr = cur_vr as i32 + delta;
+        if target_vr < 0 || target_vr as usize >= rows.len() {
+            return;
+        }
+        let target = rows[target_vr as usize];
+        let row_text = &self.lines[target.logical_row][target.start..target.end];
+        let mut acc_w = 0u16;
+        let mut byte_off = row_text.len();
+        for (idx, ch) in row_text.char_indices() {
+            let cw = UnicodeWidthStr::width(&row_text[idx..idx + ch.len_utf8()]) as u16;
+            if acc_w + cw > target_col {
+                byte_off = idx;
+                break;
+            }
+            acc_w += cw;
+        }
+        self.row = target.logical_row;
+        self.col = target.start + byte_off;
+        self.preferred_col = Some(target_col);
+    }
+
     /// Move the cursor to the start of the current logical line.
     pub fn move_home(&mut self) {
         self.preferred_col = None;
@@ -171,6 +213,7 @@ impl Editor {
     /// boundaries on `row` (the mention layer only ever calls this on the
     /// cursor's own row, so `col` is valid).
     pub fn replace_to_cursor(&mut self, row: usize, start_col: usize, text: &str) {
+        self.preferred_col = None;
         self.lines[row].replace_range(start_col..self.col, text);
         self.row = row;
         self.col = start_col + text.len();
@@ -1362,6 +1405,63 @@ mod tests {
         e.insert('世'); // width 2
         // width 10: one row, cursor at display col 2.
         assert_eq!(e.cursor_visual(10), (0, 2));
+    }
+
+    #[test]
+    fn move_down_up_crosses_soft_wrap_within_one_logical_line() {
+        let mut e = Editor::new();
+        for c in "abcdefgh".chars() {
+            e.insert(c); // one logical line, wraps to 2 visual rows at width 4
+        }
+        e.move_home();
+        assert_eq!(e.cursor_visual(4), (0, 0));
+        e.move_down(4);
+        assert_eq!(e.cursor_visual(4), (1, 0)); // second visual row, same column
+        e.move_up(4);
+        assert_eq!(e.cursor_visual(4), (0, 0));
+    }
+
+    #[test]
+    fn move_down_crosses_logical_line_boundary() {
+        let mut e = Editor::new();
+        e.insert('a');
+        e.newline();
+        e.insert('b');
+        e.move_home();
+        // move_home only resets col on the current (last) row; jump to row 0 col 0.
+        e.move_up(80);
+        assert_eq!(e.cursor(), (0, 0));
+        e.move_down(80);
+        assert_eq!(e.cursor(), (1, 0));
+    }
+
+    #[test]
+    fn move_up_down_preferred_column_sticks_across_shorter_line() {
+        let mut e = Editor::new();
+        for c in "abcdef".chars() {
+            e.insert(c);
+        }
+        e.newline();
+        e.insert('x'); // short second line: "x"
+        e.newline();
+        for c in "abcdef".chars() {
+            e.insert(c); // long third line
+        }
+        // cursor at end of "abcdef" (col 6) on row 2.
+        e.move_up(80); // -> row 1 ("x"), clamped to col 1 (end of short line)
+        assert_eq!(e.cursor(), (1, 1));
+        e.move_up(80); // -> row 0, preferred column 6 restored
+        assert_eq!(e.cursor(), (0, 6));
+    }
+
+    #[test]
+    fn move_up_at_first_row_and_down_at_last_row_are_no_ops() {
+        let mut e = Editor::new();
+        e.insert('a');
+        e.move_up(80);
+        assert_eq!(e.cursor(), (0, 1));
+        e.move_down(80);
+        assert_eq!(e.cursor(), (0, 1));
     }
 
     #[test]
